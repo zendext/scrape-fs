@@ -1,0 +1,259 @@
+# 文件系统与对象存储
+
+[English](../en/filesystem.md) | **简体中文**
+
+本文定义 Directory、OverlayFile、权限、rename、object store 和缓存语义。ProjectionFile 的专用语义见 [Projection 模型](projection.md)。
+
+## 1. 文件属性
+
+Directory 的 mode、uid、gid、atime、mtime 和虚拟 ctime 保存在 SQLite。
+
+创建、删除或移动子节点时必须更新相关父目录 mtime 和虚拟 ctime。
+
+OverlayFile getattr 返回：
+
+```text
+type    = regular file
+mode    = SQLite mode
+uid/gid = SQLite uid/gid
+size    = object fd fstat.size
+atime   = object fd fstat.atime
+mtime   = object fd fstat.mtime
+ctime   = max(object ctime, virtual_ctime_ns)
+inode   = ScrapeFS inode
+nlink   = 1
+```
+
+metadata 修改后必须失效 inode attribute cache。
+
+第一版使用 noatime 或近似行为。
+
+## 2. 权限
+
+FUSE mount 必须启用：
+
+```text
+allow_other
+default_permissions
+nodev
+nosuid
+noexec
+```
+
+普通权限由内核根据 mode、uid 和 gid 执行。
+
+通过 FUSE 创建 OverlayFile 或 Directory 时：
+
+- UID/GID 来自 FUSE request context；
+- mode 使用内核传入的、已应用 umask 的值；
+- daemon 不得重复应用 umask。
+
+确定错误：
+
+- ProjectionFile chmod/chown：`EROFS`；
+- GlobalRoot/LibraryRoot chmod/chown：`EPERM`；
+- 普通 Directory/OverlayFile：按权限允许或由内核拒绝。
+
+## 3. OverlayFile 操作
+
+支持：
+
+```text
+create
+open
+read
+write
+truncate
+flush
+fsync
+release
+rename
+unlink
+chmod
+chown
+utimens
+getattr
+```
+
+`fallocate` 返回 `EOPNOTSUPP`。
+
+写入语义：
+
+- 普通 write 使用等价于 `pwrite` 的 offset 语义；
+- 支持部分写入和非顺序写入；
+- backing 层部分成功时保留已写入内容并返回实际长度；
+- `O_APPEND` 单次追加在同一 object 的并发 writer 间保持原子；
+- `O_TRUNC` 在 open 返回前完成；
+- flush 报告延迟错误，但不保证持久化；
+- `fsync(false)` 调用 fsync；
+- `fsync(true)` 调用 fdatasync；
+- release 不提供持久化保证。
+
+## 4. Directory 操作
+
+支持：
+
+```text
+mkdir
+opendir
+readdir
+releasedir
+rename
+rmdir
+getattr
+chmod
+chown
+utimens
+```
+
+rmdir 只允许删除空普通 Directory。
+
+以下操作返回 `EOPNOTSUPP`：
+
+```text
+link
+symlink
+readlink
+mknod
+mkfifo
+设备节点创建
+socket 节点创建
+```
+
+## 5. Rename
+
+第一版支持：
+
+```text
+flags = 0
+RENAME_NOREPLACE
+```
+
+不支持 `RENAME_EXCHANGE` 和 `RENAME_WHITEOUT`。
+
+`RENAME_NOREPLACE` 且目标存在时返回 `EEXIST`。
+
+同一 Library 内允许：
+
+- ProjectionFile rename 到不存在目标；
+- OverlayFile rename 到不存在目标；
+- Directory rename 到不存在目标；
+- OverlayFile 原子替换 OverlayFile，且 flags=0。
+
+拒绝：
+
+- OverlayFile 覆盖 ProjectionFile；
+- ProjectionFile 覆盖已有文件；
+- 文件覆盖目录或目录覆盖文件；
+- 目录覆盖已有目录；
+- 目录移动到自身子树。
+
+普通 FUSE rename 和 `projection mv` 禁止跨 Library，返回 `EXDEV`。
+
+## 6. Object Store
+
+```text
+/var/lib/scrapefs/objects/
+├── staging/
+└── live/
+```
+
+object store 只允许 daemon 访问：
+
+```text
+owner: scrapefs
+mode: 0700
+```
+
+SQLite 保存：
+
+```text
+objects
+├── id
+├── state
+├── created_at_ns
+├── live_at_ns
+└── updated_at_ns
+```
+
+状态：
+
+```text
+STAGING
+LIVE
+```
+
+### 创建流程
+
+1. SQLite 创建 STAGING object 记录。
+2. 在 staging 中使用 `O_CREAT | O_EXCL` 创建文件。
+3. 写入可选初始内容并 fsync object。
+4. rename 到 live。
+5. fsync staging 和 live 目录。
+6. SQLite 事务将 object 改为 LIVE，创建 OverlayFile 节点，写日志并增加 namespace version。
+7. 提交后返回成功或打开 handle。
+
+数据库提交失败时不得返回成功。未引用 object 由恢复流程或 GC 清理。
+
+### Unlink
+
+1. SQLite 事务删除节点、记录日志并增加 namespace version。
+2. 提交事务。
+3. 删除 live object。
+
+### 原子替换
+
+1. SQLite 事务移除旧目标节点。
+2. 将源节点移动到目标名称。
+3. 记录日志并增加 namespace version。
+4. 提交事务。
+5. 删除旧目标 object。
+
+已打开的旧 object fd 继续有效。
+
+## 7. GC
+
+GC 只能删除：
+
+- 状态为 LIVE；
+- 没有节点引用；
+- 没有活动 handle；
+- 超过 `orphan_grace_period`；
+
+的 object。
+
+推荐：
+
+```text
+orphan_grace_period = 24h
+```
+
+创建和 GC 必须共享进程级 coordinator。删除前必须再次检查 object 状态、节点引用和活动 handle。
+
+## 8. Missing Object
+
+数据库存在 OverlayFile 节点但 live object 缺失时：
+
+- open/getattr 返回 `EIO`；
+- doctor 报告 missing object；
+- 不创建空文件。
+
+## 9. 缓存
+
+推荐：
+
+```text
+kernel_cache      = off
+writeback_cache   = off
+auto_cache        = on
+
+entry_timeout     = 1-3s
+attr_timeout      = 1-3s
+negative_timeout  = 0-1s
+```
+
+命名空间提交后应主动失效 old/new parent、old/new name 和相关 inode attributes。
+
+metadata 修改后失效相关 inode attributes。
+
+失效失败只产生 warning，由短 TTL 提供最终一致。
