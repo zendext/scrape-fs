@@ -6,7 +6,7 @@ ScrapeFS 是一个面向 Linux 的 Agent 辅助媒体刮削与虚拟目录文件
 
 它将一个或多个本地文件系统中的媒体文件投影为适合播放器识别的媒体库，同时不移动、不重命名、不修改源文件。
 
-> 当前状态：规格优先，尚未开始实现。
+> 当前状态：工程骨架已建立。仓库目前包含可构建的 `scrapefs` 和 `scrapefsd` 入口，并提供 help 与 version 输出；运行时服务和文件系统行为尚未实现。
 
 ## 核心模型
 
@@ -81,6 +81,31 @@ daemon 只枚举用户指定的文件或目录，将文件清单交给 Agent，�
 - 交互式 CLI 预览和确认。
 
 第一版不包含 torrent 管理、下载器集成、GUI、可写 Projection、完整 POSIX 文件系统、动态 Profile 插件或跨主机 Scrape 导入。
+
+## 开发
+
+ScrapeFS 当前要求 Linux 和 Go 1.25 或更高版本。
+
+构建两个命令包：
+
+```bash
+go build ./cmd/...
+```
+
+运行当前入口：
+
+```bash
+go run ./cmd/scrapefs --help
+go run ./cmd/scrapefsd --version
+```
+
+执行基础检查：
+
+```bash
+go test ./...
+go vet ./...
+gofmt -w .
+```
 
 ## 文档
 
