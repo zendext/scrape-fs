@@ -6,7 +6,7 @@ ScrapeFS is an agent-assisted media scraping and virtual directory filesystem fo
 
 It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
 
-> Status: specification-first development. The implementation has not started yet.
+> Status: implementation bootstrap. The repository contains buildable `scrapefs` and `scrapefsd` entry points with help and version output. Runtime services and filesystem behavior are not implemented yet.
 
 ## Core Model
 
@@ -81,6 +81,31 @@ The first version targets:
 - interactive CLI review and confirmation.
 
 It does not target torrent management, downloader integration, a GUI, writable Projections, a complete POSIX filesystem, dynamic Profile plugins, or cross-host Scrape import.
+
+## Development
+
+ScrapeFS currently requires Linux and Go 1.25 or newer.
+
+Build both command packages:
+
+```bash
+go build ./cmd/...
+```
+
+Run the current entry points:
+
+```bash
+go run ./cmd/scrapefs --help
+go run ./cmd/scrapefsd --version
+```
+
+Run the baseline checks:
+
+```bash
+go test ./...
+go vet ./...
+gofmt -w .
+```
 
 ## Documentation
 
