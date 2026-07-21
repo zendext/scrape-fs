@@ -21,6 +21,7 @@ Closes #
 ## Checklist / 检查清单
 
 - [ ] The PR stays within the linked Issue's scope. / PR 未超出关联 Issue 的范围。
+- [ ] Commit messages and the PR title use English Conventional Commit format. / Commit message 和 PR 标题使用英文 Conventional Commit 格式。
 - [ ] A dedicated worktree was used, or this is a documentation-only change. / 已使用独立工作树，或此变更仅涉及文档。
 - [ ] The acceptance criteria are satisfied. / 已满足验收标准。
 - [ ] Relevant checks have been completed. / 已完成相关检查。

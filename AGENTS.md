@@ -23,7 +23,8 @@ git worktree add ../scrape-fs-issue-<number> \
 
 ## Commits and Pull Requests
 
-- Use this commit message and pull request title format:
+- Write commit messages and pull request titles in English.
+- Use this format with a concise imperative description:
 
 ```text
 <type>[optional scope]: <description>
@@ -33,7 +34,8 @@ git worktree add ../scrape-fs-issue-<number> \
 - Merge with squash and request remote branch deletion:
 
 ```bash
-gh pr merge <number> --squash --delete-branch
+gh pr merge <number> --squash --delete-branch \
+  --subject "<type>[optional scope]: <English description>"
 ```
 
 ## Post-merge Cleanup
