@@ -301,15 +301,16 @@ scrapefs scrape apply scrape-42
 ### 主流程
 
 1. CLI 提交 Scrape ID 和 expected revision。
-2. daemon 确认 revision 未变化。
-3. daemon 重新校验全部选中源文件身份。
-4. daemon 重新检查路径安全和冲突。
-5. daemon 在一个 SQLite 事务中创建 Directory 和 ProjectionFile。
-6. daemon 写 operation log。
-7. daemon 将 Scrape 标记为 applied。
-8. daemon 增加 namespace version 并提交。
-9. daemon 更新内存索引并失效 FUSE 缓存。
-10. 目标目录立即可见。
+2. daemon 从 Unix peer credentials 获取确认者 UID/GID。
+3. daemon 确认 revision 未变化。
+4. daemon 重新校验全部选中源文件身份。
+5. daemon 重新检查路径安全和冲突。
+6. daemon 在一个 SQLite 事务中创建 Directory 和 ProjectionFile。
+7. daemon 写 operation log。
+8. daemon 将 Scrape 标记为 applied，并保存确认者 UID/GID。
+9. daemon 增加 namespace version 并提交。
+10. daemon 更新内存索引并失效 FUSE 缓存。
+11. 目标目录立即可见。
 
 ### 备选流程
 
@@ -321,7 +322,7 @@ scrapefs scrape apply scrape-42
 
 ### 结果
 
-全部 Projection 同时发布，源文件保持不变。
+全部 Projection 同时发布，源文件保持不变。后续 Agent artifact 的虚拟 owner 使用本次保存的确认者 UID/GID。
 
 ### 相关规格
 

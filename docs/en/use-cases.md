@@ -303,15 +303,16 @@ scrapefs scrape apply scrape-42
 ### Main Flow
 
 1. The CLI submits Scrape ID and expected revision.
-2. The daemon verifies the revision did not change.
-3. It revalidates selected source identities.
-4. It rechecks path safety and conflicts.
-5. One SQLite transaction creates Directory and ProjectionFile nodes.
-6. It writes the operation log.
-7. It marks Scrape applied.
-8. It increments namespace version and commits.
-9. It updates the in-memory index and invalidates FUSE caches.
-10. The target tree becomes visible.
+2. The daemon obtains the confirming UID/GID from Unix peer credentials.
+3. It verifies the revision did not change.
+4. It revalidates selected source identities.
+5. It rechecks path safety and conflicts.
+6. One SQLite transaction creates Directory and ProjectionFile nodes.
+7. It writes the operation log.
+8. It marks Scrape applied and stores the confirming UID/GID.
+9. It increments namespace version and commits.
+10. It updates the in-memory index and invalidates FUSE caches.
+11. The target tree becomes visible.
 
 ### Alternative Flows
 
@@ -323,7 +324,7 @@ scrapefs scrape apply scrape-42
 
 ### Result
 
-All Projections are published together. Source files remain unchanged.
+All Projections are published together. Source files remain unchanged. Later Agent artifacts use the saved confirming UID/GID as their virtual owner.
 
 ### Related Specifications
 

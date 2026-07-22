@@ -200,6 +200,8 @@ orphan_grace_period = "24h"
 
 The first version does not configure an Agent UID. The Agent uses the daemon process's effective UID.
 
+This process UID controls only the Agent worker's runtime identity. It does not determine ownership of Agent-created virtual OverlayFiles, which use the UID/GID of the user who confirmed `scrape apply`.
+
 Fixed behavior:
 
 - `kernel_cache = off`;
@@ -211,13 +213,13 @@ These are not configuration fields.
 
 ### 8.3 Value Representation
 
-- UIDs are non-negative decimal integers in the `uint32` range;
+- UIDs are non-negative TOML integers in the `uint32` range; documentation examples use decimal;
 - file modes are TOML octal integers such as `0o660` and contain only permission bits from `0o001` through `0o777`;
 - durations use Go-duration-style strings such as `"2s"`, `"120s"`, and `"24h"`;
 - sizes use binary-unit strings; the first version supports `KiB`, `MiB`, and `GiB`;
 - paths are strings.
 
-Parsing rejects unknown fields, out-of-range UIDs, invalid modes, and non-positive size quotas. FUSE TTLs are non-negative; `max_upload_duration` and `orphan_grace_period` are positive. `negative_timeout` may be `0s`.
+Parsing rejects unknown fields, out-of-range UIDs, invalid modes, and non-positive size quotas. A per-file quota must not exceed `max_session_total_size`. FUSE TTLs are non-negative; `max_upload_duration` and `orphan_grace_period` are positive. `negative_timeout` may be `0s`.
 
 ### 8.4 Path Constraints
 

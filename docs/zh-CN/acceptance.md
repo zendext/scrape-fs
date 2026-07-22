@@ -77,6 +77,8 @@
 
 - FUSE mount 启用 `default_permissions`。
 - FUSE create 使用调用者 UID/GID 和内核处理后的 mode。
+- Agent 创建的 OverlayFile 使用执行 apply 的确认者 UID/GID 和 Library overlay mode。
+- Overlay backing object 使用 daemon owner 和 `0600`，不跟随虚拟 chmod/chown。
 - ProjectionFile 始终只读。
 - daemon 单实例锁生效。
 - readiness 只在数据库、索引、mount 和 socket 全部可用后发送。

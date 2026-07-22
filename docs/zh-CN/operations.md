@@ -198,6 +198,8 @@ orphan_grace_period = "24h"
 
 第一版不配置 Agent UID。Agent 使用 daemon 进程的有效 UID。
 
+该进程 UID 只决定 Agent worker 的运行身份，不决定 Agent 创建的虚拟 OverlayFile owner。虚拟 owner 使用执行 `scrape apply` 的确认者 UID/GID。
+
 固定行为：
 
 - `kernel_cache = off`；
@@ -209,13 +211,13 @@ orphan_grace_period = "24h"
 
 ### 8.3 值的表示
 
-- UID 使用 `uint32` 范围内的非负十进制整数；
+- UID 使用 `uint32` 范围内的非负 TOML integer，文档示例使用十进制；
 - file mode 使用 TOML 八进制整数，例如 `0o660`，且只能包含 `0o001` 至 `0o777` 的权限位；
 - duration 使用 Go duration 风格的字符串，例如 `"2s"`、`"120s"` 和 `"24h"`；
 - size 使用带二进制单位的字符串，第一版支持 `KiB`、`MiB` 和 `GiB`；
 - 路径使用字符串。
 
-解析必须拒绝未知字段、超出范围的 UID、无效 mode 和非正 size quota。FUSE TTL 必须非负；`max_upload_duration` 和 `orphan_grace_period` 必须为正数。`negative_timeout` 可以为 `0s`。
+解析必须拒绝未知字段、超出范围的 UID、无效 mode 和非正 size quota。单文件 quota 不得大于 `max_session_total_size`。FUSE TTL 必须非负；`max_upload_duration` 和 `orphan_grace_period` 必须为正数。`negative_timeout` 可以为 `0s`。
 
 ### 8.4 路径约束
 
