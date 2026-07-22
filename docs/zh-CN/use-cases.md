@@ -621,7 +621,7 @@ Library 从 FUSE 根目录消失，源文件保持不变。
 
 ### 主流程
 
-1. daemon 获取单实例锁。
+1. daemon 获取 ScrapeFS 运行时的宿主文件系统锁。
 2. daemon 打开 SQLite 并验证 PRAGMA。
 3. daemon 执行 migration。
 4. daemon 恢复 object store 状态。
@@ -632,7 +632,7 @@ Library 从 FUSE 根目录消失，源文件保持不变。
 
 ### 备选流程
 
-- 无法获得单实例锁：立即退出。
+- 无法获得 daemon 锁：在打开 SQLite 前退出。
 - migration 失败：不挂载、不发送 readiness。
 - object 缺失：保留节点并由 doctor 报告。
 - 发现未知 FUSE mount：不得卸载。

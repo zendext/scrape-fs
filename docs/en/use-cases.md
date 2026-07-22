@@ -621,7 +621,7 @@ Restore virtual Libraries after a normal restart or crash.
 
 ### Main Flow
 
-1. Acquire the single-instance lock.
+1. Acquire the host-filesystem daemon lock for the ScrapeFS runtime.
 2. Open SQLite and validate PRAGMAs.
 3. Run migrations.
 4. Recover object-store state.
@@ -632,7 +632,7 @@ Restore virtual Libraries after a normal restart or crash.
 
 ### Alternative Flows
 
-- Instance lock is unavailable: exit immediately.
+- The daemon lock is unavailable: exit before opening SQLite.
 - Migration fails: do not mount or signal readiness.
 - Object is missing: retain the node and let doctor report it.
 - Unknown FUSE mount exists: do not unmount it.

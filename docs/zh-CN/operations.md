@@ -50,33 +50,41 @@ recursive remove 必须在单个 SQLite 事务中：
 
 事务提交后回收 Overlay object。不得删除任何源文件。
 
-## 3. Daemon 单实例
+## 3. Daemon 进程排他
 
-daemon 启动时必须获取：
+daemon 必须在宿主运行时文件系统中打开：
 
 ```text
 /run/scrapefs/scrapefsd.lock
 ```
 
-使用：
+并获取：
 
 ```text
 flock(LOCK_EX | LOCK_NB)
 ```
 
-无法获得锁时立即退出，不得清理 mount 或写数据库。
+锁文件及其父路径必须拒绝 symlink、无效 owner 和无效文件类型。daemon 在自身生命周期内持续持有锁文件描述符。无法获得锁时必须在打开或修改 SQLite、挂载 FUSE 或创建控制 socket 前退出。
+
+运行时目录使用 daemon owner 和 `0755`，锁文件使用 daemon owner 和 `0600`。
+
+该锁使 daemon 独占宿主机上的完整 ScrapeFS 运行时。它不替代 SQLite 自身的锁，也不是 FUSE 文件锁。
 
 ## 4. 启动
 
-1. 获取单实例锁。
-2. 打开 SQLite 并验证 PRAGMA。
-3. 执行 migration。
-4. 校验和恢复 object store。
-5. 重建内存索引。
-6. 确认不存在存活 daemon 后清理 stale ScrapeFS mount。
-7. 挂载配置的 FUSE mountpoint，默认为 `/mnt/scrapefs`。
-8. 创建 Unix socket。
-9. 发送 readiness。
+1. 准备并校验宿主运行时锁文件路径。
+2. 获取宿主文件系统 daemon 锁。
+3. 准备并校验数据库父目录和路径。
+4. 持续持有已校验的父目录文件描述符，并相对该描述符打开 SQLite。
+5. 在不改变持久化数据库设置的情况下读取并校验 `PRAGMA user_version`。
+6. 启用并验证必需 PRAGMA。
+7. 执行 migration。
+8. 校验和恢复 object store。
+9. 重建内存索引。
+10. daemon 锁证明没有竞争实例持有该运行时后，再清理 stale ScrapeFS mount。
+11. 挂载配置的 FUSE mountpoint，默认为 `/mnt/scrapefs`。
+12. 创建 Unix socket。
+13. 发送 readiness。
 
 不得卸载未知 FUSE 文件系统。
 
@@ -86,7 +94,7 @@ flock(LOCK_EX | LOCK_NB)
 2. 等待在途事务完成。
 3. 正常卸载 FUSE。
 4. 关闭 socket 和 SQLite。
-5. 释放单实例锁。
+5. 释放 daemon 锁。
 
 正常停止禁止使用 lazy unmount。
 
@@ -231,5 +239,7 @@ orphan_grace_period = "24h"
 四个路径必须两两分离。任一路径不得与另一路径相等，也不得是另一路径的祖先或后代。
 
 配置加载和验证不得创建、打开或修改这些路径。路径存在性、所有权、权限和 symlink-safe 打开由实际使用该路径的启动组件负责。
+
+已有的 SQLite `-journal`、`-wal` 和 `-shm` sidecar 属于数据库状态，必须采用与主数据库文件相同的 owner、私有 mode、普通文件和 no-symlink 校验。daemon 在 SQLite 生命周期内持续持有已校验的数据库父目录，并相对该描述符访问主文件和 sidecar。
 
 第一版不需要配置 Source Root、动态 Profile 或通用 RBAC。

@@ -80,7 +80,8 @@
 - Agent 创建的 OverlayFile 使用执行 apply 的确认者 UID/GID 和 Library overlay mode。
 - Overlay backing object 使用 daemon owner 和 `0600`，不跟随虚拟 chmod/chown。
 - ProjectionFile 始终只读。
-- daemon 单实例锁生效。
+- daemon 在打开 SQLite 前获取宿主文件系统上的 `/run/scrapefs/scrapefsd.lock`。
+- 数据库路径校验后替换祖先目录不得重定向 SQLite；拒绝更新版本 schema 时不得改变 journal mode。
 - readiness 只在数据库、索引、mount 和 socket 全部可用后发送。
 - 未挂载时播放器看不到可读空目录。
 - 正常停止不使用 lazy unmount。

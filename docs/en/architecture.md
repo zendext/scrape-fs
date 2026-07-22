@@ -68,12 +68,16 @@ PRAGMA busy_timeout = 5000;
 Requirements:
 
 1. The first version uses WAL without silent journal-mode fallback.
-2. The daemon is the only database writer.
-3. All writes use explicit transactions.
-4. Namespace writes should use `BEGIN IMMEDIATE`.
-5. Migrations finish before the FUSE mount is created.
-6. Migration or PRAGMA validation failure prevents readiness.
-7. SQLite commit is the persistence point for database state.
+2. Before opening SQLite, the daemon acquires a non-blocking exclusive host-filesystem `flock(2)` on `/run/scrapefs/scrapefsd.lock` and holds it for the daemon lifetime.
+3. The daemon holds the validated database parent-directory file descriptor and opens the database and sidecars relative to it, so later ancestor-path replacement cannot redirect SQLite.
+4. The daemon checks `PRAGMA user_version` before applying persistent PRAGMA changes. Rejecting a newer schema version must not change the database journal mode.
+5. All writes use explicit transactions.
+6. Namespace writes should use `BEGIN IMMEDIATE`.
+7. Migrations finish before the FUSE mount is created.
+8. Migration or PRAGMA validation failure prevents readiness.
+9. SQLite commit is the persistence point for database state.
+
+SQLite's own locking and transaction semantics protect database consistency. The additional daemon lock gives one process exclusive ownership of the full ScrapeFS runtime, including the database, in-memory indexes, mount, object store, and control socket, and fails an accidental duplicate start before SQLite is opened. The fixed lock path is on the host runtime filesystem outside the ScrapeFS FUSE mount. This process lock is unrelated to file-lock operations exposed through FUSE.
 
 ## 4. Mount and Library
 

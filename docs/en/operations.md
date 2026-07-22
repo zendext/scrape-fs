@@ -52,33 +52,41 @@ Recursive removal uses one SQLite transaction to:
 
 Overlay objects are reclaimed after commit. Source files are never removed.
 
-## 3. Single Instance
+## 3. Daemon Process Exclusivity
 
-The daemon acquires:
+The daemon opens the following lock file on the host runtime filesystem:
 
 ```text
 /run/scrapefs/scrapefsd.lock
 ```
 
-using:
+and acquires:
 
 ```text
 flock(LOCK_EX | LOCK_NB)
 ```
 
-Failure exits immediately without cleaning the mount or writing the database.
+The lock file and its parent path reject symlinks and invalid ownership or file types. The daemon holds the lock file descriptor for its lifetime. Lock acquisition failure exits before opening or modifying SQLite, mounting FUSE, or creating the control socket.
+
+The runtime directory uses daemon ownership and mode `0755`. The lock file uses daemon ownership and mode `0600`.
+
+This lock establishes exclusive ownership of the full ScrapeFS runtime on the host. It does not replace SQLite's own locking and is not a FUSE file lock.
 
 ## 4. Startup
 
-1. Acquire the single-instance lock.
-2. Open SQLite and validate PRAGMAs.
-3. Run migrations.
-4. validate and recover the object store.
-5. Rebuild the in-memory index.
-6. After proving no live daemon exists, clean a stale ScrapeFS mount.
-7. Mount the configured FUSE mountpoint, defaulting to `/mnt/scrapefs`.
-8. Create the Unix socket.
-9. Signal readiness.
+1. Prepare and validate the host runtime lock-file path.
+2. Acquire the host-filesystem daemon lock.
+3. Prepare and validate the database parent directory and path.
+4. Hold the validated parent-directory file descriptor and open SQLite relative to it.
+5. Read and validate `PRAGMA user_version` without changing persistent database settings.
+6. Enable and verify the required PRAGMAs.
+7. Run migrations.
+8. Validate and recover the object store.
+9. Rebuild the in-memory index.
+10. Clean a stale ScrapeFS mount after the daemon lock proves no competing instance owns the runtime.
+11. Mount the configured FUSE mountpoint, defaulting to `/mnt/scrapefs`.
+12. Create the Unix socket.
+13. Signal readiness.
 
 Unknown FUSE filesystems are never unmounted.
 
@@ -88,7 +96,7 @@ Unknown FUSE filesystems are never unmounted.
 2. Wait for in-flight transactions.
 3. Unmount FUSE normally.
 4. Close the socket and SQLite.
-5. Release the instance lock.
+5. Release the daemon lock.
 
 Normal shutdown does not use lazy unmount.
 
@@ -233,5 +241,7 @@ The following four paths are lexically normalized absolute paths:
 The four paths are pairwise disjoint. No path may equal, contain, or be contained by another path.
 
 Configuration loading and validation do not create, open, or modify these paths. The startup component that uses a path is responsible for existence, ownership, permissions, and symlink-safe opening.
+
+Existing SQLite `-journal`, `-wal`, and `-shm` sidecars are part of the database state and follow the same ownership, private-mode, regular-file, and no-symlink validation as the main database file. The daemon keeps the validated database parent directory open and accesses the main file and sidecars relative to that descriptor for the SQLite lifetime.
 
 The first version does not configure Source Roots, dynamic Profiles, or generic RBAC.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/zendext/scrape-fs/internal/config"
+	"github.com/zendext/scrape-fs/internal/database"
 )
 
 func TestRunHelp(t *testing.T) {
@@ -179,41 +181,103 @@ func TestRunRejectsRelativeConfigPath(t *testing.T) {
 	}
 }
 
-func TestRunValidatesConfigWithoutCreatingRuntimeState(t *testing.T) {
+func TestRunInitializesDatabaseWithoutCreatingOtherRuntimeState(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.toml")
+	databasePath := filepath.Join(tempDir, "state", "scrapefs.db")
+	overlayPath := filepath.Join(tempDir, "objects")
+	mountpoint := filepath.Join(tempDir, "mount")
+	socketPath := filepath.Join(tempDir, "control.sock")
 	configText := `
 [storage]
-database_path = "` + filepath.Join(tempDir, "state.db") + `"
-overlay_store_path = "` + filepath.Join(tempDir, "objects") + `"
+database_path = "` + databasePath + `"
+overlay_store_path = "` + overlayPath + `"
 
 [fuse]
-mountpoint = "` + filepath.Join(tempDir, "mount") + `"
+mountpoint = "` + mountpoint + `"
 
 [control]
-socket_path = "` + filepath.Join(tempDir, "control.sock") + `"
+socket_path = "` + socketPath + `"
 `
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	before, err := os.ReadDir(tempDir)
-	if err != nil {
-		t.Fatalf("ReadDir before: %v", err)
+	openDatabase := func(path string) (databaseCloser, error) {
+		return database.OpenWithOptions(
+			context.Background(),
+			path,
+			database.Options{LockPath: filepath.Join(tempDir, "run", "scrapefsd.lock")},
+		)
 	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if exitCode := run([]string{"--config", configPath}, &stdout, &stderr); exitCode != 0 {
-		t.Fatalf("run exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	if exitCode := runWithDependencies(
+		[]string{"--config", configPath},
+		&stdout,
+		&stderr,
+		config.Load,
+		openDatabase,
+	); exitCode != 0 {
+		t.Fatalf("runWithDependencies exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
 	}
 
-	after, err := os.ReadDir(tempDir)
-	if err != nil {
-		t.Fatalf("ReadDir after: %v", err)
+	if info, err := os.Stat(databasePath); err != nil {
+		t.Fatalf("database Stat: %v", err)
+	} else if !info.Mode().IsRegular() {
+		t.Fatalf("database mode = %v, want regular file", info.Mode())
 	}
-	if len(after) != len(before) {
-		t.Fatalf("directory entries changed: before=%v after=%v", entryNames(before), entryNames(after))
+	for name, path := range map[string]string{
+		"overlay store": overlayPath,
+		"mountpoint":    mountpoint,
+		"socket":        socketPath,
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s stat error = %v, want not exist", name, err)
+		}
+	}
+}
+
+func TestRunReportsDatabaseInitializationErrorBeforeOtherRuntimeState(t *testing.T) {
+	tempDir := t.TempDir()
+	overlayPath := filepath.Join(tempDir, "objects")
+	mountpoint := filepath.Join(tempDir, "mount")
+	socketPath := filepath.Join(tempDir, "control.sock")
+	loader := func(string) (config.Config, error) {
+		return config.Config{
+			Storage: config.Storage{
+				DatabasePath:     filepath.Join(tempDir, "state", "scrapefs.db"),
+				OverlayStorePath: overlayPath,
+			},
+			FUSE: config.FUSE{Mountpoint: mountpoint},
+			Control: config.Control{
+				SocketPath: socketPath,
+			},
+		}, nil
+	}
+	openDatabase := func(string) (databaseCloser, error) {
+		return nil, errors.New("database initialization failed")
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithDependencies(nil, &stdout, &stderr, loader, openDatabase)
+
+	if exitCode != 1 {
+		t.Fatalf("runWithDependencies exit code = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "database initialization failed") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+	for name, path := range map[string]string{
+		"overlay store": overlayPath,
+		"mountpoint":    mountpoint,
+		"socket":        socketPath,
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s stat error = %v, want not exist", name, err)
+		}
 	}
 }
 
