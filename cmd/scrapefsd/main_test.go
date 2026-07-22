@@ -20,8 +20,17 @@ func TestRunHelp(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("run(--help) exit code = %d, want 0", exitCode)
 	}
-	if !strings.Contains(stdout.String(), "Usage: scrapefsd [options]") {
+	if !strings.Contains(stdout.String(), "Usage: scrapefsd") {
 		t.Errorf("help output = %q, want scrapefsd usage", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "-h, --help") {
+		t.Errorf("help output = %q, want Kong help flag", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "--version") {
+		t.Errorf("help output = %q, want version flag", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "--config") {
+		t.Errorf("help output = %q, want config flag", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), config.DefaultPath) {
 		t.Errorf("help output = %q, want default config path", stdout.String())
@@ -107,6 +116,32 @@ func TestHelpAndVersionDoNotLoadConfig(t *testing.T) {
 			}
 			if called {
 				t.Errorf("runWithLoader(%v) loaded configuration", args)
+			}
+		})
+	}
+}
+
+func TestInvalidArgumentsDoNotLoadConfig(t *testing.T) {
+	for _, args := range [][]string{{"--unknown"}, {"unexpected"}, {"--config"}} {
+		args := args
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			called := false
+			loader := func(string) (config.Config, error) {
+				called = true
+				return config.Config{}, nil
+			}
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			if exitCode := runWithLoader(args, &stdout, &stderr, loader); exitCode != 2 {
+				t.Fatalf("runWithLoader(%v) exit code = %d, want 2", args, exitCode)
+			}
+			if called {
+				t.Errorf("runWithLoader(%v) loaded configuration", args)
+			}
+			if stderr.Len() == 0 {
+				t.Errorf("runWithLoader(%v) stderr is empty", args)
 			}
 		})
 	}
