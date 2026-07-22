@@ -29,7 +29,7 @@ func NewRepository(opened *database.DB) *Repository {
 
 func (repository *Repository) GlobalRoot(ctx context.Context) (Node, error) {
 	var node Node
-	err := repository.useConnection(ctx, func(connection *sql.Conn) error {
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
 		var err error
 		node, err = globalRoot(ctx, connection)
 		return err
@@ -42,7 +42,7 @@ func (repository *Repository) GlobalRoot(ctx context.Context) (Node, error) {
 
 func (repository *Repository) NamespaceVersion(ctx context.Context) (int64, error) {
 	var version int64
-	if err := repository.useConnection(ctx, func(connection *sql.Conn) error {
+	if err := repository.useConnection(ctx, func(connection *database.Connection) error {
 		var err error
 		version, err = namespaceVersion(ctx, connection)
 		return err
@@ -63,7 +63,7 @@ func (repository *Repository) Lookup(
 	}
 
 	var current Node
-	err = repository.useConnection(ctx, func(connection *sql.Conn) error {
+	err = repository.useConnection(ctx, func(connection *database.Connection) error {
 		var err error
 		current, err = lookupComponents(ctx, connection, libraryRootID, components)
 		return err
@@ -90,7 +90,7 @@ func (repository *Repository) Update(
 	}
 
 	var version int64
-	err = repository.useConnection(ctx, func(connection *sql.Conn) error {
+	err = repository.useConnection(ctx, func(connection *database.Connection) error {
 		var err error
 		version, err = repository.update(
 			ctx,
@@ -106,14 +106,14 @@ func (repository *Repository) Update(
 
 func (repository *Repository) useConnection(
 	ctx context.Context,
-	use func(*sql.Conn) error,
+	use func(*database.Connection) error,
 ) error {
 	return repository.database.UseConnection(ctx, use)
 }
 
 func (repository *Repository) update(
 	ctx context.Context,
-	connection *sql.Conn,
+	connection *database.Connection,
 	operation Operation,
 	detailsJSON []byte,
 	change func(*Transaction) error,
@@ -193,7 +193,7 @@ func (repository *Repository) update(
 }
 
 type Transaction struct {
-	transaction *sql.Tx
+	transaction *database.Transaction
 	now         func() time.Time
 	changed     bool
 }
@@ -649,7 +649,7 @@ func classifyMutationError(action string, err error) error {
 }
 
 type nodeQuery interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryRowContext(context.Context, string, ...any) *database.Row
 }
 
 func globalRoot(ctx context.Context, query nodeQuery) (Node, error) {

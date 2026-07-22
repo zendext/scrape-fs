@@ -17,6 +17,7 @@ const DefaultLockPath = "/run/scrapefs/scrapefsd.lock"
 
 var (
 	ErrAlreadyRunning           = errors.New("scrapefsd is already running")
+	ErrConnectionLeaseExpired   = errors.New("database connection lease expired")
 	ErrUnsupportedSchemaVersion = errors.New("unsupported database schema version")
 )
 
@@ -32,6 +33,168 @@ type DB struct {
 	connectionGate chan struct{}
 	closeOnce      sync.Once
 	closeErr       error
+}
+
+type Connection struct {
+	lease *connectionLease
+}
+
+type Transaction struct {
+	lease       *connectionLease
+	transaction *sql.Tx
+}
+
+type Row struct {
+	lease *connectionLease
+	scan  func(...any) error
+}
+
+type connectionLease struct {
+	connection     *sql.Conn
+	mu             sync.RWMutex
+	active         bool
+	transactionsMu sync.Mutex
+	transactions   map[*Transaction]struct{}
+}
+
+func newConnectionLease(connection *sql.Conn) *connectionLease {
+	return &connectionLease{
+		connection:   connection,
+		active:       true,
+		transactions: make(map[*Transaction]struct{}),
+	}
+}
+
+func (connection *Connection) QueryRowContext(
+	ctx context.Context,
+	query string,
+	arguments ...any,
+) *Row {
+	arguments = append([]any(nil), arguments...)
+	return &Row{
+		lease: connection.lease,
+		scan: func(destinations ...any) error {
+			return connection.lease.connection.QueryRowContext(
+				ctx,
+				query,
+				arguments...,
+			).Scan(destinations...)
+		},
+	}
+}
+
+func (connection *Connection) BeginTx(
+	ctx context.Context,
+	options *sql.TxOptions,
+) (*Transaction, error) {
+	var transaction *Transaction
+	err := connection.lease.use(func() error {
+		opened, err := connection.lease.connection.BeginTx(ctx, options)
+		if err != nil {
+			return err
+		}
+		transaction = &Transaction{
+			lease:       connection.lease,
+			transaction: opened,
+		}
+		connection.lease.transactionsMu.Lock()
+		connection.lease.transactions[transaction] = struct{}{}
+		connection.lease.transactionsMu.Unlock()
+		return nil
+	})
+	return transaction, err
+}
+
+func (transaction *Transaction) ExecContext(
+	ctx context.Context,
+	query string,
+	arguments ...any,
+) (sql.Result, error) {
+	var result sql.Result
+	err := transaction.lease.use(func() error {
+		var err error
+		result, err = transaction.transaction.ExecContext(ctx, query, arguments...)
+		return err
+	})
+	return result, err
+}
+
+func (transaction *Transaction) QueryRowContext(
+	ctx context.Context,
+	query string,
+	arguments ...any,
+) *Row {
+	arguments = append([]any(nil), arguments...)
+	return &Row{
+		lease: transaction.lease,
+		scan: func(destinations ...any) error {
+			return transaction.transaction.QueryRowContext(
+				ctx,
+				query,
+				arguments...,
+			).Scan(destinations...)
+		},
+	}
+}
+
+func (transaction *Transaction) Commit() error {
+	return transaction.finish(transaction.transaction.Commit)
+}
+
+func (transaction *Transaction) Rollback() error {
+	return transaction.finish(transaction.transaction.Rollback)
+}
+
+func (transaction *Transaction) finish(action func() error) error {
+	return transaction.lease.use(func() error {
+		defer transaction.lease.removeTransaction(transaction)
+		return action()
+	})
+}
+
+func (row *Row) Scan(destinations ...any) error {
+	return row.lease.use(func() error {
+		return row.scan(destinations...)
+	})
+}
+
+func (lease *connectionLease) use(action func() error) error {
+	lease.mu.RLock()
+	defer lease.mu.RUnlock()
+	if !lease.active {
+		return ErrConnectionLeaseExpired
+	}
+	return action()
+}
+
+func (lease *connectionLease) removeTransaction(transaction *Transaction) {
+	lease.transactionsMu.Lock()
+	delete(lease.transactions, transaction)
+	lease.transactionsMu.Unlock()
+}
+
+func (lease *connectionLease) close() error {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	if !lease.active {
+		return nil
+	}
+	lease.active = false
+
+	lease.transactionsMu.Lock()
+	defer lease.transactionsMu.Unlock()
+	var closeErr error
+	for transaction := range lease.transactions {
+		if err := transaction.transaction.Rollback(); err != nil &&
+			!errors.Is(err, sql.ErrTxDone) {
+			closeErr = errors.Join(
+				closeErr,
+				fmt.Errorf("rollback connection lease transaction: %w", err),
+			)
+		}
+		delete(lease.transactions, transaction)
+	}
+	return closeErr
 }
 
 func Open(ctx context.Context, databasePath string) (*DB, error) {
@@ -135,8 +298,8 @@ func openWithPrepareHook(
 
 func (database *DB) UseConnection(
 	ctx context.Context,
-	use func(*sql.Conn) error,
-) error {
+	use func(*Connection) error,
+) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -153,7 +316,11 @@ func (database *DB) UseConnection(
 	defer func() {
 		database.connectionGate <- struct{}{}
 	}()
-	return use(database.conn)
+	lease := newConnectionLease(database.conn)
+	defer func() {
+		err = errors.Join(err, lease.close())
+	}()
+	return use(&Connection{lease: lease})
 }
 
 func (database *DB) Close() error {

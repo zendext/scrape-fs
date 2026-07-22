@@ -121,7 +121,7 @@ func TestUseConnectionDoesNotRunWithCanceledContext(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		called := false
-		err := database.UseConnection(ctx, func(*sql.Conn) error {
+		err := database.UseConnection(ctx, func(*Connection) error {
 			called = true
 			return nil
 		})
@@ -131,6 +131,59 @@ func TestUseConnectionDoesNotRunWithCanceledContext(t *testing.T) {
 		if called {
 			t.Fatal("UseConnection called callback with canceled context")
 		}
+	}
+}
+
+func TestUseConnectionDoesNotRemainUsableAfterCallback(t *testing.T) {
+	database := openNamespaceTestDatabase(t)
+	var escaped *Connection
+	var escapedRow *Row
+	var escapedTransaction *Transaction
+
+	if err := database.UseConnection(context.Background(), func(connection *Connection) error {
+		escaped = connection
+		escapedRow = connection.QueryRowContext(context.Background(), "SELECT 1")
+		var err error
+		escapedTransaction, err = connection.BeginTx(context.Background(), nil)
+		if err != nil {
+			return err
+		}
+		_, err = escapedTransaction.ExecContext(
+			context.Background(),
+			"INSERT INTO scrapes DEFAULT VALUES",
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("UseConnection: %v", err)
+	}
+
+	var value int
+	if err := escaped.QueryRowContext(
+		context.Background(),
+		"SELECT 1",
+	).Scan(&value); !errors.Is(err, ErrConnectionLeaseExpired) {
+		t.Fatalf("escaped connection error = %v, want ErrConnectionLeaseExpired", err)
+	}
+	if err := escapedRow.Scan(&value); !errors.Is(err, ErrConnectionLeaseExpired) {
+		t.Fatalf("escaped row error = %v, want ErrConnectionLeaseExpired", err)
+	}
+	if _, err := escapedTransaction.ExecContext(
+		context.Background(),
+		"INSERT INTO scrapes DEFAULT VALUES",
+	); !errors.Is(err, ErrConnectionLeaseExpired) {
+		t.Fatalf("escaped transaction error = %v, want ErrConnectionLeaseExpired", err)
+	}
+
+	if err := database.UseConnection(context.Background(), func(connection *Connection) error {
+		return connection.QueryRowContext(
+			context.Background(),
+			"SELECT COUNT(*) FROM scrapes",
+		).Scan(&value)
+	}); err != nil {
+		t.Fatalf("UseConnection after expired lease: %v", err)
+	}
+	if value != 0 {
+		t.Fatalf("Scrape count = %d, want rolled-back transaction", value)
 	}
 }
 

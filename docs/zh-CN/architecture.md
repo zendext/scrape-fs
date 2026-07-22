@@ -83,7 +83,7 @@ SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 dae
 
 schema 只使用声明式局部完整性约束：`STRICT` 表、主键、`NOT NULL`、行内 `CHECK`、外键和唯一索引。SQLite trigger 不实现命名空间业务规则、生命周期策略、namespace version 策略或 operation log 策略。
 
-Repository 是唯一的命名空间修改边界，负责跨行和跨表校验、受保护节点行为、冲突分类、namespace version 变更和 operation log 创建。第一版固定使用一个 SQLite 连接，并且只通过受控入口访问。Repository 操作进入串行队列等待连接，调用方可以通过 context 取消等待。`Update` 回调使用对应 `Transaction` 的读取方法，不调用 Repository 方法。
+Repository 是唯一的命名空间修改边界，负责跨行和跨表校验、受保护节点行为、冲突分类、namespace version 变更和 operation log 创建。第一版固定使用一个 SQLite 连接，并且只通过支持 context 取消的串行队列访问。队列回调获得有作用域的 connection lease，而不是原始 `sql.Conn`；回调结束后 connection、row 和 transaction wrapper 全部失效，未结束事务会在队列继续前回滚。`Update` 回调使用对应 namespace `Transaction` 的读取方法，不调用 Repository 方法。
 
 ## 4. Mount 和 Library
 

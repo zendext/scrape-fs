@@ -2,7 +2,6 @@ package namespace
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -10,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zendext/scrape-fs/internal/database"
+	databasepkg "github.com/zendext/scrape-fs/internal/database"
 )
 
 func TestRepositoryUpdateCommitsVersionAndLogAtomically(t *testing.T) {
@@ -57,7 +56,7 @@ func TestRepositoryUpdateCommitsVersionAndLogAtomically(t *testing.T) {
 	var actorID *int64
 	var loggedVersion int64
 	var details string
-	if err := database.UseConnection(ctx, func(connection *sql.Conn) error {
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
 		return connection.QueryRowContext(ctx, `
 			SELECT operation, actor_kind, actor_id, namespace_version, details_json
 			FROM operation_log
@@ -111,7 +110,7 @@ func TestRepositoryUpdateRollsBackNodesVersionAndLog(t *testing.T) {
 
 	assertVersionAndLogCount(t, database, 0, 0)
 	var count int
-	if err := database.UseConnection(ctx, func(connection *sql.Conn) error {
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
 		return connection.QueryRowContext(
 			ctx,
 			"SELECT COUNT(*) FROM nodes WHERE name = 'rolled-back'",
@@ -156,7 +155,7 @@ func TestRepositoryUpdateRollsBackWhenOperationLogFails(t *testing.T) {
 
 	assertVersionAndLogCount(t, database, 0, 0)
 	var count int
-	if err := database.UseConnection(ctx, func(connection *sql.Conn) error {
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
 		return connection.QueryRowContext(
 			ctx,
 			"SELECT COUNT(*) FROM nodes WHERE name = 'rolled-back-log'",
@@ -207,7 +206,7 @@ func TestRepositoryUpdateRollsBackAfterPanic(t *testing.T) {
 
 	assertVersionAndLogCount(t, database, 0, 0)
 	var count int
-	if err := database.UseConnection(ctx, func(connection *sql.Conn) error {
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
 		return connection.QueryRowContext(
 			ctx,
 			"SELECT COUNT(*) FROM nodes WHERE name = 'panicked'",
@@ -739,10 +738,10 @@ func TestCreateNodeMapsDuplicateSiblingToConflict(t *testing.T) {
 func TestLookupPersistsStableNodeIDAcrossRestart(t *testing.T) {
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "state", "scrapefs.db")
-	options := database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")}
+	options := databasepkg.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")}
 	ctx := context.Background()
 
-	first, err := database.OpenWithOptions(ctx, databasePath, options)
+	first, err := databasepkg.OpenWithOptions(ctx, databasePath, options)
 	if err != nil {
 		t.Fatalf("first OpenWithOptions: %v", err)
 	}
@@ -815,7 +814,7 @@ func TestLookupPersistsStableNodeIDAcrossRestart(t *testing.T) {
 		t.Fatalf("first Close: %v", err)
 	}
 
-	second, err := database.OpenWithOptions(ctx, databasePath, options)
+	second, err := databasepkg.OpenWithOptions(ctx, databasePath, options)
 	if err != nil {
 		t.Fatalf("second OpenWithOptions: %v", err)
 	}
@@ -986,14 +985,14 @@ func testOperation(name string) Operation {
 	}
 }
 
-func openTestDatabase(t *testing.T) *database.DB {
+func openTestDatabase(t *testing.T) *databasepkg.DB {
 	t.Helper()
 
 	root := t.TempDir()
-	opened, err := database.OpenWithOptions(
+	opened, err := databasepkg.OpenWithOptions(
 		context.Background(),
 		filepath.Join(root, "state", "scrapefs.db"),
-		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+		databasepkg.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
 	)
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
@@ -1006,11 +1005,11 @@ func openTestDatabase(t *testing.T) *database.DB {
 	return opened
 }
 
-func assertVersionAndLogCount(t *testing.T, opened *database.DB, wantVersion, wantLogs int64) {
+func assertVersionAndLogCount(t *testing.T, opened *databasepkg.DB, wantVersion, wantLogs int64) {
 	t.Helper()
 
 	var version int64
-	if err := opened.UseConnection(context.Background(), func(connection *sql.Conn) error {
+	if err := opened.UseConnection(context.Background(), func(connection *databasepkg.Connection) error {
 		return connection.QueryRowContext(
 			context.Background(),
 			"SELECT version FROM namespace_state WHERE singleton = 1",
@@ -1023,7 +1022,7 @@ func assertVersionAndLogCount(t *testing.T, opened *database.DB, wantVersion, wa
 	}
 
 	var logs int64
-	if err := opened.UseConnection(context.Background(), func(connection *sql.Conn) error {
+	if err := opened.UseConnection(context.Background(), func(connection *databasepkg.Connection) error {
 		return connection.QueryRowContext(
 			context.Background(),
 			"SELECT COUNT(*) FROM operation_log",

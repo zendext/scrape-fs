@@ -85,7 +85,7 @@ The foundational namespace migration creates ID-only `objects` and `scrapes` tab
 
 The schema uses declarative local integrity only: `STRICT` tables, primary keys, `NOT NULL`, row-local `CHECK` constraints, foreign keys, and unique indexes. SQLite triggers do not implement namespace business rules, lifecycle policy, namespace-version policy, or operation-log policy.
 
-The Repository is the sole namespace mutation boundary. It owns cross-row and cross-table validation, protected-node behavior, conflict classification, namespace-version changes, and operation-log creation. The first version pins one SQLite connection and exposes it only through controlled access. Repository operations wait in a serialized queue, and a caller can cancel that wait through its context. An `Update` callback uses the read methods on its `Transaction` and does not call Repository methods.
+The Repository is the sole namespace mutation boundary. It owns cross-row and cross-table validation, protected-node behavior, conflict classification, namespace-version changes, and operation-log creation. The first version pins one SQLite connection and exposes it only through a serialized, context-aware queue. A queue callback receives a scoped connection lease instead of the raw `sql.Conn`; connection, row, and transaction wrappers expire when the callback ends, and unfinished transactions are rolled back before the queue advances. An `Update` callback uses the read methods on its namespace `Transaction` and does not call Repository methods.
 
 ## 4. Mount and Library
 
