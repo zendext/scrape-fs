@@ -20,11 +20,14 @@ scrapefs projection add \
 
 相对路径必须：
 
+- 是有效 UTF-8；
 - 不包含 `..`、NUL 或空组件；
 - 不逃逸 LibraryRoot；
 - 不使用保留名称；
-- 不超过配置长度；
+- 每个组件不超过 255 字节，规范化相对路径不超过 4095 字节；
 - 通过当前 Library Profile 的路径安全检查。
+
+通用校验必须在命名空间修改前拒绝绝对路径和词法上未规范化的路径，随后再执行 Profile 特定的命名与路径安全检查。
 
 `projection add` 在一个 SQLite 事务中：
 

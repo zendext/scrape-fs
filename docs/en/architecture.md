@@ -72,12 +72,16 @@ Requirements:
 3. The daemon holds the validated database parent-directory file descriptor and opens the database and sidecars relative to it, so later ancestor-path replacement cannot redirect SQLite.
 4. The daemon checks `PRAGMA user_version` before applying persistent PRAGMA changes. Rejecting a newer schema version must not change the database journal mode.
 5. All writes use explicit transactions.
-6. Namespace writes should use `BEGIN IMMEDIATE`.
+6. Namespace writes use `BEGIN IMMEDIATE`.
 7. Migrations finish before the FUSE mount is created.
 8. Migration or PRAGMA validation failure prevents readiness.
 9. SQLite commit is the persistence point for database state.
 
 SQLite's own locking and transaction semantics protect database consistency. The additional daemon lock gives one process exclusive ownership of the full ScrapeFS runtime, including the database, in-memory indexes, mount, object store, and control socket, and fails an accidental duplicate start before SQLite is opened. The fixed lock path is on the host runtime filesystem outside the ScrapeFS FUSE mount. This process lock is unrelated to file-lock operations exposed through FUSE.
+
+Persistent internal identities use SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` values and Go `int64`, so deleted node IDs are not reused. Persisted timestamps use UTC Unix nanoseconds in SQLite `INTEGER` columns.
+
+The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. Later Object and Scrape migrations extend those tables before their corresponding behavior creates rows.
 
 ## 4. Mount and Library
 
@@ -168,6 +172,8 @@ OVERLAY_FILE
 
 GlobalRoot and LibraryRoot are protected directories.
 
+The initial migration creates GlobalRoot once with node ID `1`, an empty name, mode `0755`, and the daemon effective UID/GID. This bootstrap node is not an ordinary namespace operation.
+
 Node IDs are globally unique within a ScrapeFS instance.
 
 Name uniqueness:
@@ -225,6 +231,8 @@ Node IDs map stably to FUSE inodes:
 ## 6. Namespace Version
 
 SQLite stores a monotonically increasing `namespace_version`.
+
+The initial namespace version is `0`. Creating GlobalRoot during migration does not increment it and does not write an operation-log entry.
 
 Each successful transaction that changes namespace structure increments it once, including:
 

@@ -70,12 +70,16 @@ PRAGMA busy_timeout = 5000;
 3. daemon 必须持续持有已校验的数据库父目录文件描述符，并相对该描述符打开数据库和 sidecar，避免后续祖先路径替换将 SQLite 重定向到其他位置。
 4. daemon 必须在应用持久化 PRAGMA 前检查 `PRAGMA user_version`。拒绝更新版本的 schema 时不得改变数据库 journal mode。
 5. 所有写操作使用显式事务。
-6. 命名空间写事务应使用 `BEGIN IMMEDIATE`。
+6. 命名空间写事务使用 `BEGIN IMMEDIATE`。
 7. migration 必须在 FUSE mount 前完成。
 8. migration 或 PRAGMA 校验失败时 daemon 不得进入 ready。
 9. SQLite commit 是数据库状态的持久化提交点。
 
 SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 daemon 锁使一个进程独占完整 ScrapeFS 运行时，包括数据库、内存索引、mount、object store 和控制 socket，并在打开 SQLite 前拒绝意外重复启动。固定锁路径位于 ScrapeFS FUSE mount 之外的宿主运行时文件系统。该进程锁与通过 FUSE 暴露的文件锁操作无关。
+
+持久化内部 ID 使用 SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`，Go 中表示为 `int64`，因此已删除节点的 ID 不会复用。持久化时间使用 SQLite `INTEGER` 保存 UTC Unix 纳秒。
+
+基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。后续 Object 和 Scrape migration 必须在对应行为开始创建记录前扩展这些表。
 
 ## 4. Mount 和 Library
 
@@ -166,6 +170,8 @@ OVERLAY_FILE
 
 GlobalRoot 和 LibraryRoot 是受保护的特殊目录。
 
+初始 migration 只创建一次 GlobalRoot，其节点 ID 固定为 `1`，名称为空，mode 为 `0755`，UID/GID 使用首次初始化时 daemon 的有效 UID/GID。该 bootstrap 节点不属于普通命名空间操作。
+
 所有节点 ID 在整个实例中全局唯一。
 
 名称唯一约束：
@@ -223,6 +229,8 @@ nodes
 ## 6. Namespace Version
 
 SQLite 保存单调递增的 `namespace_version`。
+
+初始 namespace version 为 `0`。migration 创建 GlobalRoot 时不增加版本，也不写 operation log。
 
 任何成功改变节点结构的事务只增加一次版本，包括：
 

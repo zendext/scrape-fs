@@ -149,6 +149,7 @@ func sqliteDSN(databasePath string) string {
 	dsn := &url.URL{Scheme: "file", Path: databasePath}
 	query := dsn.Query()
 	query.Set("mode", "rw")
+	query.Set("_txlock", "immediate")
 	dsn.RawQuery = query.Encode()
 	return dsn.String()
 }

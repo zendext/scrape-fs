@@ -7,7 +7,7 @@ import (
 	"fmt"
 )
 
-const currentVersion = 1
+const currentVersion = 2
 
 type migration struct {
 	version int
@@ -20,7 +20,8 @@ type migrationConnection interface {
 }
 
 var defaultMigrations = []migration{
-	{version: currentVersion},
+	{version: 1},
+	{version: currentVersion, up: createNamespaceSchema},
 }
 
 func readSchemaVersion(ctx context.Context, database migrationConnection) (int, error) {

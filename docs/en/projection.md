@@ -22,11 +22,14 @@ Target syntax:
 
 The relative path:
 
+- is valid UTF-8;
 - contains no `..`, NUL, or empty component;
 - remains below LibraryRoot;
 - uses no reserved name;
-- stays within configured length limits;
+- limits each component to 255 bytes and the normalized relative path to 4095 bytes;
 - passes the Library Profile's path-safety validation.
+
+Generic validation rejects absolute or lexically non-normalized paths before namespace mutation. Profile-specific naming and path-safety validation runs afterward.
 
 `projection add` uses one SQLite transaction to:
 
