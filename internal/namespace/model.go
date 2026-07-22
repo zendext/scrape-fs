@@ -7,6 +7,7 @@ import (
 
 var (
 	ErrConflict         = errors.New("namespace conflict")
+	ErrInvalidLibrary   = errors.New("invalid library")
 	ErrInvalidNode      = errors.New("invalid namespace node")
 	ErrInvalidOperation = errors.New("invalid namespace operation")
 	ErrInvalidPath      = errors.New("invalid relative namespace path")
@@ -74,6 +75,47 @@ type Attributes struct {
 	Mode fs.FileMode
 	UID  uint32
 	GID  uint32
+}
+
+type LibraryStatus string
+
+const (
+	LibraryActive  LibraryStatus = "ACTIVE"
+	LibraryRetired LibraryStatus = "RETIRED"
+)
+
+type Library struct {
+	ID             int64
+	Name           string
+	Status         LibraryStatus
+	RootNodeID     int64
+	ProfileName    string
+	ProfileVersion int64
+	UID            uint32
+	GID            uint32
+	RootMode       fs.FileMode
+	DirectoryMode  fs.FileMode
+	ProjectionMode fs.FileMode
+	OverlayMode    fs.FileMode
+	CreatedAt      int64
+	UpdatedAt      int64
+}
+
+type CreateLibrary struct {
+	Name           string
+	ProfileName    string
+	ProfileVersion int64
+	Creator        Actor
+	UID            uint32
+	GID            uint32
+	RootMode       fs.FileMode
+	DirectoryMode  fs.FileMode
+	ProjectionMode fs.FileMode
+	OverlayMode    fs.FileMode
+}
+
+func (request CreateLibrary) Validate() error {
+	return validateCreateLibrary(request)
 }
 
 type ProjectionSource struct {

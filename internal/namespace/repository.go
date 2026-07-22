@@ -52,6 +52,38 @@ func (repository *Repository) NamespaceVersion(ctx context.Context) (int64, erro
 	return version, nil
 }
 
+func (repository *Repository) Libraries(ctx context.Context) ([]Library, error) {
+	var libraries []Library
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		cursorName := ""
+		var cursorID int64
+		for {
+			library, err := queryLibrary(ctx, connection, `
+				libraries.status = 'ACTIVE'
+				AND (
+					libraries.name > ?
+					OR (libraries.name = ? AND libraries.id > ?)
+				)
+				ORDER BY libraries.name, libraries.id
+				LIMIT 1
+			`, cursorName, cursorName, cursorID)
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("list Libraries: %w", err)
+			}
+			libraries = append(libraries, library)
+			cursorName = library.Name
+			cursorID = library.ID
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return libraries, nil
+}
+
 func (repository *Repository) Lookup(
 	ctx context.Context,
 	libraryRootID int64,
@@ -216,6 +248,85 @@ func (transaction *Transaction) Lookup(
 		return Node{}, err
 	}
 	return lookupComponents(ctx, transaction.transaction, libraryRootID, components)
+}
+
+func (transaction *Transaction) CreateLibrary(
+	ctx context.Context,
+	request CreateLibrary,
+) (Library, error) {
+	if err := request.Validate(); err != nil {
+		return Library{}, err
+	}
+
+	globalRoot, err := transaction.GlobalRoot(ctx)
+	if err != nil {
+		return Library{}, err
+	}
+	root, err := transaction.CreateNode(ctx, CreateNode{
+		ParentID: globalRoot.ID,
+		Name:     request.Name,
+		Kind:     LibraryRoot,
+		Creator:  request.Creator,
+		Attributes: Attributes{
+			Mode: request.RootMode,
+			UID:  request.UID,
+			GID:  request.GID,
+		},
+	})
+	if err != nil {
+		return Library{}, err
+	}
+
+	now := transaction.now().UTC().UnixNano()
+	result, err := transaction.transaction.ExecContext(ctx, `
+		INSERT INTO libraries (
+			name,
+			status,
+			root_node_id,
+			profile_name,
+			profile_version,
+			uid,
+			gid,
+			root_mode,
+			directory_mode,
+			projection_file_mode,
+			overlay_file_mode,
+			created_at,
+			updated_at,
+			retired_at
+		) VALUES (?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+	`,
+		request.Name,
+		root.ID,
+		request.ProfileName,
+		request.ProfileVersion,
+		request.UID,
+		request.GID,
+		request.RootMode.Perm(),
+		request.DirectoryMode.Perm(),
+		request.ProjectionMode.Perm(),
+		request.OverlayMode.Perm(),
+		now,
+		now,
+	)
+	if err != nil {
+		return Library{}, classifyLibraryMutationError("create Library", err)
+	}
+	libraryID, err := result.LastInsertId()
+	if err != nil {
+		return Library{}, fmt.Errorf("read created Library ID: %w", err)
+	}
+
+	library, err := queryLibrary(
+		ctx,
+		transaction.transaction,
+		"libraries.id = ?",
+		libraryID,
+	)
+	if err != nil {
+		return Library{}, fmt.Errorf("read created Library: %w", err)
+	}
+	return library, nil
 }
 
 func (transaction *Transaction) CreateNode(
@@ -633,6 +744,47 @@ func validateCreateNode(request CreateNode) error {
 	return nil
 }
 
+func validateCreateLibrary(request CreateLibrary) error {
+	if err := validateName(request.Name); err != nil {
+		return fmt.Errorf("%w: invalid name: %v", ErrInvalidLibrary, err)
+	}
+	if strings.TrimSpace(request.ProfileName) == "" {
+		return fmt.Errorf("%w: Profile name must not be empty", ErrInvalidLibrary)
+	}
+	if request.ProfileVersion <= 0 {
+		return fmt.Errorf("%w: Profile version must be positive", ErrInvalidLibrary)
+	}
+	if !request.Creator.valid() {
+		return fmt.Errorf("%w: invalid creator", ErrInvalidLibrary)
+	}
+
+	modes := []struct {
+		name string
+		mode fs.FileMode
+	}{
+		{name: "root", mode: request.RootMode},
+		{name: "directory", mode: request.DirectoryMode},
+		{name: "projection", mode: request.ProjectionMode},
+		{name: "overlay", mode: request.OverlayMode},
+	}
+	for _, mode := range modes {
+		if mode.mode != mode.mode.Perm() {
+			return fmt.Errorf(
+				"%w: %s mode must contain only permission bits",
+				ErrInvalidLibrary,
+				mode.name,
+			)
+		}
+	}
+	if request.ProjectionMode.Perm()&0o222 != 0 {
+		return fmt.Errorf(
+			"%w: projection mode must be read-only",
+			ErrInvalidLibrary,
+		)
+	}
+	return nil
+}
+
 func classifyMutationError(action string, err error) error {
 	var sqliteError *sqlite.Error
 	if errors.As(err, &sqliteError) {
@@ -643,6 +795,21 @@ func classifyMutationError(action string, err error) error {
 			sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY,
 			sqlite3.SQLITE_CONSTRAINT_NOTNULL:
 			return fmt.Errorf("%s: %w: %v", action, ErrInvalidNode, err)
+		}
+	}
+	return fmt.Errorf("%s: %w", action, err)
+}
+
+func classifyLibraryMutationError(action string, err error) error {
+	var sqliteError *sqlite.Error
+	if errors.As(err, &sqliteError) {
+		switch sqliteError.Code() {
+		case sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY, sqlite3.SQLITE_CONSTRAINT_UNIQUE:
+			return fmt.Errorf("%s: %w: %v", action, ErrConflict, err)
+		case sqlite3.SQLITE_CONSTRAINT_CHECK,
+			sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY,
+			sqlite3.SQLITE_CONSTRAINT_NOTNULL:
+			return fmt.Errorf("%s: %w: %v", action, ErrInvalidLibrary, err)
 		}
 	}
 	return fmt.Errorf("%s: %w", action, err)
@@ -672,6 +839,160 @@ func namespaceVersion(ctx context.Context, query nodeQuery) (int64, error) {
 		return 0, fmt.Errorf("read namespace version: %w", err)
 	}
 	return version, nil
+}
+
+func queryLibrary(
+	ctx context.Context,
+	query nodeQuery,
+	predicate string,
+	arguments ...any,
+) (Library, error) {
+	row := query.QueryRowContext(ctx, `
+		SELECT
+			libraries.id,
+			libraries.name,
+			libraries.status,
+			libraries.root_node_id,
+			libraries.profile_name,
+			libraries.profile_version,
+			libraries.uid,
+			libraries.gid,
+			libraries.root_mode,
+			libraries.directory_mode,
+			libraries.projection_file_mode,
+			libraries.overlay_file_mode,
+			libraries.created_at,
+			libraries.updated_at,
+			root.id,
+			root.parent_id,
+			root.name,
+			root.kind,
+			root.mode,
+			root.uid,
+			root.gid
+		FROM libraries
+		LEFT JOIN nodes AS root ON root.id = libraries.root_node_id
+		WHERE `+predicate,
+		arguments...,
+	)
+
+	var library Library
+	var uid int64
+	var gid int64
+	var rootMode int64
+	var directoryMode int64
+	var projectionMode int64
+	var overlayMode int64
+	var joinedRootID sql.NullInt64
+	var rootParentID sql.NullInt64
+	var rootName sql.NullString
+	var rootKind sql.NullString
+	var joinedRootMode sql.NullInt64
+	var rootUID sql.NullInt64
+	var rootGID sql.NullInt64
+	if err := row.Scan(
+		&library.ID,
+		&library.Name,
+		&library.Status,
+		&library.RootNodeID,
+		&library.ProfileName,
+		&library.ProfileVersion,
+		&uid,
+		&gid,
+		&rootMode,
+		&directoryMode,
+		&projectionMode,
+		&overlayMode,
+		&library.CreatedAt,
+		&library.UpdatedAt,
+		&joinedRootID,
+		&rootParentID,
+		&rootName,
+		&rootKind,
+		&joinedRootMode,
+		&rootUID,
+		&rootGID,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Library{}, ErrNotFound
+		}
+		return Library{}, err
+	}
+
+	library.UID = uint32(uid)
+	library.GID = uint32(gid)
+	library.RootMode = fs.FileMode(rootMode)
+	library.DirectoryMode = fs.FileMode(directoryMode)
+	library.ProjectionMode = fs.FileMode(projectionMode)
+	library.OverlayMode = fs.FileMode(overlayMode)
+	if err := validatePersistedLibrary(
+		library,
+		joinedRootID,
+		rootParentID,
+		rootName,
+		rootKind,
+		joinedRootMode,
+		rootUID,
+		rootGID,
+	); err != nil {
+		return Library{}, err
+	}
+	return library, nil
+}
+
+func validatePersistedLibrary(
+	library Library,
+	joinedRootID sql.NullInt64,
+	rootParentID sql.NullInt64,
+	rootName sql.NullString,
+	rootKind sql.NullString,
+	joinedRootMode sql.NullInt64,
+	rootUID sql.NullInt64,
+	rootGID sql.NullInt64,
+) error {
+	if library.Status != LibraryActive {
+		return fmt.Errorf(
+			"%w: Library %d has status %q",
+			ErrInvalidLibrary,
+			library.ID,
+			library.Status,
+		)
+	}
+	if err := (CreateLibrary{
+		Name:           library.Name,
+		ProfileName:    library.ProfileName,
+		ProfileVersion: library.ProfileVersion,
+		Creator:        Actor{Kind: ActorSystem},
+		UID:            library.UID,
+		GID:            library.GID,
+		RootMode:       library.RootMode,
+		DirectoryMode:  library.DirectoryMode,
+		ProjectionMode: library.ProjectionMode,
+		OverlayMode:    library.OverlayMode,
+	}).Validate(); err != nil {
+		return fmt.Errorf("%w: Library %d configuration: %v", ErrInvalidLibrary, library.ID, err)
+	}
+	if !joinedRootID.Valid ||
+		joinedRootID.Int64 != library.RootNodeID ||
+		!rootParentID.Valid ||
+		rootParentID.Int64 != 1 ||
+		!rootName.Valid ||
+		rootName.String != library.Name ||
+		!rootKind.Valid ||
+		NodeKind(rootKind.String) != LibraryRoot ||
+		!joinedRootMode.Valid ||
+		fs.FileMode(joinedRootMode.Int64) != library.RootMode ||
+		!rootUID.Valid ||
+		uint32(rootUID.Int64) != library.UID ||
+		!rootGID.Valid ||
+		uint32(rootGID.Int64) != library.GID {
+		return fmt.Errorf(
+			"%w: Library %d has a mismatched root node",
+			ErrInvalidLibrary,
+			library.ID,
+		)
+	}
+	return nil
 }
 
 func lookupComponents(
