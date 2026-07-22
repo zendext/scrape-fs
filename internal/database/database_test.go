@@ -34,13 +34,13 @@ func TestOpenInitializesDatabase(t *testing.T) {
 	assertPathMode(t, filepath.Dir(databasePath), 0o700)
 	assertPathMode(t, databasePath, 0o600)
 
-	assertPragmaInt(t, database.SQL(), "foreign_keys", 1)
-	assertPragmaText(t, database.SQL(), "journal_mode", "wal")
-	assertPragmaInt(t, database.SQL(), "synchronous", 2)
-	assertPragmaInt(t, database.SQL(), "busy_timeout", 5000)
-	assertPragmaInt(t, database.SQL(), "user_version", currentVersion)
+	assertPragmaInt(t, database.Conn(), "foreign_keys", 1)
+	assertPragmaText(t, database.Conn(), "journal_mode", "wal")
+	assertPragmaInt(t, database.Conn(), "synchronous", 2)
+	assertPragmaInt(t, database.Conn(), "busy_timeout", 5000)
+	assertPragmaInt(t, database.Conn(), "user_version", currentVersion)
 
-	if got := database.SQL().Stats().MaxOpenConnections; got != 1 {
+	if got := database.pool.Stats().MaxOpenConnections; got != 1 {
 		t.Errorf("MaxOpenConnections = %d, want 1", got)
 	}
 }
@@ -54,7 +54,7 @@ func TestOpenCurrentDatabaseIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first OpenWithOptions: %v", err)
 	}
-	if _, err := first.SQL().Exec(`
+	if _, err := first.Conn().ExecContext(context.Background(), `
 		CREATE TABLE marker (value TEXT NOT NULL);
 		INSERT INTO marker (value) VALUES ('preserved');
 	`); err != nil {
@@ -71,13 +71,16 @@ func TestOpenCurrentDatabaseIsIdempotent(t *testing.T) {
 	defer second.Close()
 
 	var value string
-	if err := second.SQL().QueryRow("SELECT value FROM marker").Scan(&value); err != nil {
+	if err := second.Conn().QueryRowContext(
+		context.Background(),
+		"SELECT value FROM marker",
+	).Scan(&value); err != nil {
 		t.Fatalf("read marker: %v", err)
 	}
 	if value != "preserved" {
 		t.Errorf("marker value = %q, want preserved", value)
 	}
-	assertPragmaInt(t, second.SQL(), "user_version", currentVersion)
+	assertPragmaInt(t, second.Conn(), "user_version", currentVersion)
 }
 
 func TestOpenRejectsConcurrentDaemonBeforeDatabaseCreation(t *testing.T) {
@@ -171,15 +174,89 @@ func TestOpenRejectsUnsupportedSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenWithOptions: %v", err)
 	}
-	if _, err := database.SQL().Exec(fmt.Sprintf("PRAGMA user_version = %d", currentVersion+1)); err != nil {
+	if err := database.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	raw, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	var journalMode string
+	if err := raw.QueryRow("PRAGMA journal_mode = DELETE").Scan(&journalMode); err != nil {
+		t.Fatalf("set DELETE journal mode: %v", err)
+	}
+	if journalMode != "delete" {
+		t.Fatalf("journal mode = %q, want delete", journalMode)
+	}
+	if _, err := raw.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentVersion+1)); err != nil {
 		t.Fatalf("set future user_version: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("raw Close: %v", err)
+	}
+
+	if _, err := OpenWithOptions(context.Background(), databasePath, options); !errors.Is(err, ErrUnsupportedSchemaVersion) {
+		t.Fatalf("OpenWithOptions error = %v, want ErrUnsupportedSchemaVersion", err)
+	}
+
+	raw, err = sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("reopen raw database: %v", err)
+	}
+	defer raw.Close()
+	if err := raw.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		t.Fatalf("read journal mode: %v", err)
+	}
+	if journalMode != "delete" {
+		t.Errorf("journal mode after rejection = %q, want delete", journalMode)
+	}
+}
+
+func TestOpenUsesValidatedDirectoryAfterAncestorReplacement(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	attackerDir := filepath.Join(root, "attacker")
+	if err := os.Mkdir(attackerDir, 0o700); err != nil {
+		t.Fatalf("Mkdir attacker: %v", err)
+	}
+	databasePath := filepath.Join(stateDir, "scrapefs.db")
+	options := Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")}
+	originalDir := stateDir + "-original"
+
+	database, err := openWithPrepareHook(
+		context.Background(),
+		databasePath,
+		options,
+		defaultMigrations,
+		func() error {
+			if err := os.Rename(stateDir, originalDir); err != nil {
+				return fmt.Errorf("rename validated directory: %w", err)
+			}
+			if err := os.Symlink(attackerDir, stateDir); err != nil {
+				return fmt.Errorf("replace directory with symlink: %w", err)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("openWithPrepareHook: %v", err)
 	}
 	if err := database.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
-	if _, err := OpenWithOptions(context.Background(), databasePath, options); !errors.Is(err, ErrUnsupportedSchemaVersion) {
-		t.Fatalf("OpenWithOptions error = %v, want ErrUnsupportedSchemaVersion", err)
+	originalDatabasePath := filepath.Join(originalDir, "scrapefs.db")
+	raw, err := sql.Open("sqlite", originalDatabasePath)
+	if err != nil {
+		t.Fatalf("sql.Open original database: %v", err)
+	}
+	defer raw.Close()
+	assertPragmaInt(t, raw, "user_version", currentVersion)
+
+	attackerDatabasePath := filepath.Join(attackerDir, "scrapefs.db")
+	if _, err := os.Stat(attackerDatabasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attacker database stat error = %v, want not exist", err)
 	}
 }
 
@@ -449,10 +526,14 @@ func assertPathMode(t *testing.T, path string, want os.FileMode) {
 	}
 }
 
-func assertPragmaInt(t *testing.T, database *sql.DB, name string, want int) {
+type rowQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func assertPragmaInt(t *testing.T, database rowQuerier, name string, want int) {
 	t.Helper()
 	var got int
-	if err := database.QueryRow("PRAGMA " + name).Scan(&got); err != nil {
+	if err := database.QueryRowContext(context.Background(), "PRAGMA "+name).Scan(&got); err != nil {
 		t.Fatalf("PRAGMA %s: %v", name, err)
 	}
 	if got != want {
@@ -460,10 +541,10 @@ func assertPragmaInt(t *testing.T, database *sql.DB, name string, want int) {
 	}
 }
 
-func assertPragmaText(t *testing.T, database *sql.DB, name, want string) {
+func assertPragmaText(t *testing.T, database rowQuerier, name, want string) {
 	t.Helper()
 	var got string
-	if err := database.QueryRow("PRAGMA " + name).Scan(&got); err != nil {
+	if err := database.QueryRowContext(context.Background(), "PRAGMA "+name).Scan(&got); err != nil {
 		t.Fatalf("PRAGMA %s: %v", name, err)
 	}
 	if got != want {
@@ -471,10 +552,11 @@ func assertPragmaText(t *testing.T, database *sql.DB, name, want string) {
 	}
 }
 
-func tableExists(t *testing.T, database *sql.DB, name string) bool {
+func tableExists(t *testing.T, database rowQuerier, name string) bool {
 	t.Helper()
 	var count int
-	if err := database.QueryRow(
+	if err := database.QueryRowContext(
+		context.Background(),
 		"SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?",
 		name,
 	).Scan(&count); err != nil {

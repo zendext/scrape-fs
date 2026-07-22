@@ -75,14 +75,16 @@ flock(LOCK_EX | LOCK_NB)
 1. 准备并校验宿主运行时锁文件路径。
 2. 获取宿主文件系统 daemon 锁。
 3. 准备并校验数据库父目录和路径。
-4. 打开 SQLite 并验证 PRAGMA。
-5. 执行 migration。
-6. 校验和恢复 object store。
-7. 重建内存索引。
-8. daemon 锁证明没有竞争实例持有该运行时后，再清理 stale ScrapeFS mount。
-9. 挂载配置的 FUSE mountpoint，默认为 `/mnt/scrapefs`。
-10. 创建 Unix socket。
-11. 发送 readiness。
+4. 持续持有已校验的父目录文件描述符，并相对该描述符打开 SQLite。
+5. 在不改变持久化数据库设置的情况下读取并校验 `PRAGMA user_version`。
+6. 启用并验证必需 PRAGMA。
+7. 执行 migration。
+8. 校验和恢复 object store。
+9. 重建内存索引。
+10. daemon 锁证明没有竞争实例持有该运行时后，再清理 stale ScrapeFS mount。
+11. 挂载配置的 FUSE mountpoint，默认为 `/mnt/scrapefs`。
+12. 创建 Unix socket。
+13. 发送 readiness。
 
 不得卸载未知 FUSE 文件系统。
 
@@ -238,6 +240,6 @@ orphan_grace_period = "24h"
 
 配置加载和验证不得创建、打开或修改这些路径。路径存在性、所有权、权限和 symlink-safe 打开由实际使用该路径的启动组件负责。
 
-已有的 SQLite `-journal`、`-wal` 和 `-shm` sidecar 属于数据库状态，必须采用与主数据库文件相同的 owner、私有 mode、普通文件和 no-symlink 校验。
+已有的 SQLite `-journal`、`-wal` 和 `-shm` sidecar 属于数据库状态，必须采用与主数据库文件相同的 owner、私有 mode、普通文件和 no-symlink 校验。daemon 在 SQLite 生命周期内持续持有已校验的数据库父目录，并相对该描述符访问主文件和 sidecar。
 
 第一版不需要配置 Source Root、动态 Profile 或通用 RBAC。

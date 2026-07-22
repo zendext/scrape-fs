@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -46,19 +47,40 @@ func releaseLock(lock *os.File) error {
 	return errors.Join(unlockErr, closeErr)
 }
 
-func prepareDatabaseFile(path string) error {
+type preparedDatabase struct {
+	directory *os.File
+	name      string
+}
+
+func (database *preparedDatabase) sqlitePath() string {
+	return filepath.Join(
+		"/proc/self/fd",
+		strconv.FormatUint(uint64(database.directory.Fd()), 10),
+		database.name,
+	)
+}
+
+func (database *preparedDatabase) Close() error {
+	return database.directory.Close()
+}
+
+func prepareDatabase(path string) (_ *preparedDatabase, err error) {
 	parent, name, err := openParentDirectory(path, databaseDirectoryMode, "database directory")
 	if err != nil {
-		return fmt.Errorf("prepare database path %q: %w", path, err)
+		return nil, fmt.Errorf("prepare database path %q: %w", path, err)
 	}
-	defer parent.Close()
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, parent.Close())
+		}
+	}()
 
 	file, err := openRegularFile(parent, name, privateFileMode, "database")
 	if err != nil {
-		return fmt.Errorf("prepare database path %q: %w", path, err)
+		return nil, fmt.Errorf("prepare database path %q: %w", path, err)
 	}
 	if err := file.Close(); err != nil {
-		return err
+		return nil, err
 	}
 
 	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
@@ -69,15 +91,15 @@ func prepareDatabaseFile(path string) error {
 			"database sidecar "+suffix,
 		)
 		if err != nil {
-			return fmt.Errorf("prepare database path %q: %w", path, err)
+			return nil, fmt.Errorf("prepare database path %q: %w", path, err)
 		}
 		if sidecar != nil {
 			if err := sidecar.Close(); err != nil {
-				return fmt.Errorf("close database sidecar %q: %w", suffix, err)
+				return nil, fmt.Errorf("close database sidecar %q: %w", suffix, err)
 			}
 		}
 	}
-	return nil
+	return &preparedDatabase{directory: parent, name: name}, nil
 }
 
 func openParentDirectory(path string, mode os.FileMode, label string) (*os.File, string, error) {

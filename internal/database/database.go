@@ -25,7 +25,9 @@ type Options struct {
 }
 
 type DB struct {
-	sql       *sql.DB
+	pool      *sql.DB
+	conn      *sql.Conn
+	directory *os.File
 	lock      *os.File
 	closeOnce sync.Once
 	closeErr  error
@@ -40,6 +42,16 @@ func OpenWithOptions(ctx context.Context, databasePath string, options Options) 
 }
 
 func open(ctx context.Context, databasePath string, options Options, migrations []migration) (_ *DB, err error) {
+	return openWithPrepareHook(ctx, databasePath, options, migrations, nil)
+}
+
+func openWithPrepareHook(
+	ctx context.Context,
+	databasePath string,
+	options Options,
+	migrations []migration,
+	afterPrepare func() error,
+) (_ *DB, err error) {
 	if options.LockPath == "" {
 		options.LockPath = DefaultLockPath
 	}
@@ -54,43 +66,81 @@ func open(ctx context.Context, databasePath string, options Options, migrations 
 		}
 	}()
 
-	if err := prepareDatabaseFile(databasePath); err != nil {
+	prepared, err := prepareDatabase(databasePath)
+	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, prepared.Close())
+		}
+	}()
+	if afterPrepare != nil {
+		if err := afterPrepare(); err != nil {
+			return nil, fmt.Errorf("after database preparation: %w", err)
+		}
+	}
 
-	sqlDB, err := sql.Open("sqlite", sqliteDSN(databasePath))
+	pool, err := sql.Open("sqlite", sqliteDSN(prepared.sqlitePath()))
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite database %q: %w", databasePath, err)
 	}
 	defer func() {
 		if err != nil {
-			err = errors.Join(err, sqlDB.Close())
+			err = errors.Join(err, pool.Close())
 		}
 	}()
 
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
 
-	if err := sqlDB.PingContext(ctx); err != nil {
+	conn, err := pool.Conn(ctx)
+	if err != nil {
 		return nil, fmt.Errorf("connect SQLite database %q: %w", databasePath, err)
 	}
-	if err := verifyPragmas(ctx, sqlDB); err != nil {
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, conn.Close())
+		}
+	}()
+
+	version, err := readSchemaVersion(ctx, conn)
+	if err != nil {
 		return nil, err
 	}
-	if err := applyMigrations(ctx, sqlDB, migrations); err != nil {
+	if err := validateSchemaVersion(version, migrations); err != nil {
+		return nil, err
+	}
+	if err := configurePragmas(ctx, conn); err != nil {
+		return nil, err
+	}
+	if err := verifyPragmas(ctx, conn); err != nil {
+		return nil, err
+	}
+	if err := applyMigrations(ctx, conn, migrations, version); err != nil {
 		return nil, err
 	}
 
-	return &DB{sql: sqlDB, lock: lock}, nil
+	return &DB{
+		pool:      pool,
+		conn:      conn,
+		directory: prepared.directory,
+		lock:      lock,
+	}, nil
 }
 
-func (database *DB) SQL() *sql.DB {
-	return database.sql
+func (database *DB) Conn() *sql.Conn {
+	return database.conn
 }
 
 func (database *DB) Close() error {
 	database.closeOnce.Do(func() {
-		database.closeErr = errors.Join(database.sql.Close(), releaseLock(database.lock))
+		database.closeErr = errors.Join(
+			database.conn.Close(),
+			database.pool.Close(),
+			database.directory.Close(),
+			releaseLock(database.lock),
+		)
 	})
 	return database.closeErr
 }
@@ -98,16 +148,38 @@ func (database *DB) Close() error {
 func sqliteDSN(databasePath string) string {
 	dsn := &url.URL{Scheme: "file", Path: databasePath}
 	query := dsn.Query()
-	query.Set("mode", "rwc")
-	query.Add("_pragma", "busy_timeout(5000)")
-	query.Add("_pragma", "foreign_keys(ON)")
-	query.Add("_pragma", "journal_mode(WAL)")
-	query.Add("_pragma", "synchronous(FULL)")
+	query.Set("mode", "rw")
 	dsn.RawQuery = query.Encode()
 	return dsn.String()
 }
 
-func verifyPragmas(ctx context.Context, database *sql.DB) error {
+type pragmaConnection interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func configurePragmas(ctx context.Context, conn pragmaConnection) error {
+	for _, statement := range []string{
+		"PRAGMA foreign_keys = ON",
+		"PRAGMA synchronous = FULL",
+		"PRAGMA busy_timeout = 5000",
+	} {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("apply %s: %w", statement, err)
+		}
+	}
+
+	var journalMode string
+	if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&journalMode); err != nil {
+		return fmt.Errorf("apply PRAGMA journal_mode = WAL: %w", err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		return fmt.Errorf("incompatible PRAGMA journal_mode: got %q, want WAL", journalMode)
+	}
+	return nil
+}
+
+func verifyPragmas(ctx context.Context, database pragmaConnection) error {
 	checks := []struct {
 		name string
 		want int

@@ -14,18 +14,26 @@ type migration struct {
 	up      func(context.Context, *sql.Tx) error
 }
 
+type migrationConnection interface {
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 var defaultMigrations = []migration{
 	{version: currentVersion},
 }
 
-func applyMigrations(ctx context.Context, database *sql.DB, migrations []migration) error {
-	if err := validateMigrations(migrations); err != nil {
-		return err
-	}
-
+func readSchemaVersion(ctx context.Context, database migrationConnection) (int, error) {
 	var version int
 	if err := database.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("read database schema version: %w", err)
+		return 0, fmt.Errorf("read database schema version: %w", err)
+	}
+	return version, nil
+}
+
+func validateSchemaVersion(version int, migrations []migration) error {
+	if err := validateMigrations(migrations); err != nil {
+		return err
 	}
 	if version < 0 || version > len(migrations) {
 		return fmt.Errorf(
@@ -35,7 +43,15 @@ func applyMigrations(ctx context.Context, database *sql.DB, migrations []migrati
 			len(migrations),
 		)
 	}
+	return nil
+}
 
+func applyMigrations(
+	ctx context.Context,
+	database migrationConnection,
+	migrations []migration,
+	version int,
+) error {
 	for _, migration := range migrations[version:] {
 		if err := applyMigration(ctx, database, migration); err != nil {
 			return fmt.Errorf("apply database migration %d: %w", migration.version, err)
@@ -54,7 +70,7 @@ func validateMigrations(migrations []migration) error {
 	return nil
 }
 
-func applyMigration(ctx context.Context, database *sql.DB, migration migration) error {
+func applyMigration(ctx context.Context, database migrationConnection, migration migration) error {
 	transaction, err := database.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)

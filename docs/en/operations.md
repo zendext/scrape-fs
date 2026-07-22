@@ -77,14 +77,16 @@ This lock establishes exclusive ownership of the full ScrapeFS runtime on the ho
 1. Prepare and validate the host runtime lock-file path.
 2. Acquire the host-filesystem daemon lock.
 3. Prepare and validate the database parent directory and path.
-4. Open SQLite and validate PRAGMAs.
-5. Run migrations.
-6. Validate and recover the object store.
-7. Rebuild the in-memory index.
-8. Clean a stale ScrapeFS mount after the daemon lock proves no competing instance owns the runtime.
-9. Mount the configured FUSE mountpoint, defaulting to `/mnt/scrapefs`.
-10. Create the Unix socket.
-11. Signal readiness.
+4. Hold the validated parent-directory file descriptor and open SQLite relative to it.
+5. Read and validate `PRAGMA user_version` without changing persistent database settings.
+6. Enable and verify the required PRAGMAs.
+7. Run migrations.
+8. Validate and recover the object store.
+9. Rebuild the in-memory index.
+10. Clean a stale ScrapeFS mount after the daemon lock proves no competing instance owns the runtime.
+11. Mount the configured FUSE mountpoint, defaulting to `/mnt/scrapefs`.
+12. Create the Unix socket.
+13. Signal readiness.
 
 Unknown FUSE filesystems are never unmounted.
 
@@ -240,6 +242,6 @@ The four paths are pairwise disjoint. No path may equal, contain, or be containe
 
 Configuration loading and validation do not create, open, or modify these paths. The startup component that uses a path is responsible for existence, ownership, permissions, and symlink-safe opening.
 
-Existing SQLite `-journal`, `-wal`, and `-shm` sidecars are part of the database state and follow the same ownership, private-mode, regular-file, and no-symlink validation as the main database file.
+Existing SQLite `-journal`, `-wal`, and `-shm` sidecars are part of the database state and follow the same ownership, private-mode, regular-file, and no-symlink validation as the main database file. The daemon keeps the validated database parent directory open and accesses the main file and sidecars relative to that descriptor for the SQLite lifetime.
 
 The first version does not configure Source Roots, dynamic Profiles, or generic RBAC.
