@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -120,6 +121,382 @@ func TestRepositoryUpdateRollsBackNodesVersionAndLog(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("rolled-back node count = %d, want 0", count)
+	}
+}
+
+func TestTransactionCreateLibraryPersistsMatchingRoot(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+
+	var created Library
+	version, err := repository.Update(
+		ctx,
+		testOperation("library.create"),
+		func(transaction *Transaction) error {
+			var err error
+			created, err = transaction.CreateLibrary(ctx, CreateLibrary{
+				Name:           "jellyfin",
+				ProfileName:    "jellyfin",
+				ProfileVersion: 1,
+				Creator:        Actor{Kind: ActorSystem},
+				UID:            1000,
+				GID:            1001,
+				RootMode:       0o775,
+				DirectoryMode:  0o750,
+				ProjectionMode: 0o440,
+				OverlayMode:    0o660,
+			})
+			return err
+		},
+	)
+	if err != nil {
+		t.Fatalf("CreateLibrary: %v", err)
+	}
+	if version != 1 {
+		t.Errorf("version = %d, want 1", version)
+	}
+	if created.ID <= 0 || created.RootNodeID <= 0 {
+		t.Fatalf("created Library = %#v, want persisted IDs", created)
+	}
+	if created.Status != LibraryActive {
+		t.Errorf("status = %q, want %q", created.Status, LibraryActive)
+	}
+
+	libraries, err := repository.Libraries(ctx)
+	if err != nil {
+		t.Fatalf("Libraries: %v", err)
+	}
+	if len(libraries) != 1 {
+		t.Fatalf("Libraries count = %d, want 1", len(libraries))
+	}
+	if libraries[0] != created {
+		t.Errorf("listed Library = %#v, want %#v", libraries[0], created)
+	}
+
+	var rootName string
+	var rootKind NodeKind
+	var rootParentID int64
+	var rootMode int64
+	var rootUID int64
+	var rootGID int64
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
+		return connection.QueryRowContext(ctx, `
+			SELECT name, kind, parent_id, mode, uid, gid
+			FROM nodes
+			WHERE id = ?
+		`, created.RootNodeID).Scan(
+			&rootName,
+			&rootKind,
+			&rootParentID,
+			&rootMode,
+			&rootUID,
+			&rootGID,
+		)
+	}); err != nil {
+		t.Fatalf("read LibraryRoot: %v", err)
+	}
+	if rootName != created.Name ||
+		rootKind != LibraryRoot ||
+		rootParentID != 1 ||
+		rootMode != int64(created.RootMode) ||
+		rootUID != int64(created.UID) ||
+		rootGID != int64(created.GID) {
+		t.Errorf(
+			"LibraryRoot = name %q kind %q parent %d mode %#o uid %d gid %d, want matching Library",
+			rootName,
+			rootKind,
+			rootParentID,
+			rootMode,
+			rootUID,
+			rootGID,
+		)
+	}
+	assertVersionAndLogCount(t, database, 1, 1)
+}
+
+func TestRepositoryLibraryReturnsActiveLibraryByExactName(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+
+	var created Library
+	if _, err := repository.Update(
+		ctx,
+		testOperation("library.create"),
+		func(transaction *Transaction) error {
+			var err error
+			created, err = transaction.CreateLibrary(ctx, CreateLibrary{
+				Name:           "library",
+				ProfileName:    "jellyfin",
+				ProfileVersion: 1,
+				Creator:        Actor{Kind: ActorSystem},
+				UID:            1000,
+				GID:            1000,
+				RootMode:       0o775,
+				DirectoryMode:  0o775,
+				ProjectionMode: 0o444,
+				OverlayMode:    0o664,
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("CreateLibrary: %v", err)
+	}
+
+	found, err := repository.Library(ctx, "library")
+	if err != nil {
+		t.Fatalf("Library: %v", err)
+	}
+	if found != created {
+		t.Errorf("Library = %#v, want %#v", found, created)
+	}
+
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
+		transaction, err := connection.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err := transaction.ExecContext(ctx, `
+			INSERT INTO libraries (
+				name,
+				status,
+				root_node_id,
+				profile_name,
+				profile_version,
+				uid,
+				gid,
+				root_mode,
+				directory_mode,
+				projection_file_mode,
+				overlay_file_mode,
+				created_at,
+				updated_at,
+				retired_at
+			) VALUES ('retired', 'RETIRED', NULL, 'jellyfin', 1, 1000, 1000, 509, 509, 292, 436, 1, 1, 1)
+		`); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}); err != nil {
+		t.Fatalf("insert retired Library: %v", err)
+	}
+
+	for _, name := range []string{"Library", "missing", "retired"} {
+		if _, err := repository.Library(ctx, name); !errors.Is(err, ErrLibraryNotFound) {
+			t.Errorf("Library(%q) error = %v, want ErrLibraryNotFound", name, err)
+		}
+	}
+}
+
+func TestTransactionCreateLibraryRollsBackLibraryAndRoot(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+	transactionFailure := errors.New("transaction failed")
+
+	_, err := repository.Update(
+		ctx,
+		testOperation("library.create"),
+		func(transaction *Transaction) error {
+			if _, err := transaction.CreateLibrary(ctx, CreateLibrary{
+				Name:           "rolled-back-library",
+				ProfileName:    "jellyfin",
+				ProfileVersion: 1,
+				Creator:        Actor{Kind: ActorSystem},
+				UID:            1000,
+				GID:            1000,
+				RootMode:       0o775,
+				DirectoryMode:  0o775,
+				ProjectionMode: 0o444,
+				OverlayMode:    0o664,
+			}); err != nil {
+				return err
+			}
+			return transactionFailure
+		},
+	)
+	if !errors.Is(err, transactionFailure) {
+		t.Fatalf("Update error = %v, want transaction failure", err)
+	}
+
+	libraries, listErr := repository.Libraries(ctx)
+	if listErr != nil {
+		t.Fatalf("Libraries: %v", listErr)
+	}
+	if len(libraries) != 0 {
+		t.Errorf("Libraries = %#v, want empty", libraries)
+	}
+	var roots int
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
+		return connection.QueryRowContext(
+			ctx,
+			"SELECT COUNT(*) FROM nodes WHERE kind = 'LIBRARY_ROOT'",
+		).Scan(&roots)
+	}); err != nil {
+		t.Fatalf("count LibraryRoot nodes: %v", err)
+	}
+	if roots != 0 {
+		t.Errorf("LibraryRoot count = %d, want 0", roots)
+	}
+	assertVersionAndLogCount(t, database, 0, 0)
+}
+
+func TestTransactionCreateLibraryRejectsUnavailableProfileWithoutMutation(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+
+	_, err := repository.Update(
+		ctx,
+		testOperation("library.create"),
+		func(transaction *Transaction) error {
+			_, err := transaction.CreateLibrary(ctx, CreateLibrary{
+				Name:           "unavailable-profile",
+				ProfileName:    "unavailable",
+				ProfileVersion: 99,
+				Creator:        Actor{Kind: ActorSystem},
+				UID:            1000,
+				GID:            1000,
+				RootMode:       0o775,
+				DirectoryMode:  0o775,
+				ProjectionMode: 0o444,
+				OverlayMode:    0o664,
+			})
+			return err
+		},
+	)
+	if !errors.Is(err, ErrProfileNotFound) {
+		t.Fatalf("CreateLibrary error = %v, want ErrProfileNotFound", err)
+	}
+
+	libraries, listErr := repository.Libraries(ctx)
+	if listErr != nil {
+		t.Fatalf("Libraries: %v", listErr)
+	}
+	if len(libraries) != 0 {
+		t.Errorf("Libraries = %#v, want empty", libraries)
+	}
+	var roots int
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
+		return connection.QueryRowContext(
+			ctx,
+			"SELECT COUNT(*) FROM nodes WHERE kind = 'LIBRARY_ROOT'",
+		).Scan(&roots)
+	}); err != nil {
+		t.Fatalf("count LibraryRoot nodes: %v", err)
+	}
+	if roots != 0 {
+		t.Errorf("LibraryRoot count = %d, want 0", roots)
+	}
+	assertVersionAndLogCount(t, database, 0, 0)
+}
+
+func TestLibrariesRejectsMismatchedRoot(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+
+	if _, err := repository.Update(
+		ctx,
+		testOperation("library.create"),
+		func(transaction *Transaction) error {
+			_, err := transaction.CreateLibrary(ctx, CreateLibrary{
+				Name:           "library",
+				ProfileName:    "jellyfin",
+				ProfileVersion: 1,
+				Creator:        Actor{Kind: ActorSystem},
+				UID:            1000,
+				GID:            1000,
+				RootMode:       0o775,
+				DirectoryMode:  0o775,
+				ProjectionMode: 0o444,
+				OverlayMode:    0o664,
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("CreateLibrary: %v", err)
+	}
+
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
+		transaction, err := connection.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err := transaction.ExecContext(
+			ctx,
+			"UPDATE nodes SET name = 'mismatched' WHERE kind = 'LIBRARY_ROOT'",
+		); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}); err != nil {
+		t.Fatalf("corrupt LibraryRoot: %v", err)
+	}
+
+	if libraries, err := repository.Libraries(ctx); !errors.Is(err, ErrInvalidLibrary) {
+		t.Fatalf("Libraries error = %v, want ErrInvalidLibrary; libraries=%#v", err, libraries)
+	}
+}
+
+func TestCreateLibraryValidate(t *testing.T) {
+	valid := CreateLibrary{
+		Name:           "library",
+		ProfileName:    "jellyfin",
+		ProfileVersion: 1,
+		Creator:        Actor{Kind: ActorSystem},
+		UID:            1000,
+		GID:            1000,
+		RootMode:       0o775,
+		DirectoryMode:  0o775,
+		ProjectionMode: 0o444,
+		OverlayMode:    0o664,
+	}
+	tests := map[string]CreateLibrary{
+		"invalid name": func() CreateLibrary {
+			request := valid
+			request.Name = "../library"
+			return request
+		}(),
+		"empty Profile": func() CreateLibrary {
+			request := valid
+			request.ProfileName = " "
+			return request
+		}(),
+		"invalid Profile version": func() CreateLibrary {
+			request := valid
+			request.ProfileVersion = 0
+			return request
+		}(),
+		"invalid creator": func() CreateLibrary {
+			request := valid
+			request.Creator = Actor{}
+			return request
+		}(),
+		"invalid root mode": func() CreateLibrary {
+			request := valid
+			request.RootMode = fs.ModeDir | 0o775
+			return request
+		}(),
+		"writable Projection mode": func() CreateLibrary {
+			request := valid
+			request.ProjectionMode = 0o644
+			return request
+		}(),
+	}
+
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid CreateLibrary.Validate: %v", err)
+	}
+	for name, request := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := request.Validate(); !errors.Is(err, ErrInvalidLibrary) {
+				t.Errorf("Validate error = %v, want ErrInvalidLibrary", err)
+			}
+		})
 	}
 }
 
