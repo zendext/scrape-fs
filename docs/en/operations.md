@@ -10,7 +10,7 @@ The first version uses three identity boundaries:
 
 1. **Administrator**: root or a configured administrator UID; manages Libraries and the daemon.
 2. **Control user**: a member of `scrapefs-control`; selects source paths, creates Projections, runs Scrapes, applies/undoes them, and uses status/doctor.
-3. **Agent worker**: the configured Agent UID with a valid session token; accesses only Agent APIs.
+3. **Agent provider**: runs inside the daemon or as a trusted worker launched under the daemon's effective UID; accesses the current session only through the Agent controller.
 
 Recommended socket:
 
@@ -26,6 +26,8 @@ The daemon obtains caller identity through Unix peer credentials.
 Members of `scrapefs-control` are trusted source-path selectors. The daemon service account should have read access only to intended media directories so control users cannot use it to read unrelated sensitive files.
 
 An Agent session token cannot call ordinary control operations.
+
+The first version does not configure a separate Agent UID and does not use Unix UID as an isolation boundary between the daemon and Agent. A separate Agent worker process uses the daemon's effective UID and the current session token. An untrusted external Agent worker would require a dedicated UID or sandbox and is outside the first-version scope.
 
 ## 2. Library Lifecycle
 
@@ -74,7 +76,7 @@ Failure exits immediately without cleaning the mount or writing the database.
 4. validate and recover the object store.
 5. Rebuild the in-memory index.
 6. After proving no live daemon exists, clean a stale ScrapeFS mount.
-7. Mount `/mnt/scrapefs`.
+7. Mount the configured FUSE mountpoint, defaulting to `/mnt/scrapefs`.
 8. Create the Unix socket.
 9. Signal readiness.
 
@@ -146,16 +148,88 @@ scrapefsd
 
 ## 8. First-Version Configuration
 
-Required configuration includes:
+### 8.1 Configuration File
+
+The first version uses TOML.
+
+The fixed default configuration file is:
+
+```text
+/etc/scrapefs/config.toml
+```
+
+The daemon can override it with:
+
+```bash
+scrapefsd --config /path/to/config.toml
+```
+
+If the selected file is missing, unreadable, syntactically invalid, contains an unknown field, or fails validation, the daemon exits before creating a database, directory, socket, lock, or mount.
+
+The first version does not read configuration from environment variables, merge multiple configuration sources, or support live reload.
+
+### 8.2 Schema and Defaults
+
+```toml
+[storage]
+database_path = "/var/lib/scrapefs/scrapefs.db"
+overlay_store_path = "/var/lib/scrapefs/objects"
+
+[fuse]
+mountpoint = "/mnt/scrapefs"
+entry_timeout = "2s"
+attr_timeout = "2s"
+negative_timeout = "0s"
+
+[control]
+socket_path = "/run/scrapefs/scrapefs.sock"
+socket_mode = 0o660
+administrator_uid = 0
+
+[agent]
+max_text_file_size = "4MiB"
+max_binary_file_size = "32MiB"
+max_session_total_size = "256MiB"
+max_upload_duration = "120s"
+
+[gc]
+orphan_grace_period = "24h"
+```
+
+`storage.overlay_store_path` is the actual on-disk root for OverlayFile contents and is the object-store root. There is no second Overlay storage path.
+
+The first version does not configure an Agent UID. The Agent uses the daemon process's effective UID.
+
+Fixed behavior:
+
+- `kernel_cache = off`;
+- `writeback_cache = off`;
+- `auto_cache = on`;
+- the socket group is `scrapefs-control`.
+
+These are not configuration fields.
+
+### 8.3 Value Representation
+
+- UIDs are non-negative decimal integers in the `uint32` range;
+- file modes are TOML octal integers such as `0o660` and contain only permission bits from `0o001` through `0o777`;
+- durations use Go-duration-style strings such as `"2s"`, `"120s"`, and `"24h"`;
+- sizes use binary-unit strings; the first version supports `KiB`, `MiB`, and `GiB`;
+- paths are strings.
+
+Parsing rejects unknown fields, out-of-range UIDs, invalid modes, and non-positive size quotas. FUSE TTLs are non-negative; `max_upload_duration` and `orphan_grace_period` are positive. `negative_timeout` may be `0s`.
+
+### 8.4 Path Constraints
+
+The following four paths are lexically normalized absolute paths:
 
 - SQLite database path;
-- object-store path;
+- Overlay object-store path;
 - FUSE mountpoint;
-- socket path and permissions;
-- administrator UID;
-- Agent UID;
-- FUSE cache TTLs;
-- Agent upload quotas;
-- object GC grace period.
+- Unix socket path.
+
+The four paths are pairwise disjoint. No path may equal, contain, or be contained by another path.
+
+Configuration loading and validation do not create, open, or modify these paths. The startup component that uses a path is responsible for existence, ownership, permissions, and symlink-safe opening.
 
 The first version does not configure Source Roots, dynamic Profiles, or generic RBAC.

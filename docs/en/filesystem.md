@@ -154,6 +154,8 @@ FUSE rename and `projection mv` across Libraries return `EXDEV`.
 
 ## 6. Object Store
 
+The object-store root is configured by `storage.overlay_store_path` and is the actual on-disk location of OverlayFile contents. Default layout:
+
 ```text
 /var/lib/scrapefs/objects/
 ├── staging/

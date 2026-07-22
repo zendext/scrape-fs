@@ -46,7 +46,7 @@ Only the daemon may:
 
 The CLI and Agent MUST NOT access SQLite or the object store directly.
 
-The control socket is:
+The control protocol uses the configured Unix socket. Default:
 
 ```text
 /run/scrapefs/scrapefs.sock
@@ -77,7 +77,7 @@ Requirements:
 
 ## 4. Mount and Library
 
-The first version creates one FUSE mount:
+The first version creates one configured FUSE mount. Default:
 
 ```text
 /mnt/scrapefs

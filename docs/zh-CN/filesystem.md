@@ -152,6 +152,8 @@ RENAME_NOREPLACE
 
 ## 6. Object Store
 
+object store 根目录由 `storage.overlay_store_path` 配置，它是 OverlayFile 内容的实际落盘位置。默认布局：
+
 ```text
 /var/lib/scrapefs/objects/
 ├── staging/

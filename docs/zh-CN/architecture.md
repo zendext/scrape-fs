@@ -44,7 +44,7 @@ scrapefsd
 
 CLI 和 Agent 禁止直接访问 SQLite 或 object store。
 
-控制协议使用：
+控制协议使用配置的 Unix socket。默认值：
 
 ```text
 /run/scrapefs/scrapefs.sock
@@ -75,7 +75,7 @@ PRAGMA busy_timeout = 5000;
 
 ## 4. Mount 和 Library
 
-第一版只创建一个 FUSE 挂载点：
+第一版只创建一个配置的 FUSE 挂载点。默认值：
 
 ```text
 /mnt/scrapefs

@@ -137,7 +137,9 @@ Agent 禁止：
 - apply、undo 或 discard Scrape；
 - 管理 Library。
 
-外部 Agent worker 必须同时使用配置的 Agent Unix UID 和当前 session 的短期 token。
+第一版 Agent provider 在 daemon 进程内运行，或由 daemon 以自身有效 UID 启动为受信 worker。独立 worker 调用 Agent API 时仍必须携带当前 session 的短期 token。
+
+第一版不支持使用独立 Unix UID 或 sandbox 隔离的不可信外部 Agent worker。
 
 ## 6. MediaModel
 
