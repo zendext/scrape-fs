@@ -6,6 +6,26 @@ A Scrape is a set of Projections submitted by an external tool, validated by Scr
 
 Media identification does not run inside `scrapefsd`. An external Agent skill, script, or manual tool reads source directories, runs `ffprobe`, queries metadata, resolves ambiguity, and selects target paths. ScrapeFS is responsible only for deterministic source validation, path validation, conflict checks, review, apply, and undo.
 
+## Difference from the Earlier Specification
+
+The earlier specification planned:
+
+```bash
+scrapefs scrape \
+  /mnt/disk1/downloads/Dune.2021.REMUX \
+  --library jellyfin
+```
+
+That command implied that the daemon would enumerate the source directory, run Agent analysis, and generate Projections. The behavior was never implemented and is removed from the target v1 CLI contract without a compatibility alias.
+
+Responsibilities are now split as follows:
+
+1. An external Agent or another tool performs media scraping and generates a `scrapefs.scrape/v1` plan.
+2. `scrapefs scrape submit` sends the plan to the daemon.
+3. The daemon owns review data, revisions, validation, atomic apply, and undo.
+
+Therefore, Scrape in the current documentation means the plan lifecycle, not a media-identification process running inside the daemon.
+
 ## 1. External Agent Boundary
 
 The external Agent:

@@ -6,6 +6,26 @@ Scrape 是由外部工具提交、经 ScrapeFS 校验并可原子应用的一组
 
 媒体识别不在 `scrapefsd` 中执行。外部 Agent Skill、脚本或人工工具负责读取源目录、调用 `ffprobe`、查询元数据、处理歧义并选择目标路径。ScrapeFS 只负责确定性的源文件校验、路径校验、冲突检查、预览、apply 和 undo。
 
+## 与早期规范的差异
+
+早期规范计划使用：
+
+```bash
+scrapefs scrape \
+  /mnt/disk1/downloads/Dune.2021.REMUX \
+  --library jellyfin
+```
+
+该命令意味着 daemon 枚举源目录、运行 Agent 分析并生成 Projection。这个行为尚未实现，并从目标 v1 CLI 契约中移除，不提供兼容 alias。
+
+当前职责拆分为：
+
+1. 外部 Agent 或其他工具执行媒体刮削并生成 `scrapefs.scrape/v1` Plan。
+2. `scrapefs scrape submit` 将 Plan 提交给 daemon。
+3. daemon 负责审阅数据、revision、validate、原子 apply 和 undo。
+
+因此，当前文档中的 Scrape 指 Plan 生命周期，不再指 daemon 内部执行的媒体识别过程。
+
 ## 1. 外部 Agent 边界
 
 外部 Agent：

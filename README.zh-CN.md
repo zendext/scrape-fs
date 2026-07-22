@@ -69,6 +69,8 @@ scrapefs scrape apply scrape-42 --revision 1
 
 `scrapefsd` 不运行模型，也不向 Agent 暴露文件读取、`ffprobe` 或网络工具。它只安全打开 Plan 中显式列出的源文件，执行路径和冲突校验，并原子创建 Projection。NFO 和海报由外部 Agent 在 apply 后通过普通 FUSE 文件操作创建。
 
+早期规范中的 `scrapefs scrape <source> --library <name>` 假设 daemon 会主动枚举和识别媒体。该命令从目标 v1 CLI 中移除；`Scrape` 现在表示外部生成 Plan 的审阅、revision、apply 和 undo 生命周期。
+
 ## 第一版边界
 
 第一版面向：

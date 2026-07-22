@@ -69,6 +69,8 @@ scrapefs scrape apply scrape-42 --revision 1
 
 `scrapefsd` does not run a model or expose file-read, `ffprobe`, or network tools to an Agent. It securely opens only the sources explicitly named in the plan, validates paths and conflicts, and creates the Projections atomically. The external Agent creates NFO files and artwork through ordinary FUSE operations after apply.
 
+The earlier specification used `scrapefs scrape <source> --library <name>` and assumed the daemon would enumerate and identify media. That command is removed from the target v1 CLI. `Scrape` now means the review, revision, apply, and undo lifecycle of an externally generated plan.
+
 ## First-Version Boundaries
 
 The first version targets:
