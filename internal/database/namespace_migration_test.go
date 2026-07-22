@@ -725,6 +725,25 @@ func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
 
 	if _, err := database.conn.ExecContext(
 		context.Background(),
+		"UPDATE operation_log SET scrape_id = NULL WHERE id = ?",
+		scrapeLogID,
+	); err == nil {
+		t.Fatal("clear operation log Scrape ID while Scrape exists succeeded")
+	}
+	var retainedScrapeID int64
+	if err := database.conn.QueryRowContext(
+		context.Background(),
+		"SELECT scrape_id FROM operation_log WHERE id = ?",
+		scrapeLogID,
+	).Scan(&retainedScrapeID); err != nil {
+		t.Fatalf("read retained operation log Scrape ID: %v", err)
+	}
+	if retainedScrapeID != scrapeID {
+		t.Errorf("retained operation log Scrape ID = %d, want %d", retainedScrapeID, scrapeID)
+	}
+
+	if _, err := database.conn.ExecContext(
+		context.Background(),
 		"DELETE FROM scrapes WHERE id = ?",
 		scrapeID,
 	); err != nil {

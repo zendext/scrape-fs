@@ -484,6 +484,11 @@ BEFORE UPDATE ON operation_log
 WHEN NOT (
 	OLD.scrape_id IS NOT NULL
 	AND NEW.scrape_id IS NULL
+	AND NOT EXISTS (
+		SELECT 1
+		FROM scrapes
+		WHERE id = OLD.scrape_id
+	)
 	AND NEW.id IS OLD.id
 	AND NEW.operation IS OLD.operation
 	AND NEW.actor_kind IS OLD.actor_kind
