@@ -83,6 +83,8 @@ Persistent internal identities use SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` va
 
 The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. Later Object and Scrape migrations extend those tables before their corresponding behavior creates rows.
 
+The first version pins one SQLite connection. Repository reads and namespace transactions serialize access to that connection, so another goroutine cannot execute a read inside an uncommitted transaction.
+
 ## 4. Mount and Library
 
 The first version creates one configured FUSE mount. Default:
@@ -234,6 +236,8 @@ SQLite stores a monotonically increasing `namespace_version`.
 
 The initial namespace version is `0`. Creating GlobalRoot during migration does not increment it and does not write an operation-log entry.
 
+A namespace transaction that makes no structural change does not increment the version or write a structural operation-log entry.
+
 Each successful transaction that changes namespace structure increments it once, including:
 
 - create, mkdir, rename, unlink, and rmdir;
@@ -270,7 +274,7 @@ Requirements:
 
 - namespace changes and their log entry share one SQLite transaction;
 - `actor_kind` distinguishes at least control, agent, fuse, and system;
-- `details_json` stores required path and node-kind snapshots;
+- `details_json` stores non-empty, equally sized `paths` and `node_kinds` arrays whose entries are paired snapshots;
 - strong foreign keys MUST NOT prevent node or Library retirement;
 - the first version uses the log for audit, doctor, and manual recovery analysis;
 - event replay is not provided.

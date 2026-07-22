@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zendext/scrape-fs/internal/database"
 )
@@ -167,9 +168,8 @@ func TestRepositoryUpdateRejectsInvalidOperationBeforeMutation(t *testing.T) {
 	called := false
 
 	_, err := repository.Update(context.Background(), Operation{
-		Name:    "invalid",
-		Actor:   Actor{Kind: ActorSystem},
-		Details: json.RawMessage("{"),
+		Name:  "invalid",
+		Actor: Actor{Kind: ActorSystem},
 	}, func(*Transaction) error {
 		called = true
 		return nil
@@ -181,6 +181,201 @@ func TestRepositoryUpdateRejectsInvalidOperationBeforeMutation(t *testing.T) {
 		t.Error("Update callback was called for invalid operation")
 	}
 	assertVersionAndLogCount(t, database, 0, 0)
+}
+
+func TestRepositorySerializesLookupWithUpdate(t *testing.T) {
+	database := openTestDatabase(t)
+	writer := NewRepository(database)
+	reader := NewRepository(database)
+	ctx := context.Background()
+	globalRoot, err := writer.GlobalRoot(ctx)
+	if err != nil {
+		t.Fatalf("GlobalRoot: %v", err)
+	}
+
+	created := make(chan int64, 1)
+	release := make(chan struct{})
+	updateDone := make(chan error, 1)
+	transactionFailure := errors.New("rollback transaction")
+	go func() {
+		_, err := writer.Update(ctx, testOperation("test.concurrent"), func(transaction *Transaction) error {
+			libraryRoot, err := transaction.CreateNode(ctx, CreateNode{
+				ParentID: globalRoot.ID,
+				Name:     "uncommitted",
+				Kind:     LibraryRoot,
+				Creator:  Actor{Kind: ActorSystem},
+				Attributes: Attributes{
+					Mode: 0o775,
+					UID:  1000,
+					GID:  1000,
+				},
+			})
+			if err != nil {
+				return err
+			}
+			created <- libraryRoot.ID
+			<-release
+			return transactionFailure
+		})
+		updateDone <- err
+	}()
+
+	libraryRootID := <-created
+	lookupDone := make(chan error, 1)
+	go func() {
+		_, err := reader.Lookup(ctx, libraryRootID, "missing")
+		lookupDone <- err
+	}()
+
+	select {
+	case err := <-lookupDone:
+		t.Fatalf("Lookup returned before transaction completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-updateDone; !errors.Is(err, transactionFailure) {
+		t.Fatalf("Update error = %v, want transaction failure", err)
+	}
+	if err := <-lookupDone; !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Lookup error = %v, want ErrNotFound", err)
+	}
+	assertVersionAndLogCount(t, database, 0, 0)
+}
+
+func TestRepositorySerializesConcurrentUpdates(t *testing.T) {
+	database := openTestDatabase(t)
+	firstRepository := NewRepository(database)
+	secondRepository := NewRepository(database)
+	ctx := context.Background()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := firstRepository.Update(ctx, testOperation("test.first"), func(*Transaction) error {
+			close(started)
+			<-release
+			return nil
+		})
+		firstDone <- err
+	}()
+	<-started
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := secondRepository.Update(ctx, testOperation("test.second"), func(*Transaction) error {
+			return nil
+		})
+		secondDone <- err
+	}()
+
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second Update returned before first completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Update: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second Update: %v", err)
+	}
+	assertVersionAndLogCount(t, database, 0, 0)
+}
+
+func TestRepositoryNoOpUpdateDoesNotIncrementVersionOrLog(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+
+	version, err := repository.Update(
+		context.Background(),
+		testOperation("test.noop"),
+		func(*Transaction) error {
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if version != 0 {
+		t.Errorf("version = %d, want 0", version)
+	}
+	assertVersionAndLogCount(t, database, 0, 0)
+}
+
+func TestManagedDirectoryNoOpsDoNotIncrementVersionOrLog(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+	globalRoot, err := repository.GlobalRoot(ctx)
+	if err != nil {
+		t.Fatalf("GlobalRoot: %v", err)
+	}
+	attributes := Attributes{Mode: 0o775, UID: 1000, GID: 1000}
+
+	var libraryRootID int64
+	var userDirectoryID int64
+	if _, err := repository.Update(ctx, testOperation("test.create"), func(transaction *Transaction) error {
+		libraryRoot, err := transaction.CreateNode(ctx, CreateNode{
+			ParentID:   globalRoot.ID,
+			Name:       "library",
+			Kind:       LibraryRoot,
+			Creator:    Actor{Kind: ActorSystem},
+			Attributes: attributes,
+		})
+		if err != nil {
+			return err
+		}
+		libraryRootID = libraryRoot.ID
+		if _, err := transaction.EnsureManagedDirectories(
+			ctx,
+			libraryRoot.ID,
+			[]string{"Movies"},
+			attributes,
+			Actor{Kind: ActorSystem},
+		); err != nil {
+			return err
+		}
+		userDirectory, err := transaction.CreateNode(ctx, CreateNode{
+			ParentID:   libraryRoot.ID,
+			Name:       "User",
+			Kind:       Directory,
+			Creator:    Actor{Kind: ActorFuse, ID: int64Pointer(1000)},
+			Attributes: attributes,
+		})
+		userDirectoryID = userDirectory.ID
+		return err
+	}); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+	assertVersionAndLogCount(t, database, 1, 1)
+
+	if version, err := repository.Update(ctx, testOperation("test.ensure"), func(transaction *Transaction) error {
+		_, err := transaction.EnsureManagedDirectories(
+			ctx,
+			libraryRootID,
+			[]string{"Movies"},
+			attributes,
+			Actor{Kind: ActorSystem},
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("ensure existing directory: %v", err)
+	} else if version != 1 {
+		t.Errorf("ensure no-op version = %d, want 1", version)
+	}
+
+	if version, err := repository.Update(ctx, testOperation("test.prune"), func(transaction *Transaction) error {
+		return transaction.PruneManagedDirectories(ctx, libraryRootID, userDirectoryID)
+	}); err != nil {
+		t.Fatalf("prune user directory: %v", err)
+	} else if version != 1 {
+		t.Errorf("prune no-op version = %d, want 1", version)
+	}
+	assertVersionAndLogCount(t, database, 1, 1)
 }
 
 func TestCreateNodeRejectsWritableProjectionMode(t *testing.T) {
@@ -470,9 +665,12 @@ func TestValidateRelativePath(t *testing.T) {
 
 func testOperation(name string) Operation {
 	return Operation{
-		Name:    name,
-		Actor:   Actor{Kind: ActorSystem},
-		Details: json.RawMessage(`{"paths":[],"node_kinds":[]}`),
+		Name:  name,
+		Actor: Actor{Kind: ActorSystem},
+		Details: OperationDetails{
+			Paths:     []string{"library"},
+			NodeKinds: []NodeKind{LibraryRoot},
+		},
 	}
 }
 

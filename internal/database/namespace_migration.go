@@ -207,6 +207,76 @@ BEGIN
 	  ) NOT IN ('LIBRARY_ROOT', 'DIRECTORY');
 END;
 
+CREATE TRIGGER nodes_protect_id
+BEFORE UPDATE OF id ON nodes
+BEGIN
+	SELECT RAISE(ABORT, 'node ID cannot change');
+END;
+
+CREATE TRIGGER nodes_protect_global_root_update
+BEFORE UPDATE OF
+	parent_id,
+	name,
+	kind,
+	source_path,
+	source_device_id,
+	source_inode,
+	cached_size,
+	cached_atime_ns,
+	cached_mtime_ns,
+	cached_source_ctime_ns,
+	verified_at_ns,
+	object_id,
+	origin_scrape_id,
+	creator_kind,
+	creator_id,
+	managed_directory,
+	mode,
+	uid,
+	gid,
+	created_at
+ON nodes
+WHEN OLD.kind = 'GLOBAL_ROOT'
+BEGIN
+	SELECT RAISE(ABORT, 'GLOBAL_ROOT identity cannot change');
+END;
+
+CREATE TRIGGER nodes_validate_kind_children
+BEFORE UPDATE OF kind ON nodes
+WHEN NEW.kind IN ('PROJECTION_FILE', 'OVERLAY_FILE')
+ AND EXISTS (
+	SELECT 1
+	FROM nodes AS child
+	WHERE child.parent_id = OLD.id
+ )
+BEGIN
+	SELECT RAISE(ABORT, 'node with children must remain a directory');
+END;
+
+CREATE TRIGGER nodes_prevent_parent_cycle
+BEFORE UPDATE OF parent_id ON nodes
+WHEN NEW.parent_id IS NOT OLD.parent_id
+BEGIN
+	SELECT RAISE(ABORT, 'node cannot move into its own subtree')
+	WHERE NEW.parent_id = OLD.id
+	   OR EXISTS (
+		WITH RECURSIVE descendants(id) AS (
+			SELECT id
+			FROM nodes
+			WHERE parent_id = OLD.id
+
+			UNION
+
+			SELECT child.id
+			FROM nodes AS child
+			JOIN descendants AS parent ON child.parent_id = parent.id
+		)
+		SELECT 1
+		FROM descendants
+		WHERE id = NEW.parent_id
+	   );
+END;
+
 CREATE TRIGGER nodes_protect_global_root
 BEFORE DELETE ON nodes
 WHEN OLD.kind = 'GLOBAL_ROOT'
@@ -312,7 +382,20 @@ CREATE TABLE operation_log (
 	actor_id INTEGER,
 	scrape_id INTEGER REFERENCES scrapes(id) ON DELETE SET NULL,
 	namespace_version INTEGER NOT NULL CHECK (namespace_version >= 0),
-	details_json TEXT NOT NULL CHECK (json_valid(details_json)),
+	details_json TEXT NOT NULL CHECK (
+		CASE
+			WHEN json_valid(details_json) THEN
+				COALESCE(
+					json_type(details_json, '$.paths') = 'array'
+					AND json_array_length(details_json, '$.paths') > 0
+					AND json_type(details_json, '$.node_kinds') = 'array'
+					AND json_array_length(details_json, '$.node_kinds') =
+						json_array_length(details_json, '$.paths'),
+					0
+				)
+			ELSE 0
+		END
+	),
 	created_at INTEGER NOT NULL,
 	CHECK (
 		(actor_kind = 'system' AND actor_id IS NULL)
@@ -320,6 +403,31 @@ CREATE TABLE operation_log (
 		(actor_kind <> 'system' AND actor_id IS NOT NULL)
 	)
 ) STRICT;
+
+CREATE TRIGGER operation_log_validate_details
+BEFORE INSERT ON operation_log
+BEGIN
+	SELECT RAISE(ABORT, 'operation path snapshots must be non-empty text')
+	WHERE EXISTS (
+		SELECT 1
+		FROM json_each(NEW.details_json, '$.paths')
+		WHERE type <> 'text' OR value = ''
+	);
+
+	SELECT RAISE(ABORT, 'operation node-kind snapshots are invalid')
+	WHERE EXISTS (
+		SELECT 1
+		FROM json_each(NEW.details_json, '$.node_kinds')
+		WHERE type <> 'text'
+		   OR value NOT IN (
+			'GLOBAL_ROOT',
+			'LIBRARY_ROOT',
+			'DIRECTORY',
+			'PROJECTION_FILE',
+			'OVERLAY_FILE'
+		   )
+	);
+END;
 
 CREATE INDEX operation_log_namespace_version
 ON operation_log(namespace_version);

@@ -81,6 +81,8 @@ SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 dae
 
 基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。后续 Object 和 Scrape migration 必须在对应行为开始创建记录前扩展这些表。
 
+第一版固定使用一个 SQLite 连接。Repository 读取与命名空间事务必须串行访问该连接，避免其他 goroutine 的读取进入尚未提交的事务。
+
 ## 4. Mount 和 Library
 
 第一版只创建一个配置的 FUSE 挂载点。默认值：
@@ -232,6 +234,8 @@ SQLite 保存单调递增的 `namespace_version`。
 
 初始 namespace version 为 `0`。migration 创建 GlobalRoot 时不增加版本，也不写 operation log。
 
+未发生结构修改的命名空间事务不增加版本，也不写结构操作日志。
+
 任何成功改变节点结构的事务只增加一次版本，包括：
 
 - create、mkdir、rename、unlink、rmdir；
@@ -268,7 +272,7 @@ operation_log
 
 - 命名空间操作的日志与对应修改处于同一 SQLite 事务；
 - `actor_kind` 至少区分 control、agent、fuse 和 system；
-- `details_json` 保存受影响节点的路径和类型快照；
+- `details_json` 使用非空且长度相同的 `paths` 与 `node_kinds` 数组，按相同下标保存路径和节点类型快照；
 - 日志不得通过强外键阻止节点或 Library retire；
 - 第一版日志用于审计、doctor 和人工恢复分析；
 - 第一版不提供事件重放。

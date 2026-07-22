@@ -16,19 +16,24 @@ import (
 )
 
 type Repository struct {
-	connection *sql.Conn
-	now        func() time.Time
+	database *database.DB
+	now      func() time.Time
 }
 
 func NewRepository(opened *database.DB) *Repository {
 	return &Repository{
-		connection: opened.Conn(),
-		now:        time.Now,
+		database: opened,
+		now:      time.Now,
 	}
 }
 
 func (repository *Repository) GlobalRoot(ctx context.Context) (Node, error) {
-	node, err := queryNode(ctx, repository.connection, "id = ?", int64(1))
+	var node Node
+	err := repository.database.UseConnection(func(connection *sql.Conn) error {
+		var err error
+		node, err = queryNode(ctx, connection, "id = ?", int64(1))
+		return err
+	})
 	if err != nil {
 		return Node{}, fmt.Errorf("read global root: %w", err)
 	}
@@ -40,10 +45,12 @@ func (repository *Repository) GlobalRoot(ctx context.Context) (Node, error) {
 
 func (repository *Repository) NamespaceVersion(ctx context.Context) (int64, error) {
 	var version int64
-	if err := repository.connection.QueryRowContext(
-		ctx,
-		"SELECT version FROM namespace_state WHERE singleton = 1",
-	).Scan(&version); err != nil {
+	if err := repository.database.UseConnection(func(connection *sql.Conn) error {
+		return connection.QueryRowContext(
+			ctx,
+			"SELECT version FROM namespace_state WHERE singleton = 1",
+		).Scan(&version)
+	}); err != nil {
 		return 0, fmt.Errorf("read namespace version: %w", err)
 	}
 	return version, nil
@@ -59,30 +66,38 @@ func (repository *Repository) Lookup(
 		return Node{}, err
 	}
 
-	current, err := queryNode(ctx, repository.connection, "id = ?", libraryRootID)
-	if err != nil {
-		return Node{}, fmt.Errorf("read library root: %w", err)
-	}
-	if current.Kind != LibraryRoot {
-		return Node{}, fmt.Errorf(
-			"%w: node %d is %s",
-			ErrInvalidRoot,
-			libraryRootID,
-			current.Kind,
-		)
-	}
-
-	for _, component := range components {
-		current, err = queryNode(
-			ctx,
-			repository.connection,
-			"parent_id = ? AND name = ?",
-			current.ID,
-			component,
-		)
+	var current Node
+	err = repository.database.UseConnection(func(connection *sql.Conn) error {
+		var err error
+		current, err = queryNode(ctx, connection, "id = ?", libraryRootID)
 		if err != nil {
-			return Node{}, fmt.Errorf("lookup component %q: %w", component, err)
+			return fmt.Errorf("read library root: %w", err)
 		}
+		if current.Kind != LibraryRoot {
+			return fmt.Errorf(
+				"%w: node %d is %s",
+				ErrInvalidRoot,
+				libraryRootID,
+				current.Kind,
+			)
+		}
+
+		for _, component := range components {
+			current, err = queryNode(
+				ctx,
+				connection,
+				"parent_id = ? AND name = ?",
+				current.ID,
+				component,
+			)
+			if err != nil {
+				return fmt.Errorf("lookup component %q: %w", component, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return Node{}, err
 	}
 	return current, nil
 }
@@ -95,8 +110,34 @@ func (repository *Repository) Update(
 	if err := validateOperation(operation, change); err != nil {
 		return 0, err
 	}
+	detailsJSON, err := json.Marshal(operation.Details)
+	if err != nil {
+		return 0, fmt.Errorf("%w: encode details: %v", ErrInvalidOperation, err)
+	}
 
-	transaction, err := repository.connection.BeginTx(ctx, nil)
+	var version int64
+	err = repository.database.UseConnection(func(connection *sql.Conn) error {
+		var err error
+		version, err = repository.update(
+			ctx,
+			connection,
+			operation,
+			detailsJSON,
+			change,
+		)
+		return err
+	})
+	return version, err
+}
+
+func (repository *Repository) update(
+	ctx context.Context,
+	connection *sql.Conn,
+	operation Operation,
+	detailsJSON []byte,
+	change func(*Transaction) error,
+) (_ int64, err error) {
+	transaction, err := connection.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin namespace transaction: %w", err)
 	}
@@ -114,6 +155,20 @@ func (repository *Repository) Update(
 	}
 	if err := change(namespaceTransaction); err != nil {
 		return 0, rollback(err)
+	}
+
+	if !namespaceTransaction.changed {
+		var version int64
+		if err := transaction.QueryRowContext(
+			ctx,
+			"SELECT version FROM namespace_state WHERE singleton = 1",
+		).Scan(&version); err != nil {
+			return 0, rollback(fmt.Errorf("read namespace version: %w", err))
+		}
+		if err := transaction.Commit(); err != nil {
+			return 0, fmt.Errorf("commit no-op namespace transaction: %w", err)
+		}
+		return version, nil
 	}
 
 	var version int64
@@ -142,7 +197,7 @@ func (repository *Repository) Update(
 		operation.Actor.ID,
 		operation.ScrapeID,
 		version,
-		string(operation.Details),
+		string(detailsJSON),
 		repository.now().UTC().UnixNano(),
 	); err != nil {
 		return 0, rollback(fmt.Errorf("write operation log: %w", err))
@@ -157,6 +212,7 @@ func (repository *Repository) Update(
 type Transaction struct {
 	transaction *sql.Tx
 	now         func() time.Time
+	changed     bool
 }
 
 func (transaction *Transaction) CreateNode(
@@ -254,6 +310,7 @@ func (transaction *Transaction) CreateNode(
 	if err != nil {
 		return Node{}, fmt.Errorf("read created node: %w", err)
 	}
+	transaction.changed = true
 	return node, nil
 }
 
@@ -382,6 +439,7 @@ func (transaction *Transaction) PruneManagedDirectories(
 				return err
 			}
 		}
+		transaction.changed = true
 	}
 	return nil
 }
@@ -450,8 +508,30 @@ func validateOperation(operation Operation, change func(*Transaction) error) err
 	if operation.ScrapeID != nil && *operation.ScrapeID <= 0 {
 		return fmt.Errorf("%w: invalid Scrape ID", ErrInvalidOperation)
 	}
-	if !json.Valid(operation.Details) {
-		return fmt.Errorf("%w: details must be valid JSON", ErrInvalidOperation)
+	if len(operation.Details.Paths) == 0 {
+		return fmt.Errorf("%w: details paths must not be empty", ErrInvalidOperation)
+	}
+	if len(operation.Details.Paths) != len(operation.Details.NodeKinds) {
+		return fmt.Errorf(
+			"%w: details paths and node kinds must have equal lengths",
+			ErrInvalidOperation,
+		)
+	}
+	for index, path := range operation.Details.Paths {
+		if path == "" {
+			return fmt.Errorf(
+				"%w: details path %d must not be empty",
+				ErrInvalidOperation,
+				index,
+			)
+		}
+		if !operation.Details.NodeKinds[index].valid() {
+			return fmt.Errorf(
+				"%w: invalid details node kind %q",
+				ErrInvalidOperation,
+				operation.Details.NodeKinds[index],
+			)
+		}
 	}
 	if change == nil {
 		return fmt.Errorf("%w: change callback must not be nil", ErrInvalidOperation)

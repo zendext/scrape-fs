@@ -123,6 +123,20 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		}
 	})
 
+	t.Run("global root identity cannot be changed", func(t *testing.T) {
+		database := openNamespaceTestDatabase(t)
+		libraryRootID := insertLibraryRoot(t, database.Conn(), "library")
+		if _, err := database.Conn().ExecContext(context.Background(), `
+			UPDATE nodes
+			SET parent_id = ?,
+				name = 'moved-root',
+				kind = 'DIRECTORY'
+			WHERE id = 1
+		`, libraryRootID); err == nil {
+			t.Fatal("change global root identity succeeded")
+		}
+	})
+
 	t.Run("duplicate sibling name", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
 		parentID := int64(1)
@@ -285,6 +299,94 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 			t.Errorf("second node ID = %d, want greater than deleted ID %d", secondID, firstID)
 		}
 	})
+
+	t.Run("directory with children cannot become a file", func(t *testing.T) {
+		database := openNamespaceTestDatabase(t)
+		libraryRootID := insertLibraryRoot(t, database.Conn(), "library")
+		directoryID, err := insertTestNode(
+			context.Background(),
+			database.Conn(),
+			&libraryRootID,
+			"directory",
+			"DIRECTORY",
+			nil,
+			nil,
+			true,
+		)
+		if err != nil {
+			t.Fatalf("insert directory: %v", err)
+		}
+		if _, err := insertTestNode(
+			context.Background(),
+			database.Conn(),
+			&directoryID,
+			"child",
+			"DIRECTORY",
+			nil,
+			nil,
+			true,
+		); err != nil {
+			t.Fatalf("insert child: %v", err)
+		}
+
+		if _, err := database.Conn().ExecContext(context.Background(), `
+			UPDATE nodes
+			SET kind = 'PROJECTION_FILE',
+				source_path = '/source',
+				source_device_id = 1,
+				source_inode = 2,
+				cached_size = 3,
+				cached_atime_ns = 4,
+				cached_mtime_ns = 5,
+				cached_source_ctime_ns = 6,
+				verified_at_ns = 7,
+				managed_directory = 0,
+				mode = 292
+			WHERE id = ?
+		`, directoryID); err == nil {
+			t.Fatal("change non-empty directory to ProjectionFile succeeded")
+		}
+	})
+
+	t.Run("directory cannot move into its descendant", func(t *testing.T) {
+		database := openNamespaceTestDatabase(t)
+		libraryRootID := insertLibraryRoot(t, database.Conn(), "library")
+		parentID, err := insertTestNode(
+			context.Background(),
+			database.Conn(),
+			&libraryRootID,
+			"parent",
+			"DIRECTORY",
+			nil,
+			nil,
+			true,
+		)
+		if err != nil {
+			t.Fatalf("insert parent: %v", err)
+		}
+		childID, err := insertTestNode(
+			context.Background(),
+			database.Conn(),
+			&parentID,
+			"child",
+			"DIRECTORY",
+			nil,
+			nil,
+			true,
+		)
+		if err != nil {
+			t.Fatalf("insert child: %v", err)
+		}
+
+		if _, err := database.Conn().ExecContext(
+			context.Background(),
+			"UPDATE nodes SET parent_id = ? WHERE id = ?",
+			childID,
+			parentID,
+		); err == nil {
+			t.Fatal("move directory into descendant succeeded")
+		}
+	})
 }
 
 func TestNamespaceMigrationEnforcesLibraryConstraints(t *testing.T) {
@@ -350,6 +452,56 @@ func TestNamespaceMigrationEnforcesLibraryConstraints(t *testing.T) {
 		) VALUES ('retired', 'RETIRED', ?, 'jellyfin', 1, 1000, 1000, 509, 509, 292, 436, 1, 1)
 	`, duplicateRootID); err == nil {
 		t.Fatal("insert retired library with root node succeeded")
+	}
+}
+
+func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
+	database := openNamespaceTestDatabase(t)
+	for _, details := range []string{
+		"null",
+		"{}",
+		"[]",
+		`{"paths":[],"node_kinds":[]}`,
+		`{"paths":["library"],"node_kinds":[]}`,
+		`{"paths":[""],"node_kinds":["LIBRARY_ROOT"]}`,
+		`{"paths":["library"],"node_kinds":["INVALID"]}`,
+		`{"paths":[1],"node_kinds":["LIBRARY_ROOT"]}`,
+	} {
+		if _, err := database.Conn().ExecContext(context.Background(), `
+			INSERT INTO operation_log (
+				operation,
+				actor_kind,
+				actor_id,
+				scrape_id,
+				namespace_version,
+				details_json,
+				created_at
+			) VALUES ('test', 'system', NULL, NULL, 0, ?, 1)
+		`, details); err == nil {
+			t.Errorf("insert operation details %s succeeded", details)
+		}
+	}
+
+	if _, err := database.Conn().ExecContext(context.Background(), `
+		INSERT INTO operation_log (
+			operation,
+			actor_kind,
+			actor_id,
+			scrape_id,
+			namespace_version,
+			details_json,
+			created_at
+		) VALUES (
+			'test',
+			'system',
+			NULL,
+			NULL,
+			0,
+			'{"paths":["library"],"node_kinds":["LIBRARY_ROOT"]}',
+			1
+		)
+	`); err != nil {
+		t.Fatalf("insert valid operation details: %v", err)
 	}
 }
 

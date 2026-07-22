@@ -25,12 +25,13 @@ type Options struct {
 }
 
 type DB struct {
-	pool      *sql.DB
-	conn      *sql.Conn
-	directory *os.File
-	lock      *os.File
-	closeOnce sync.Once
-	closeErr  error
+	pool         *sql.DB
+	conn         *sql.Conn
+	directory    *os.File
+	lock         *os.File
+	connectionMu sync.Mutex
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 func Open(ctx context.Context, databasePath string) (*DB, error) {
@@ -133,8 +134,16 @@ func (database *DB) Conn() *sql.Conn {
 	return database.conn
 }
 
+func (database *DB) UseConnection(use func(*sql.Conn) error) error {
+	database.connectionMu.Lock()
+	defer database.connectionMu.Unlock()
+	return use(database.conn)
+}
+
 func (database *DB) Close() error {
 	database.closeOnce.Do(func() {
+		database.connectionMu.Lock()
+		defer database.connectionMu.Unlock()
 		database.closeErr = errors.Join(
 			database.conn.Close(),
 			database.pool.Close(),

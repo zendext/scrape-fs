@@ -1,7 +1,6 @@
 package namespace
 
 import (
-	"encoding/json"
 	"errors"
 	"io/fs"
 )
@@ -63,7 +62,12 @@ type Operation struct {
 	Name     string
 	Actor    Actor
 	ScrapeID *int64
-	Details  json.RawMessage
+	Details  OperationDetails
+}
+
+type OperationDetails struct {
+	Paths     []string   `json:"paths"`
+	NodeKinds []NodeKind `json:"node_kinds"`
 }
 
 type Attributes struct {
