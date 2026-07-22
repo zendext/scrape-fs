@@ -629,7 +629,7 @@ func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
 		}
 	}
 
-	if _, err := database.conn.ExecContext(context.Background(), `
+	result, err := database.conn.ExecContext(context.Background(), `
 		INSERT INTO operation_log (
 			operation,
 			actor_kind,
@@ -647,8 +647,33 @@ func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
 			'{"paths":["library"],"node_kinds":["LIBRARY_ROOT"]}',
 			1
 		)
-	`); err != nil {
+	`)
+	if err != nil {
 		t.Fatalf("insert valid operation details: %v", err)
+	}
+	logID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("operation log LastInsertId: %v", err)
+	}
+
+	if _, err := database.conn.ExecContext(context.Background(), `
+		UPDATE operation_log
+		SET details_json = '{"paths":[1],"node_kinds":["INVALID"]}'
+		WHERE id = ?
+	`, logID); err == nil {
+		t.Fatal("update operation log details succeeded")
+	}
+
+	var details string
+	if err := database.conn.QueryRowContext(
+		context.Background(),
+		"SELECT details_json FROM operation_log WHERE id = ?",
+		logID,
+	).Scan(&details); err != nil {
+		t.Fatalf("read operation details after rejected update: %v", err)
+	}
+	if details != `{"paths":["library"],"node_kinds":["LIBRARY_ROOT"]}` {
+		t.Errorf("operation details = %s, want original snapshot", details)
 	}
 }
 

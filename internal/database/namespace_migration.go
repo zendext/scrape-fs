@@ -479,6 +479,12 @@ BEGIN
 	);
 END;
 
+CREATE TRIGGER operation_log_protect_update
+BEFORE UPDATE ON operation_log
+BEGIN
+	SELECT RAISE(ABORT, 'operation log entries cannot be updated');
+END;
+
 CREATE INDEX operation_log_namespace_version
 ON operation_log(namespace_version);
 
