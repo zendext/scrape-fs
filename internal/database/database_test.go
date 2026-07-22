@@ -114,6 +114,26 @@ func TestOpenRejectsConcurrentDaemonBeforeDatabaseCreation(t *testing.T) {
 	}
 }
 
+func TestUseConnectionDoesNotRunWithCanceledContext(t *testing.T) {
+	database := openNamespaceTestDatabase(t)
+
+	for range 100 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		called := false
+		err := database.UseConnection(ctx, func(*sql.Conn) error {
+			called = true
+			return nil
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("UseConnection error = %v, want context.Canceled", err)
+		}
+		if called {
+			t.Fatal("UseConnection called callback with canceled context")
+		}
+	}
+}
+
 func TestFailedMigrationRollsBackAndReleasesLock(t *testing.T) {
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "state", "scrapefs.db")

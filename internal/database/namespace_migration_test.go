@@ -496,6 +496,44 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 			t.Fatal("insert self-referencing directory succeeded")
 		}
 	})
+
+	t.Run("directories cannot be inserted as an ancestor cycle", func(t *testing.T) {
+		database := openNamespaceTestDatabase(t)
+		if _, err := database.conn.ExecContext(context.Background(), `
+			INSERT INTO nodes (
+				id,
+				parent_id,
+				name,
+				kind,
+				creator_kind,
+				creator_id,
+				managed_directory,
+				mode,
+				uid,
+				gid,
+				atime_ns,
+				mtime_ns,
+				virtual_ctime_ns,
+				created_at,
+				updated_at
+			) VALUES
+				(2, 3, 'first', 'DIRECTORY', 'system', NULL, 1, 493, 0, 0, 1, 1, 1, 1, 1),
+				(3, 2, 'second', 'DIRECTORY', 'system', NULL, 1, 493, 0, 0, 1, 1, 1, 1, 1)
+		`); err == nil {
+			t.Fatal("insert ancestor cycle succeeded")
+		}
+
+		var count int
+		if err := database.conn.QueryRowContext(
+			context.Background(),
+			"SELECT COUNT(*) FROM nodes WHERE id IN (2, 3)",
+		).Scan(&count); err != nil {
+			t.Fatalf("count cycle nodes: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("cycle node count = %d, want 0", count)
+		}
+	})
 }
 
 func TestNamespaceMigrationEnforcesLibraryConstraints(t *testing.T) {

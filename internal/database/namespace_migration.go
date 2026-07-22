@@ -202,6 +202,23 @@ BEGIN
 	SELECT RAISE(ABORT, 'node cannot be its own parent')
 	WHERE NEW.parent_id = NEW.id;
 
+	SELECT RAISE(ABORT, 'node cannot create an ancestor cycle')
+	WHERE EXISTS (
+		WITH RECURSIVE ancestors(id) AS (
+			SELECT NEW.parent_id
+
+			UNION
+
+			SELECT parent.parent_id
+			FROM nodes AS parent
+			JOIN ancestors AS child ON parent.id = child.id
+			WHERE parent.parent_id IS NOT NULL
+		)
+		SELECT 1
+		FROM ancestors
+		WHERE id = NEW.id
+	);
+
 	SELECT RAISE(ABORT, 'LIBRARY_ROOT parent must be GLOBAL_ROOT')
 	WHERE NEW.kind = 'LIBRARY_ROOT'
 	  AND (

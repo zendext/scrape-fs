@@ -137,10 +137,18 @@ func (database *DB) UseConnection(
 	ctx context.Context,
 	use func(*sql.Conn) error,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-database.connectionGate:
+	}
+	if err := ctx.Err(); err != nil {
+		database.connectionGate <- struct{}{}
+		return err
 	}
 	defer func() {
 		database.connectionGate <- struct{}{}
