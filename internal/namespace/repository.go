@@ -225,6 +225,9 @@ func (transaction *Transaction) CreateNode(
 	if err := validateCreateNode(request); err != nil {
 		return Node{}, err
 	}
+	if err := transaction.validateParent(ctx, request); err != nil {
+		return Node{}, err
+	}
 
 	now := transaction.now().UTC().UnixNano()
 	var sourcePath any
@@ -315,6 +318,44 @@ func (transaction *Transaction) CreateNode(
 	}
 	transaction.changed = true
 	return node, nil
+}
+
+func (transaction *Transaction) validateParent(
+	ctx context.Context,
+	request CreateNode,
+) error {
+	parent, err := queryNode(ctx, transaction.transaction, "id = ?", request.ParentID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return fmt.Errorf(
+				"%w: parent node %d does not exist",
+				ErrInvalidNode,
+				request.ParentID,
+			)
+		}
+		return fmt.Errorf("read node parent: %w", err)
+	}
+
+	switch request.Kind {
+	case LibraryRoot:
+		if parent.Kind != GlobalRoot {
+			return fmt.Errorf(
+				"%w: LibraryRoot parent is %s, want GlobalRoot",
+				ErrInvalidNode,
+				parent.Kind,
+			)
+		}
+	case Directory, ProjectionFile, OverlayFile:
+		if parent.Kind != LibraryRoot && parent.Kind != Directory {
+			return fmt.Errorf(
+				"%w: %s parent is %s, want LibraryRoot or Directory",
+				ErrInvalidNode,
+				request.Kind,
+				parent.Kind,
+			)
+		}
+	}
+	return nil
 }
 
 func (transaction *Transaction) EnsureManagedDirectories(
@@ -598,11 +639,6 @@ func classifyMutationError(action string, err error) error {
 		switch sqliteError.Code() {
 		case sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY, sqlite3.SQLITE_CONSTRAINT_UNIQUE:
 			return fmt.Errorf("%s: %w: %v", action, ErrConflict, err)
-		case sqlite3.SQLITE_CONSTRAINT_TRIGGER:
-			if strings.Contains(err.Error(), "namespace conflict:") {
-				return fmt.Errorf("%s: %w: %v", action, ErrConflict, err)
-			}
-			return fmt.Errorf("%s: %w: %v", action, ErrInvalidNode, err)
 		case sqlite3.SQLITE_CONSTRAINT_CHECK,
 			sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY,
 			sqlite3.SQLITE_CONSTRAINT_NOTNULL:

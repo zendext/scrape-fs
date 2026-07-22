@@ -81,7 +81,9 @@ SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 dae
 
 基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。后续 Object 和 Scrape migration 必须在对应行为开始创建记录前扩展这些表。
 
-第一版固定使用一个 SQLite 连接，并且只通过受控入口访问。Repository 操作进入串行队列等待连接，调用方可以通过 context 取消等待。`Update` 回调使用对应 `Transaction` 的读取方法，不调用 Repository 方法。
+schema 只使用声明式局部完整性约束：`STRICT` 表、主键、`NOT NULL`、行内 `CHECK`、外键和唯一索引。SQLite trigger 不实现命名空间业务规则、生命周期策略、namespace version 策略或 operation log 策略。
+
+Repository 是唯一的命名空间修改边界，负责跨行和跨表校验、受保护节点行为、冲突分类、namespace version 变更和 operation log 创建。第一版固定使用一个 SQLite 连接，并且只通过受控入口访问。Repository 操作进入串行队列等待连接，调用方可以通过 context 取消等待。`Update` 回调使用对应 `Transaction` 的读取方法，不调用 Repository 方法。
 
 ## 4. Mount 和 Library
 
@@ -220,6 +222,10 @@ nodes
 - Directory 不使用 source/object 字段。
 - `managed_directory=true` 表示由 Scrape 或 `projection add` 自动创建。
 - 直接创建的 ProjectionFile 的 `origin_scrape_id` 为空。
+- LibraryRoot 的父节点必须是 GlobalRoot。
+- Directory、ProjectionFile 和 OverlayFile 的父节点必须是 LibraryRoot 或 Directory。
+
+Repository 在创建节点前校验父节点类型。持久命名空间核心不提供通用 rename、move、kind 变更、delete 或任意节点 update 方法。后续操作必须提供各自的精确修改方法，并在同一事务中校验受保护根节点、子节点关系和祖先环。
 
 节点 ID 必须稳定映射为 FUSE inode：
 
@@ -271,9 +277,10 @@ operation_log
 要求：
 
 - 命名空间操作的日志与对应修改处于同一 SQLite 事务；
-- operation log 只允许追加，不得改写或删除；删除被引用的 Scrape 时，只允许通过 `ON DELETE SET NULL` 清空 `scrape_id`；
+- daemon 的 Repository API 只允许追加 operation log，不提供 update 或 delete 操作；
+- 删除被引用的 Scrape 时，可以通过声明式外键 `ON DELETE SET NULL` 清空 `scrape_id`；
 - `actor_kind` 至少区分 control、agent、fuse 和 system；
-- `details_json` 使用非空且长度相同的 `paths` 与 `node_kinds` 数组，按相同下标保存路径和节点类型快照；
+- `details_json` 使用非空且长度相同的 `paths` 与 `node_kinds` 数组，按相同下标保存路径和节点类型快照；Repository 在插入前校验每个路径和节点类型；
 - 日志不得通过强外键阻止节点或 Library retire；
 - 第一版日志用于审计、doctor 和人工恢复分析；
 - 第一版不提供事件重放。

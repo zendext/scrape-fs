@@ -113,58 +113,6 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		}
 	})
 
-	t.Run("global root cannot be deleted", func(t *testing.T) {
-		database := openNamespaceTestDatabase(t)
-		if _, err := database.conn.ExecContext(
-			context.Background(),
-			"DELETE FROM nodes WHERE id = 1",
-		); err == nil {
-			t.Fatal("delete global root succeeded")
-		}
-	})
-
-	t.Run("global root identity cannot be changed", func(t *testing.T) {
-		database := openNamespaceTestDatabase(t)
-		libraryRootID := insertLibraryRoot(t, database.conn, "library")
-		if _, err := database.conn.ExecContext(context.Background(), `
-			UPDATE nodes
-			SET parent_id = ?,
-				name = 'moved-root',
-				kind = 'DIRECTORY'
-			WHERE id = 1
-		`, libraryRootID); err == nil {
-			t.Fatal("change global root identity succeeded")
-		}
-	})
-
-	t.Run("global root cannot be replaced", func(t *testing.T) {
-		database := openNamespaceTestDatabase(t)
-		if _, err := database.conn.ExecContext(context.Background(), `
-			INSERT OR REPLACE INTO nodes (
-				id,
-				parent_id,
-				name,
-				kind,
-				creator_kind,
-				creator_id,
-				managed_directory,
-				mode,
-				uid,
-				gid,
-				atime_ns,
-				mtime_ns,
-				virtual_ctime_ns,
-				created_at,
-				updated_at
-			) VALUES (1, NULL, '', 'GLOBAL_ROOT', 'system', NULL, 0, 448, 0, 0, 1, 1, 1, 1, 1)
-		`); err == nil {
-			t.Fatal("replace global root succeeded")
-		}
-		if root := readGlobalRoot(t, database.conn); root.mode != 0o755 {
-			t.Errorf("global root mode = %#o, want 0755", root.mode)
-		}
-	})
-
 	t.Run("duplicate sibling name", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
 		parentID := int64(1)
@@ -191,79 +139,6 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 			false,
 		); err == nil {
 			t.Fatal("insert duplicate sibling succeeded")
-		}
-	})
-
-	t.Run("update or replace cannot delete a conflicting sibling", func(t *testing.T) {
-		database := openNamespaceTestDatabase(t)
-		libraryRootID := insertLibraryRoot(t, database.conn, "library")
-		sourceID, err := insertTestNode(
-			context.Background(),
-			database.conn,
-			&libraryRootID,
-			"source",
-			"DIRECTORY",
-			nil,
-			nil,
-			true,
-		)
-		if err != nil {
-			t.Fatalf("insert source: %v", err)
-		}
-		targetID, err := insertTestNode(
-			context.Background(),
-			database.conn,
-			&libraryRootID,
-			"target",
-			"DIRECTORY",
-			nil,
-			nil,
-			true,
-		)
-		if err != nil {
-			t.Fatalf("insert target: %v", err)
-		}
-
-		if _, err := database.conn.ExecContext(
-			context.Background(),
-			"UPDATE OR REPLACE nodes SET name = 'target' WHERE id = ?",
-			sourceID,
-		); err == nil {
-			t.Fatal("UPDATE OR REPLACE conflicting sibling succeeded")
-		}
-
-		for id, name := range map[int64]string{
-			sourceID: "source",
-			targetID: "target",
-		} {
-			var got string
-			if err := database.conn.QueryRowContext(
-				context.Background(),
-				"SELECT name FROM nodes WHERE id = ?",
-				id,
-			).Scan(&got); err != nil {
-				t.Fatalf("read node %d: %v", id, err)
-			}
-			if got != name {
-				t.Errorf("node %d name = %q, want %q", id, got, name)
-			}
-		}
-	})
-
-	t.Run("invalid parent kind", func(t *testing.T) {
-		database := openNamespaceTestDatabase(t)
-		parentID := int64(1)
-		if _, err := insertTestNode(
-			context.Background(),
-			database.conn,
-			&parentID,
-			"directory",
-			"DIRECTORY",
-			nil,
-			nil,
-			false,
-		); err == nil {
-			t.Fatal("insert directory under global root succeeded")
 		}
 	})
 
@@ -383,157 +258,22 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 			t.Errorf("second node ID = %d, want greater than deleted ID %d", secondID, firstID)
 		}
 	})
+}
 
-	t.Run("directory with children cannot become a file", func(t *testing.T) {
-		database := openNamespaceTestDatabase(t)
-		libraryRootID := insertLibraryRoot(t, database.conn, "library")
-		directoryID, err := insertTestNode(
-			context.Background(),
-			database.conn,
-			&libraryRootID,
-			"directory",
-			"DIRECTORY",
-			nil,
-			nil,
-			true,
-		)
-		if err != nil {
-			t.Fatalf("insert directory: %v", err)
-		}
-		if _, err := insertTestNode(
-			context.Background(),
-			database.conn,
-			&directoryID,
-			"child",
-			"DIRECTORY",
-			nil,
-			nil,
-			true,
-		); err != nil {
-			t.Fatalf("insert child: %v", err)
-		}
+func TestNamespaceMigrationCreatesNoTriggers(t *testing.T) {
+	database := openNamespaceTestDatabase(t)
 
-		if _, err := database.conn.ExecContext(context.Background(), `
-			UPDATE nodes
-			SET kind = 'PROJECTION_FILE',
-				source_path = '/source',
-				source_device_id = 1,
-				source_inode = 2,
-				cached_size = 3,
-				cached_atime_ns = 4,
-				cached_mtime_ns = 5,
-				cached_source_ctime_ns = 6,
-				verified_at_ns = 7,
-				managed_directory = 0,
-				mode = 292
-			WHERE id = ?
-		`, directoryID); err == nil {
-			t.Fatal("change non-empty directory to ProjectionFile succeeded")
-		}
-	})
-
-	t.Run("directory cannot move into its descendant", func(t *testing.T) {
-		database := openNamespaceTestDatabase(t)
-		libraryRootID := insertLibraryRoot(t, database.conn, "library")
-		parentID, err := insertTestNode(
-			context.Background(),
-			database.conn,
-			&libraryRootID,
-			"parent",
-			"DIRECTORY",
-			nil,
-			nil,
-			true,
-		)
-		if err != nil {
-			t.Fatalf("insert parent: %v", err)
-		}
-		childID, err := insertTestNode(
-			context.Background(),
-			database.conn,
-			&parentID,
-			"child",
-			"DIRECTORY",
-			nil,
-			nil,
-			true,
-		)
-		if err != nil {
-			t.Fatalf("insert child: %v", err)
-		}
-
-		if _, err := database.conn.ExecContext(
-			context.Background(),
-			"UPDATE nodes SET parent_id = ? WHERE id = ?",
-			childID,
-			parentID,
-		); err == nil {
-			t.Fatal("move directory into descendant succeeded")
-		}
-	})
-
-	t.Run("directory cannot be inserted as its own parent", func(t *testing.T) {
-		database := openNamespaceTestDatabase(t)
-		if _, err := database.conn.ExecContext(context.Background(), `
-			INSERT INTO nodes (
-				id,
-				parent_id,
-				name,
-				kind,
-				creator_kind,
-				creator_id,
-				managed_directory,
-				mode,
-				uid,
-				gid,
-				atime_ns,
-				mtime_ns,
-				virtual_ctime_ns,
-				created_at,
-				updated_at
-			) VALUES (2, 2, 'self', 'DIRECTORY', 'system', NULL, 1, 493, 0, 0, 1, 1, 1, 1, 1)
-		`); err == nil {
-			t.Fatal("insert self-referencing directory succeeded")
-		}
-	})
-
-	t.Run("directories cannot be inserted as an ancestor cycle", func(t *testing.T) {
-		database := openNamespaceTestDatabase(t)
-		if _, err := database.conn.ExecContext(context.Background(), `
-			INSERT INTO nodes (
-				id,
-				parent_id,
-				name,
-				kind,
-				creator_kind,
-				creator_id,
-				managed_directory,
-				mode,
-				uid,
-				gid,
-				atime_ns,
-				mtime_ns,
-				virtual_ctime_ns,
-				created_at,
-				updated_at
-			) VALUES
-				(2, 3, 'first', 'DIRECTORY', 'system', NULL, 1, 493, 0, 0, 1, 1, 1, 1, 1),
-				(3, 2, 'second', 'DIRECTORY', 'system', NULL, 1, 493, 0, 0, 1, 1, 1, 1, 1)
-		`); err == nil {
-			t.Fatal("insert ancestor cycle succeeded")
-		}
-
-		var count int
-		if err := database.conn.QueryRowContext(
-			context.Background(),
-			"SELECT COUNT(*) FROM nodes WHERE id IN (2, 3)",
-		).Scan(&count); err != nil {
-			t.Fatalf("count cycle nodes: %v", err)
-		}
-		if count != 0 {
-			t.Errorf("cycle node count = %d, want 0", count)
-		}
-	})
+	var count int
+	if err := database.conn.QueryRowContext(context.Background(), `
+		SELECT COUNT(*)
+		FROM sqlite_schema
+		WHERE type = 'trigger'
+	`).Scan(&count); err != nil {
+		t.Fatalf("count schema triggers: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("schema trigger count = %d, want 0", count)
+	}
 }
 
 func TestNamespaceMigrationEnforcesLibraryConstraints(t *testing.T) {
@@ -610,9 +350,6 @@ func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
 		"[]",
 		`{"paths":[],"node_kinds":[]}`,
 		`{"paths":["library"],"node_kinds":[]}`,
-		`{"paths":[""],"node_kinds":["LIBRARY_ROOT"]}`,
-		`{"paths":["library"],"node_kinds":["INVALID"]}`,
-		`{"paths":[1],"node_kinds":["LIBRARY_ROOT"]}`,
 	} {
 		if _, err := database.conn.ExecContext(context.Background(), `
 			INSERT INTO operation_log (
@@ -629,7 +366,7 @@ func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
 		}
 	}
 
-	result, err := database.conn.ExecContext(context.Background(), `
+	if _, err := database.conn.ExecContext(context.Background(), `
 		INSERT INTO operation_log (
 			operation,
 			actor_kind,
@@ -647,44 +384,13 @@ func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
 			'{"paths":["library"],"node_kinds":["LIBRARY_ROOT"]}',
 			1
 		)
-	`)
-	if err != nil {
+	`); err != nil {
 		t.Fatalf("insert valid operation details: %v", err)
 	}
-	logID, err := result.LastInsertId()
-	if err != nil {
-		t.Fatalf("operation log LastInsertId: %v", err)
-	}
+}
 
-	if _, err := database.conn.ExecContext(context.Background(), `
-		UPDATE operation_log
-		SET details_json = '{"paths":[1],"node_kinds":["INVALID"]}'
-		WHERE id = ?
-	`, logID); err == nil {
-		t.Fatal("update operation log details succeeded")
-	}
-
-	var details string
-	if err := database.conn.QueryRowContext(
-		context.Background(),
-		"SELECT details_json FROM operation_log WHERE id = ?",
-		logID,
-	).Scan(&details); err != nil {
-		t.Fatalf("read operation details after rejected update: %v", err)
-	}
-	if details != `{"paths":["library"],"node_kinds":["LIBRARY_ROOT"]}` {
-		t.Errorf("operation details = %s, want original snapshot", details)
-	}
-
-	if _, err := database.conn.ExecContext(
-		context.Background(),
-		"DELETE FROM operation_log WHERE id = ?",
-		logID,
-	); err == nil {
-		t.Fatal("delete operation log entry succeeded")
-	}
-	assertTableCount(t, database.conn, "operation_log", 1)
-
+func TestNamespaceMigrationClearsDeletedScrapeReferences(t *testing.T) {
+	database := openNamespaceTestDatabase(t)
 	scrapeResult, err := database.conn.ExecContext(
 		context.Background(),
 		"INSERT INTO scrapes DEFAULT VALUES",
@@ -721,25 +427,6 @@ func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
 	scrapeLogID, err := logResult.LastInsertId()
 	if err != nil {
 		t.Fatalf("Scrape operation log LastInsertId: %v", err)
-	}
-
-	if _, err := database.conn.ExecContext(
-		context.Background(),
-		"UPDATE operation_log SET scrape_id = NULL WHERE id = ?",
-		scrapeLogID,
-	); err == nil {
-		t.Fatal("clear operation log Scrape ID while Scrape exists succeeded")
-	}
-	var retainedScrapeID int64
-	if err := database.conn.QueryRowContext(
-		context.Background(),
-		"SELECT scrape_id FROM operation_log WHERE id = ?",
-		scrapeLogID,
-	).Scan(&retainedScrapeID); err != nil {
-		t.Fatalf("read retained operation log Scrape ID: %v", err)
-	}
-	if retainedScrapeID != scrapeID {
-		t.Errorf("retained operation log Scrape ID = %d, want %d", retainedScrapeID, scrapeID)
 	}
 
 	if _, err := database.conn.ExecContext(

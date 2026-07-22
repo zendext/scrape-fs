@@ -83,7 +83,9 @@ Persistent internal identities use SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` va
 
 The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. Later Object and Scrape migrations extend those tables before their corresponding behavior creates rows.
 
-The first version pins one SQLite connection and exposes it only through controlled access. Repository operations wait in a serialized queue, and a caller can cancel that wait through its context. An `Update` callback uses the read methods on its `Transaction` and does not call Repository methods.
+The schema uses declarative local integrity only: `STRICT` tables, primary keys, `NOT NULL`, row-local `CHECK` constraints, foreign keys, and unique indexes. SQLite triggers do not implement namespace business rules, lifecycle policy, namespace-version policy, or operation-log policy.
+
+The Repository is the sole namespace mutation boundary. It owns cross-row and cross-table validation, protected-node behavior, conflict classification, namespace-version changes, and operation-log creation. The first version pins one SQLite connection and exposes it only through controlled access. Repository operations wait in a serialized queue, and a caller can cancel that wait through its context. An `Update` callback uses the read methods on its `Transaction` and does not call Repository methods.
 
 ## 4. Mount and Library
 
@@ -222,6 +224,10 @@ Field rules:
 - Directory uses neither source nor object fields.
 - `managed_directory=true` marks a directory created automatically by a Scrape or `projection add`.
 - A directly created ProjectionFile has a null `origin_scrape_id`.
+- LibraryRoot has GlobalRoot as its parent.
+- Directory, ProjectionFile, and OverlayFile have LibraryRoot or Directory as their parent.
+
+The Repository validates parent kinds before creation. It does not expose generic rename, move, kind-change, delete, or arbitrary node-update methods in the persistent namespace core. Later operations must provide their own exact mutation methods and validate protected roots, child relationships, and ancestor cycles within the same transaction.
 
 Node IDs map stably to FUSE inodes:
 
@@ -273,9 +279,10 @@ operation_log
 Requirements:
 
 - namespace changes and their log entry share one SQLite transaction;
-- operation-log entries are append-only and cannot be rewritten or deleted; deleting a referenced Scrape may clear only `scrape_id` through `ON DELETE SET NULL`;
+- the daemon Repository API is append-only and exposes no operation-log update or delete operation;
+- deleting a referenced Scrape may clear `scrape_id` through the declarative `ON DELETE SET NULL` foreign key;
 - `actor_kind` distinguishes at least control, agent, fuse, and system;
-- `details_json` stores non-empty, equally sized `paths` and `node_kinds` arrays whose entries are paired snapshots;
+- `details_json` stores non-empty, equally sized `paths` and `node_kinds` arrays whose entries are paired snapshots; the Repository validates each path and node kind before insertion;
 - strong foreign keys MUST NOT prevent node or Library retirement;
 - the first version uses the log for audit, doctor, and manual recovery analysis;
 - event replay is not provided.

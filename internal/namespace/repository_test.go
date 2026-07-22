@@ -271,24 +271,47 @@ func TestTransactionReadMethodsUseActiveTransaction(t *testing.T) {
 }
 
 func TestRepositoryUpdateRejectsInvalidOperationBeforeMutation(t *testing.T) {
-	database := openTestDatabase(t)
-	repository := NewRepository(database)
-	called := false
+	tests := map[string]OperationDetails{
+		"empty paths": {
+			Paths:     nil,
+			NodeKinds: nil,
+		},
+		"length mismatch": {
+			Paths:     []string{"library"},
+			NodeKinds: nil,
+		},
+		"empty path entry": {
+			Paths:     []string{""},
+			NodeKinds: []NodeKind{LibraryRoot},
+		},
+		"invalid node kind": {
+			Paths:     []string{"library"},
+			NodeKinds: []NodeKind{"INVALID"},
+		},
+	}
+	for name, details := range tests {
+		t.Run(name, func(t *testing.T) {
+			database := openTestDatabase(t)
+			repository := NewRepository(database)
+			called := false
 
-	_, err := repository.Update(context.Background(), Operation{
-		Name:  "invalid",
-		Actor: Actor{Kind: ActorSystem},
-	}, func(*Transaction) error {
-		called = true
-		return nil
-	})
-	if !errors.Is(err, ErrInvalidOperation) {
-		t.Fatalf("Update error = %v, want ErrInvalidOperation", err)
+			_, err := repository.Update(context.Background(), Operation{
+				Name:    "invalid",
+				Actor:   Actor{Kind: ActorSystem},
+				Details: details,
+			}, func(*Transaction) error {
+				called = true
+				return nil
+			})
+			if !errors.Is(err, ErrInvalidOperation) {
+				t.Fatalf("Update error = %v, want ErrInvalidOperation", err)
+			}
+			if called {
+				t.Error("Update callback was called for invalid operation")
+			}
+			assertVersionAndLogCount(t, database, 0, 0)
+		})
 	}
-	if called {
-		t.Error("Update callback was called for invalid operation")
-	}
-	assertVersionAndLogCount(t, database, 0, 0)
 }
 
 func TestRepositoryQueuesLookupDuringUpdate(t *testing.T) {
@@ -536,6 +559,144 @@ func TestCreateNodeRejectsWritableProjectionMode(t *testing.T) {
 		})
 		return err
 	})
+	if !errors.Is(err, ErrInvalidNode) {
+		t.Fatalf("Update error = %v, want ErrInvalidNode", err)
+	}
+	assertVersionAndLogCount(t, database, 0, 0)
+}
+
+func TestCreateNodeRejectsInvalidParentKinds(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+	globalRoot, err := repository.GlobalRoot(ctx)
+	if err != nil {
+		t.Fatalf("GlobalRoot: %v", err)
+	}
+
+	var libraryRootID int64
+	var projectionID int64
+	if _, err := repository.Update(ctx, testOperation("test.setup"), func(transaction *Transaction) error {
+		libraryRoot, err := transaction.CreateNode(ctx, CreateNode{
+			ParentID: globalRoot.ID,
+			Name:     "library",
+			Kind:     LibraryRoot,
+			Creator:  Actor{Kind: ActorSystem},
+			Attributes: Attributes{
+				Mode: 0o775,
+				UID:  1000,
+				GID:  1000,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		libraryRootID = libraryRoot.ID
+
+		projection, err := transaction.CreateNode(ctx, CreateNode{
+			ParentID: libraryRoot.ID,
+			Name:     "movie.mkv",
+			Kind:     ProjectionFile,
+			Source: &ProjectionSource{
+				Path: "/media/movie.mkv",
+			},
+			Creator: Actor{Kind: ActorSystem},
+			Attributes: Attributes{
+				Mode: 0o444,
+				UID:  1000,
+				GID:  1000,
+			},
+		})
+		projectionID = projection.ID
+		return err
+	}); err != nil {
+		t.Fatalf("setup namespace: %v", err)
+	}
+
+	tests := map[string]CreateNode{
+		"directory under GlobalRoot": {
+			ParentID: globalRoot.ID,
+			Name:     "directory",
+			Kind:     Directory,
+			Creator:  Actor{Kind: ActorSystem},
+			Attributes: Attributes{
+				Mode: 0o775,
+				UID:  1000,
+				GID:  1000,
+			},
+		},
+		"LibraryRoot under LibraryRoot": {
+			ParentID: libraryRootID,
+			Name:     "nested-library",
+			Kind:     LibraryRoot,
+			Creator:  Actor{Kind: ActorSystem},
+			Attributes: Attributes{
+				Mode: 0o775,
+				UID:  1000,
+				GID:  1000,
+			},
+		},
+		"directory under ProjectionFile": {
+			ParentID: projectionID,
+			Name:     "directory",
+			Kind:     Directory,
+			Creator:  Actor{Kind: ActorSystem},
+			Attributes: Attributes{
+				Mode: 0o775,
+				UID:  1000,
+				GID:  1000,
+			},
+		},
+		"missing parent": {
+			ParentID: 999,
+			Name:     "directory",
+			Kind:     Directory,
+			Creator:  Actor{Kind: ActorSystem},
+			Attributes: Attributes{
+				Mode: 0o775,
+				UID:  1000,
+				GID:  1000,
+			},
+		},
+	}
+	for name, request := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := repository.Update(
+				ctx,
+				testOperation("test.invalid-parent"),
+				func(transaction *Transaction) error {
+					_, err := transaction.CreateNode(ctx, request)
+					return err
+				},
+			)
+			if !errors.Is(err, ErrInvalidNode) {
+				t.Fatalf("Update error = %v, want ErrInvalidNode", err)
+			}
+		})
+	}
+	assertVersionAndLogCount(t, database, 1, 1)
+}
+
+func TestCreateNodeRejectsGlobalRoot(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+
+	_, err := repository.Update(
+		context.Background(),
+		testOperation("test.global-root"),
+		func(transaction *Transaction) error {
+			_, err := transaction.CreateNode(context.Background(), CreateNode{
+				ParentID: 1,
+				Name:     "root",
+				Kind:     GlobalRoot,
+				Creator:  Actor{Kind: ActorSystem},
+				Attributes: Attributes{
+					Mode: 0o755,
+				},
+			})
+			return err
+		},
+	)
 	if !errors.Is(err, ErrInvalidNode) {
 		t.Fatalf("Update error = %v, want ErrInvalidNode", err)
 	}
