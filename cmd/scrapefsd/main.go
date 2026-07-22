@@ -1,14 +1,19 @@
 package main
 
 import (
-	"flag"
+	"fmt"
 	"io"
 	"os"
 
+	"github.com/alecthomas/kong"
 	"github.com/zendext/scrape-fs/internal/buildinfo"
-	"github.com/zendext/scrape-fs/internal/command"
 	"github.com/zendext/scrape-fs/internal/config"
 )
+
+type cli struct {
+	Config  string           `help:"Path to the TOML configuration file." default:"${default_config}"`
+	Version kong.VersionFlag `help:"Print version and exit."`
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -21,18 +26,36 @@ func run(args []string, stdout, stderr io.Writer) int {
 type configLoader func(string) (config.Config, error)
 
 func runWithLoader(args []string, stdout, stderr io.Writer, load configLoader) int {
-	configPath := config.DefaultPath
-	program := command.Program{
-		Name:        "scrapefsd",
-		Description: "ScrapeFS daemon.",
-		Version:     buildinfo.Version,
-		ConfigureFlags: func(flags *flag.FlagSet) {
-			flags.StringVar(&configPath, "config", config.DefaultPath, "path to the TOML configuration file")
+	commandLine := cli{}
+	requestedExitCode := -1
+	parser, err := kong.New(
+		&commandLine,
+		kong.Name("scrapefsd"),
+		kong.Description("ScrapeFS daemon."),
+		kong.Vars{
+			"default_config": config.DefaultPath,
+			"version":        "scrapefsd " + buildinfo.Version,
 		},
-		Execute: func() error {
-			_, err := load(configPath)
-			return err
-		},
+		kong.Writers(stdout, stderr),
+		kong.Exit(func(code int) {
+			requestedExitCode = code
+		}),
+	)
+	if err != nil {
+		fmt.Fprintf(stderr, "scrapefsd: %v\n", err)
+		return 1
 	}
-	return program.Run(args, stdout, stderr)
+
+	if _, err := parser.Parse(args); requestedExitCode >= 0 {
+		return requestedExitCode
+	} else if err != nil {
+		fmt.Fprintf(stderr, "scrapefsd: %v\n", err)
+		return 2
+	}
+
+	if _, err := load(commandLine.Config); err != nil {
+		fmt.Fprintf(stderr, "scrapefsd: %v\n", err)
+		return 1
+	}
+	return 0
 }
