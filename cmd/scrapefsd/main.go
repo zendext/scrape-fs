@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/zendext/scrape-fs/internal/buildinfo"
 	"github.com/zendext/scrape-fs/internal/config"
+	"github.com/zendext/scrape-fs/internal/database"
 )
 
 type cli struct {
@@ -20,12 +22,41 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	return runWithLoader(args, stdout, stderr, config.Load)
+	return runWithDependencies(
+		args,
+		stdout,
+		stderr,
+		config.Load,
+		func(path string) (databaseCloser, error) {
+			return database.Open(context.Background(), path)
+		},
+	)
 }
 
 type configLoader func(string) (config.Config, error)
+type databaseCloser interface {
+	Close() error
+}
+type databaseOpener func(string) (databaseCloser, error)
 
 func runWithLoader(args []string, stdout, stderr io.Writer, load configLoader) int {
+	return runWithDependencies(
+		args,
+		stdout,
+		stderr,
+		load,
+		func(string) (databaseCloser, error) {
+			return noopDatabase{}, nil
+		},
+	)
+}
+
+func runWithDependencies(
+	args []string,
+	stdout, stderr io.Writer,
+	load configLoader,
+	openDatabase databaseOpener,
+) int {
 	commandLine := cli{}
 	requestedExitCode := -1
 	parser, err := kong.New(
@@ -53,9 +84,26 @@ func runWithLoader(args []string, stdout, stderr io.Writer, load configLoader) i
 		return 2
 	}
 
-	if _, err := load(commandLine.Config); err != nil {
+	configuration, err := load(commandLine.Config)
+	if err != nil {
 		fmt.Fprintf(stderr, "scrapefsd: %v\n", err)
 		return 1
 	}
+
+	database, err := openDatabase(configuration.Storage.DatabasePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "scrapefsd: initialize database: %v\n", err)
+		return 1
+	}
+	if err := database.Close(); err != nil {
+		fmt.Fprintf(stderr, "scrapefsd: close database: %v\n", err)
+		return 1
+	}
 	return 0
+}
+
+type noopDatabase struct{}
+
+func (noopDatabase) Close() error {
+	return nil
 }

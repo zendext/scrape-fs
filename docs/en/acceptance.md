@@ -82,7 +82,7 @@
 - Agent-created OverlayFiles use the apply confirmer's UID/GID and the Library overlay mode.
 - Overlay backing objects use daemon ownership and `0600` and do not follow virtual chmod/chown.
 - ProjectionFile is always read-only.
-- The daemon single-instance lock works.
+- The daemon acquires `/run/scrapefs/scrapefsd.lock` on the host filesystem before opening SQLite.
 - Readiness is sent only after database, index, mount, and socket are available.
 - An unmounted mountpoint does not expose a readable empty directory.
 - Normal shutdown does not use lazy unmount.

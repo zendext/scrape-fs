@@ -66,12 +66,14 @@ PRAGMA busy_timeout = 5000;
 要求：
 
 1. 第一版固定使用 WAL。
-2. daemon 是唯一数据库写进程。
+2. 打开 SQLite 前，daemon 必须在宿主文件系统的 `/run/scrapefs/scrapefsd.lock` 上获取 non-blocking exclusive `flock(2)`，并在 daemon 生命周期内持续持有。
 3. 所有写操作使用显式事务。
 4. 命名空间写事务应使用 `BEGIN IMMEDIATE`。
 5. migration 必须在 FUSE mount 前完成。
 6. migration 或 PRAGMA 校验失败时 daemon 不得进入 ready。
 7. SQLite commit 是数据库状态的持久化提交点。
+
+SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 daemon 锁使一个进程独占完整 ScrapeFS 运行时，包括数据库、内存索引、mount、object store 和控制 socket，并在打开 SQLite 前拒绝意外重复启动。固定锁路径位于 ScrapeFS FUSE mount 之外的宿主运行时文件系统。该进程锁与通过 FUSE 暴露的文件锁操作无关。
 
 ## 4. Mount 和 Library
 
