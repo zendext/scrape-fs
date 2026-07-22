@@ -81,7 +81,7 @@ SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 dae
 
 基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。后续 Object 和 Scrape migration 必须在对应行为开始创建记录前扩展这些表。
 
-第一版固定使用一个 SQLite 连接。Repository 读取与命名空间事务必须串行访问该连接，避免其他 goroutine 的读取进入尚未提交的事务。
+第一版固定使用一个 SQLite 连接，并且只通过受控入口访问。同一时刻只有一个 Repository 操作持有连接；并发或重入的 Repository 调用返回 `ErrBusy`，不得进入尚未提交的事务或永久等待。`Update` 回调使用对应 `Transaction` 的读取方法，不调用 Repository 方法。
 
 ## 4. Mount 和 Library
 

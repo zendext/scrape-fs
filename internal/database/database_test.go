@@ -34,11 +34,11 @@ func TestOpenInitializesDatabase(t *testing.T) {
 	assertPathMode(t, filepath.Dir(databasePath), 0o700)
 	assertPathMode(t, databasePath, 0o600)
 
-	assertPragmaInt(t, database.Conn(), "foreign_keys", 1)
-	assertPragmaText(t, database.Conn(), "journal_mode", "wal")
-	assertPragmaInt(t, database.Conn(), "synchronous", 2)
-	assertPragmaInt(t, database.Conn(), "busy_timeout", 5000)
-	assertPragmaInt(t, database.Conn(), "user_version", currentVersion)
+	assertPragmaInt(t, database.conn, "foreign_keys", 1)
+	assertPragmaText(t, database.conn, "journal_mode", "wal")
+	assertPragmaInt(t, database.conn, "synchronous", 2)
+	assertPragmaInt(t, database.conn, "busy_timeout", 5000)
+	assertPragmaInt(t, database.conn, "user_version", currentVersion)
 
 	if got := database.pool.Stats().MaxOpenConnections; got != 1 {
 		t.Errorf("MaxOpenConnections = %d, want 1", got)
@@ -54,7 +54,7 @@ func TestOpenCurrentDatabaseIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first OpenWithOptions: %v", err)
 	}
-	if _, err := first.Conn().ExecContext(context.Background(), `
+	if _, err := first.conn.ExecContext(context.Background(), `
 		CREATE TABLE marker (value TEXT NOT NULL);
 		INSERT INTO marker (value) VALUES ('preserved');
 	`); err != nil {
@@ -71,7 +71,7 @@ func TestOpenCurrentDatabaseIsIdempotent(t *testing.T) {
 	defer second.Close()
 
 	var value string
-	if err := second.Conn().QueryRowContext(
+	if err := second.conn.QueryRowContext(
 		context.Background(),
 		"SELECT value FROM marker",
 	).Scan(&value); err != nil {
@@ -80,7 +80,7 @@ func TestOpenCurrentDatabaseIsIdempotent(t *testing.T) {
 	if value != "preserved" {
 		t.Errorf("marker value = %q, want preserved", value)
 	}
-	assertPragmaInt(t, second.Conn(), "user_version", currentVersion)
+	assertPragmaInt(t, second.conn, "user_version", currentVersion)
 }
 
 func TestOpenRejectsConcurrentDaemonBeforeDatabaseCreation(t *testing.T) {

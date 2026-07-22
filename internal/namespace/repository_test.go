@@ -2,8 +2,10 @@ package namespace
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -56,10 +58,12 @@ func TestRepositoryUpdateCommitsVersionAndLogAtomically(t *testing.T) {
 	var actorID *int64
 	var loggedVersion int64
 	var details string
-	if err := database.Conn().QueryRowContext(ctx, `
-		SELECT operation, actor_kind, actor_id, namespace_version, details_json
-		FROM operation_log
-	`).Scan(&operation, &actorKind, &actorID, &loggedVersion, &details); err != nil {
+	if err := database.UseConnection(func(connection *sql.Conn) error {
+		return connection.QueryRowContext(ctx, `
+			SELECT operation, actor_kind, actor_id, namespace_version, details_json
+			FROM operation_log
+		`).Scan(&operation, &actorKind, &actorID, &loggedVersion, &details)
+	}); err != nil {
 		t.Fatalf("read operation log: %v", err)
 	}
 	if operation != "library.create" {
@@ -108,10 +112,12 @@ func TestRepositoryUpdateRollsBackNodesVersionAndLog(t *testing.T) {
 
 	assertVersionAndLogCount(t, database, 0, 0)
 	var count int
-	if err := database.Conn().QueryRowContext(
-		ctx,
-		"SELECT COUNT(*) FROM nodes WHERE name = 'rolled-back'",
-	).Scan(&count); err != nil {
+	if err := database.UseConnection(func(connection *sql.Conn) error {
+		return connection.QueryRowContext(
+			ctx,
+			"SELECT COUNT(*) FROM nodes WHERE name = 'rolled-back'",
+		).Scan(&count)
+	}); err != nil {
 		t.Fatalf("count rolled-back node: %v", err)
 	}
 	if count != 0 {
@@ -151,14 +157,117 @@ func TestRepositoryUpdateRollsBackWhenOperationLogFails(t *testing.T) {
 
 	assertVersionAndLogCount(t, database, 0, 0)
 	var count int
-	if err := database.Conn().QueryRowContext(
-		ctx,
-		"SELECT COUNT(*) FROM nodes WHERE name = 'rolled-back-log'",
-	).Scan(&count); err != nil {
+	if err := database.UseConnection(func(connection *sql.Conn) error {
+		return connection.QueryRowContext(
+			ctx,
+			"SELECT COUNT(*) FROM nodes WHERE name = 'rolled-back-log'",
+		).Scan(&count)
+	}); err != nil {
 		t.Fatalf("count rolled-back node: %v", err)
 	}
 	if count != 0 {
 		t.Errorf("rolled-back node count = %d, want 0", count)
+	}
+}
+
+func TestRepositoryUpdateRollsBackAfterPanic(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+	root, err := repository.GlobalRoot(ctx)
+	if err != nil {
+		t.Fatalf("GlobalRoot: %v", err)
+	}
+
+	panicValue := errors.New("callback panic")
+	var recovered any
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		_, _ = repository.Update(ctx, testOperation("test.panic"), func(transaction *Transaction) error {
+			if _, err := transaction.CreateNode(ctx, CreateNode{
+				ParentID: root.ID,
+				Name:     "panicked",
+				Kind:     LibraryRoot,
+				Creator:  Actor{Kind: ActorSystem},
+				Attributes: Attributes{
+					Mode: 0o775,
+					UID:  1000,
+					GID:  1000,
+				},
+			}); err != nil {
+				return err
+			}
+			panic(panicValue)
+		})
+	}()
+	if recovered != panicValue {
+		t.Fatalf("recovered panic = %v, want %v", recovered, panicValue)
+	}
+
+	assertVersionAndLogCount(t, database, 0, 0)
+	var count int
+	if err := database.UseConnection(func(connection *sql.Conn) error {
+		return connection.QueryRowContext(
+			ctx,
+			"SELECT COUNT(*) FROM nodes WHERE name = 'panicked'",
+		).Scan(&count)
+	}); err != nil {
+		t.Fatalf("count panicked node: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("panicked node count = %d, want 0", count)
+	}
+	if _, err := repository.Update(
+		ctx,
+		testOperation("test.after-panic"),
+		func(*Transaction) error { return nil },
+	); err != nil {
+		t.Fatalf("Update after panic: %v", err)
+	}
+}
+
+func TestTransactionReadMethodsUseActiveTransaction(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+	globalRoot, err := repository.GlobalRoot(ctx)
+	if err != nil {
+		t.Fatalf("GlobalRoot: %v", err)
+	}
+
+	if _, err := repository.Update(ctx, testOperation("test.read"), func(transaction *Transaction) error {
+		libraryRoot, err := transaction.CreateNode(ctx, CreateNode{
+			ParentID: globalRoot.ID,
+			Name:     "library",
+			Kind:     LibraryRoot,
+			Creator:  Actor{Kind: ActorSystem},
+			Attributes: Attributes{
+				Mode: 0o775,
+				UID:  1000,
+				GID:  1000,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if root, err := transaction.GlobalRoot(ctx); err != nil {
+			return err
+		} else if root.ID != globalRoot.ID {
+			t.Errorf("transaction GlobalRoot ID = %d, want %d", root.ID, globalRoot.ID)
+		}
+		if version, err := transaction.NamespaceVersion(ctx); err != nil {
+			return err
+		} else if version != 0 {
+			t.Errorf("transaction namespace version = %d, want 0", version)
+		}
+		if node, err := transaction.Lookup(ctx, libraryRoot.ID, "missing"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("transaction Lookup error = %v, want ErrNotFound; node=%#v", err, node)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
 	}
 }
 
@@ -183,7 +292,7 @@ func TestRepositoryUpdateRejectsInvalidOperationBeforeMutation(t *testing.T) {
 	assertVersionAndLogCount(t, database, 0, 0)
 }
 
-func TestRepositorySerializesLookupWithUpdate(t *testing.T) {
+func TestRepositoryRejectsLookupDuringUpdate(t *testing.T) {
 	database := openTestDatabase(t)
 	writer := NewRepository(database)
 	reader := NewRepository(database)
@@ -229,21 +338,24 @@ func TestRepositorySerializesLookupWithUpdate(t *testing.T) {
 
 	select {
 	case err := <-lookupDone:
-		t.Fatalf("Lookup returned before transaction completed: %v", err)
-	case <-time.After(50 * time.Millisecond):
+		if !errors.Is(err, ErrBusy) {
+			t.Fatalf("Lookup error = %v, want ErrBusy", err)
+		}
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("Lookup deadlocked while Update held the connection")
 	}
 
 	close(release)
 	if err := <-updateDone; !errors.Is(err, transactionFailure) {
 		t.Fatalf("Update error = %v, want transaction failure", err)
 	}
-	if err := <-lookupDone; !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Lookup error = %v, want ErrNotFound", err)
+	if _, err := reader.Lookup(ctx, libraryRootID, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Lookup after rollback error = %v, want ErrNotFound", err)
 	}
 	assertVersionAndLogCount(t, database, 0, 0)
 }
 
-func TestRepositorySerializesConcurrentUpdates(t *testing.T) {
+func TestRepositoryRejectsConcurrentUpdate(t *testing.T) {
 	database := openTestDatabase(t)
 	firstRepository := NewRepository(database)
 	secondRepository := NewRepository(database)
@@ -272,16 +384,51 @@ func TestRepositorySerializesConcurrentUpdates(t *testing.T) {
 
 	select {
 	case err := <-secondDone:
-		t.Fatalf("second Update returned before first completed: %v", err)
-	case <-time.After(50 * time.Millisecond):
+		if !errors.Is(err, ErrBusy) {
+			t.Fatalf("second Update error = %v, want ErrBusy", err)
+		}
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("second Update deadlocked")
 	}
 
 	close(release)
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first Update: %v", err)
 	}
-	if err := <-secondDone; err != nil {
-		t.Fatalf("second Update: %v", err)
+	if _, err := secondRepository.Update(
+		ctx,
+		testOperation("test.retry"),
+		func(*Transaction) error { return nil },
+	); err != nil {
+		t.Fatalf("retry Update: %v", err)
+	}
+	assertVersionAndLogCount(t, database, 0, 0)
+}
+
+func TestRepositoryRejectsReentrantReadDuringUpdate(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := repository.Update(ctx, testOperation("test.reentrant"), func(*Transaction) error {
+			_, err := repository.NamespaceVersion(ctx)
+			if !errors.Is(err, ErrBusy) {
+				return fmt.Errorf("NamespaceVersion error = %v, want ErrBusy", err)
+			}
+			return nil
+		})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("reentrant Repository read deadlocked")
 	}
 	assertVersionAndLogCount(t, database, 0, 0)
 }
@@ -698,10 +845,12 @@ func assertVersionAndLogCount(t *testing.T, opened *database.DB, wantVersion, wa
 	t.Helper()
 
 	var version int64
-	if err := opened.Conn().QueryRowContext(
-		context.Background(),
-		"SELECT version FROM namespace_state WHERE singleton = 1",
-	).Scan(&version); err != nil {
+	if err := opened.UseConnection(func(connection *sql.Conn) error {
+		return connection.QueryRowContext(
+			context.Background(),
+			"SELECT version FROM namespace_state WHERE singleton = 1",
+		).Scan(&version)
+	}); err != nil {
 		t.Fatalf("read namespace version: %v", err)
 	}
 	if version != wantVersion {
@@ -709,10 +858,12 @@ func assertVersionAndLogCount(t *testing.T, opened *database.DB, wantVersion, wa
 	}
 
 	var logs int64
-	if err := opened.Conn().QueryRowContext(
-		context.Background(),
-		"SELECT COUNT(*) FROM operation_log",
-	).Scan(&logs); err != nil {
+	if err := opened.UseConnection(func(connection *sql.Conn) error {
+		return connection.QueryRowContext(
+			context.Background(),
+			"SELECT COUNT(*) FROM operation_log",
+		).Scan(&logs)
+	}); err != nil {
 		t.Fatalf("count operation log: %v", err)
 	}
 	if logs != wantLogs {

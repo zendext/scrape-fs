@@ -165,10 +165,30 @@ CREATE INDEX nodes_parent_id ON nodes(parent_id);
 CREATE INDEX nodes_origin_scrape_id ON nodes(origin_scrape_id);
 CREATE INDEX nodes_object_id ON nodes(object_id);
 
+CREATE TRIGGER nodes_prevent_replacement
+BEFORE INSERT ON nodes
+WHEN EXISTS (
+	SELECT 1
+	FROM nodes
+	WHERE id = NEW.id
+ )
+ OR EXISTS (
+	SELECT 1
+	FROM nodes
+	WHERE parent_id IS NEW.parent_id
+	  AND name = NEW.name
+ )
+BEGIN
+	SELECT RAISE(ABORT, 'existing namespace node cannot be replaced');
+END;
+
 CREATE TRIGGER nodes_validate_parent_insert
 BEFORE INSERT ON nodes
 WHEN NEW.kind <> 'GLOBAL_ROOT'
 BEGIN
+	SELECT RAISE(ABORT, 'node cannot be its own parent')
+	WHERE NEW.parent_id = NEW.id;
+
 	SELECT RAISE(ABORT, 'LIBRARY_ROOT parent must be GLOBAL_ROOT')
 	WHERE NEW.kind = 'LIBRARY_ROOT'
 	  AND (

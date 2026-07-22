@@ -17,6 +17,7 @@ const DefaultLockPath = "/run/scrapefs/scrapefsd.lock"
 
 var (
 	ErrAlreadyRunning           = errors.New("scrapefsd is already running")
+	ErrConnectionBusy           = errors.New("database connection is busy")
 	ErrUnsupportedSchemaVersion = errors.New("unsupported database schema version")
 )
 
@@ -130,12 +131,10 @@ func openWithPrepareHook(
 	}, nil
 }
 
-func (database *DB) Conn() *sql.Conn {
-	return database.conn
-}
-
 func (database *DB) UseConnection(use func(*sql.Conn) error) error {
-	database.connectionMu.Lock()
+	if !database.connectionMu.TryLock() {
+		return ErrConnectionBusy
+	}
 	defer database.connectionMu.Unlock()
 	return use(database.conn)
 }

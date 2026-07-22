@@ -18,7 +18,7 @@ func TestNamespaceMigrationInitializesStableGlobalRoot(t *testing.T) {
 		t.Fatalf("first OpenWithOptions: %v", err)
 	}
 
-	firstRoot := readGlobalRoot(t, first.Conn())
+	firstRoot := readGlobalRoot(t, first.conn)
 	if firstRoot.id != 1 {
 		t.Errorf("global root ID = %d, want 1", firstRoot.id)
 	}
@@ -41,10 +41,10 @@ func TestNamespaceMigrationInitializesStableGlobalRoot(t *testing.T) {
 		t.Errorf("global root GID = %d, want %d", firstRoot.gid, os.Getegid())
 	}
 
-	assertNamespaceVersion(t, first.Conn(), 0)
-	assertTableCount(t, first.Conn(), "operation_log", 0)
-	assertTableCount(t, first.Conn(), "objects", 0)
-	assertTableCount(t, first.Conn(), "scrapes", 0)
+	assertNamespaceVersion(t, first.conn, 0)
+	assertTableCount(t, first.conn, "operation_log", 0)
+	assertTableCount(t, first.conn, "objects", 0)
+	assertTableCount(t, first.conn, "scrapes", 0)
 
 	if err := first.Close(); err != nil {
 		t.Fatalf("first Close: %v", err)
@@ -56,12 +56,12 @@ func TestNamespaceMigrationInitializesStableGlobalRoot(t *testing.T) {
 	}
 	defer second.Close()
 
-	secondRoot := readGlobalRoot(t, second.Conn())
+	secondRoot := readGlobalRoot(t, second.conn)
 	if secondRoot != firstRoot {
 		t.Errorf("global root after reopen = %#v, want %#v", secondRoot, firstRoot)
 	}
-	assertNamespaceVersion(t, second.Conn(), 0)
-	assertTableCount(t, second.Conn(), "operation_log", 0)
+	assertNamespaceVersion(t, second.conn, 0)
+	assertTableCount(t, second.conn, "operation_log", 0)
 }
 
 func TestNamespaceMigrationUpgradesVersionOneDatabase(t *testing.T) {
@@ -88,12 +88,12 @@ func TestNamespaceMigrationUpgradesVersionOneDatabase(t *testing.T) {
 	}
 	defer upgraded.Close()
 
-	assertPragmaInt(t, upgraded.Conn(), "user_version", currentVersion)
-	if root := readGlobalRoot(t, upgraded.Conn()); root.id != 1 {
+	assertPragmaInt(t, upgraded.conn, "user_version", currentVersion)
+	if root := readGlobalRoot(t, upgraded.conn); root.id != 1 {
 		t.Errorf("upgraded global root ID = %d, want 1", root.id)
 	}
-	assertNamespaceVersion(t, upgraded.Conn(), 0)
-	assertTableCount(t, upgraded.Conn(), "operation_log", 0)
+	assertNamespaceVersion(t, upgraded.conn, 0)
+	assertTableCount(t, upgraded.conn, "operation_log", 0)
 }
 
 func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
@@ -101,7 +101,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
 		if _, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			nil,
 			"",
 			"GLOBAL_ROOT",
@@ -115,7 +115,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 
 	t.Run("global root cannot be deleted", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
-		if _, err := database.Conn().ExecContext(
+		if _, err := database.conn.ExecContext(
 			context.Background(),
 			"DELETE FROM nodes WHERE id = 1",
 		); err == nil {
@@ -125,8 +125,8 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 
 	t.Run("global root identity cannot be changed", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
-		libraryRootID := insertLibraryRoot(t, database.Conn(), "library")
-		if _, err := database.Conn().ExecContext(context.Background(), `
+		libraryRootID := insertLibraryRoot(t, database.conn, "library")
+		if _, err := database.conn.ExecContext(context.Background(), `
 			UPDATE nodes
 			SET parent_id = ?,
 				name = 'moved-root',
@@ -137,12 +137,40 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		}
 	})
 
+	t.Run("global root cannot be replaced", func(t *testing.T) {
+		database := openNamespaceTestDatabase(t)
+		if _, err := database.conn.ExecContext(context.Background(), `
+			INSERT OR REPLACE INTO nodes (
+				id,
+				parent_id,
+				name,
+				kind,
+				creator_kind,
+				creator_id,
+				managed_directory,
+				mode,
+				uid,
+				gid,
+				atime_ns,
+				mtime_ns,
+				virtual_ctime_ns,
+				created_at,
+				updated_at
+			) VALUES (1, NULL, '', 'GLOBAL_ROOT', 'system', NULL, 0, 448, 0, 0, 1, 1, 1, 1, 1)
+		`); err == nil {
+			t.Fatal("replace global root succeeded")
+		}
+		if root := readGlobalRoot(t, database.conn); root.mode != 0o755 {
+			t.Errorf("global root mode = %#o, want 0755", root.mode)
+		}
+	})
+
 	t.Run("duplicate sibling name", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
 		parentID := int64(1)
 		if _, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&parentID,
 			"library",
 			"LIBRARY_ROOT",
@@ -154,7 +182,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		}
 		if _, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&parentID,
 			"library",
 			"LIBRARY_ROOT",
@@ -171,7 +199,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		parentID := int64(1)
 		if _, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&parentID,
 			"directory",
 			"DIRECTORY",
@@ -185,10 +213,10 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 
 	t.Run("projection requires source fields", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
-		libraryRootID := insertLibraryRoot(t, database.Conn(), "library")
+		libraryRootID := insertLibraryRoot(t, database.conn, "library")
 		if _, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&libraryRootID,
 			"movie.mkv",
 			"PROJECTION_FILE",
@@ -202,11 +230,11 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 
 	t.Run("overlay requires an existing object", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
-		libraryRootID := insertLibraryRoot(t, database.Conn(), "library")
+		libraryRootID := insertLibraryRoot(t, database.conn, "library")
 		missingObjectID := int64(42)
 		if _, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&libraryRootID,
 			"poster.jpg",
 			"OVERLAY_FILE",
@@ -217,7 +245,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 			t.Fatal("insert overlay with missing object succeeded")
 		}
 
-		result, err := database.Conn().ExecContext(
+		result, err := database.conn.ExecContext(
 			context.Background(),
 			"INSERT INTO objects DEFAULT VALUES",
 		)
@@ -230,7 +258,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		}
 		if _, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&libraryRootID,
 			"poster.jpg",
 			"OVERLAY_FILE",
@@ -244,11 +272,11 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 
 	t.Run("origin Scrape requires an existing placeholder", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
-		libraryRootID := insertLibraryRoot(t, database.Conn(), "library")
+		libraryRootID := insertLibraryRoot(t, database.conn, "library")
 		missingScrapeID := int64(42)
 		if _, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&libraryRootID,
 			"directory",
 			"DIRECTORY",
@@ -259,7 +287,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 			t.Fatal("insert node with missing Scrape succeeded")
 		}
 
-		result, err := database.Conn().ExecContext(
+		result, err := database.conn.ExecContext(
 			context.Background(),
 			"INSERT INTO scrapes DEFAULT VALUES",
 		)
@@ -272,7 +300,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		}
 		if _, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&libraryRootID,
 			"directory",
 			"DIRECTORY",
@@ -286,15 +314,15 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 
 	t.Run("node IDs are not reused", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
-		firstID := insertLibraryRoot(t, database.Conn(), "first")
-		if _, err := database.Conn().ExecContext(
+		firstID := insertLibraryRoot(t, database.conn, "first")
+		if _, err := database.conn.ExecContext(
 			context.Background(),
 			"DELETE FROM nodes WHERE id = ?",
 			firstID,
 		); err != nil {
 			t.Fatalf("delete first library root: %v", err)
 		}
-		secondID := insertLibraryRoot(t, database.Conn(), "second")
+		secondID := insertLibraryRoot(t, database.conn, "second")
 		if secondID <= firstID {
 			t.Errorf("second node ID = %d, want greater than deleted ID %d", secondID, firstID)
 		}
@@ -302,10 +330,10 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 
 	t.Run("directory with children cannot become a file", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
-		libraryRootID := insertLibraryRoot(t, database.Conn(), "library")
+		libraryRootID := insertLibraryRoot(t, database.conn, "library")
 		directoryID, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&libraryRootID,
 			"directory",
 			"DIRECTORY",
@@ -318,7 +346,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		}
 		if _, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&directoryID,
 			"child",
 			"DIRECTORY",
@@ -329,7 +357,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 			t.Fatalf("insert child: %v", err)
 		}
 
-		if _, err := database.Conn().ExecContext(context.Background(), `
+		if _, err := database.conn.ExecContext(context.Background(), `
 			UPDATE nodes
 			SET kind = 'PROJECTION_FILE',
 				source_path = '/source',
@@ -350,10 +378,10 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 
 	t.Run("directory cannot move into its descendant", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
-		libraryRootID := insertLibraryRoot(t, database.Conn(), "library")
+		libraryRootID := insertLibraryRoot(t, database.conn, "library")
 		parentID, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&libraryRootID,
 			"parent",
 			"DIRECTORY",
@@ -366,7 +394,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		}
 		childID, err := insertTestNode(
 			context.Background(),
-			database.Conn(),
+			database.conn,
 			&parentID,
 			"child",
 			"DIRECTORY",
@@ -378,7 +406,7 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 			t.Fatalf("insert child: %v", err)
 		}
 
-		if _, err := database.Conn().ExecContext(
+		if _, err := database.conn.ExecContext(
 			context.Background(),
 			"UPDATE nodes SET parent_id = ? WHERE id = ?",
 			childID,
@@ -387,13 +415,38 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 			t.Fatal("move directory into descendant succeeded")
 		}
 	})
+
+	t.Run("directory cannot be inserted as its own parent", func(t *testing.T) {
+		database := openNamespaceTestDatabase(t)
+		if _, err := database.conn.ExecContext(context.Background(), `
+			INSERT INTO nodes (
+				id,
+				parent_id,
+				name,
+				kind,
+				creator_kind,
+				creator_id,
+				managed_directory,
+				mode,
+				uid,
+				gid,
+				atime_ns,
+				mtime_ns,
+				virtual_ctime_ns,
+				created_at,
+				updated_at
+			) VALUES (2, 2, 'self', 'DIRECTORY', 'system', NULL, 1, 493, 0, 0, 1, 1, 1, 1, 1)
+		`); err == nil {
+			t.Fatal("insert self-referencing directory succeeded")
+		}
+	})
 }
 
 func TestNamespaceMigrationEnforcesLibraryConstraints(t *testing.T) {
 	database := openNamespaceTestDatabase(t)
-	rootID := insertLibraryRoot(t, database.Conn(), "library")
+	rootID := insertLibraryRoot(t, database.conn, "library")
 
-	if _, err := database.Conn().ExecContext(context.Background(), `
+	if _, err := database.conn.ExecContext(context.Background(), `
 		INSERT INTO libraries (
 			name,
 			status,
@@ -413,8 +466,8 @@ func TestNamespaceMigrationEnforcesLibraryConstraints(t *testing.T) {
 		t.Fatalf("insert active library: %v", err)
 	}
 
-	duplicateRootID := insertLibraryRoot(t, database.Conn(), "duplicate-root")
-	if _, err := database.Conn().ExecContext(context.Background(), `
+	duplicateRootID := insertLibraryRoot(t, database.conn, "duplicate-root")
+	if _, err := database.conn.ExecContext(context.Background(), `
 		INSERT INTO libraries (
 			name,
 			status,
@@ -434,7 +487,7 @@ func TestNamespaceMigrationEnforcesLibraryConstraints(t *testing.T) {
 		t.Fatal("insert duplicate active library name succeeded")
 	}
 
-	if _, err := database.Conn().ExecContext(context.Background(), `
+	if _, err := database.conn.ExecContext(context.Background(), `
 		INSERT INTO libraries (
 			name,
 			status,
@@ -467,7 +520,7 @@ func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
 		`{"paths":["library"],"node_kinds":["INVALID"]}`,
 		`{"paths":[1],"node_kinds":["LIBRARY_ROOT"]}`,
 	} {
-		if _, err := database.Conn().ExecContext(context.Background(), `
+		if _, err := database.conn.ExecContext(context.Background(), `
 			INSERT INTO operation_log (
 				operation,
 				actor_kind,
@@ -482,7 +535,7 @@ func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
 		}
 	}
 
-	if _, err := database.Conn().ExecContext(context.Background(), `
+	if _, err := database.conn.ExecContext(context.Background(), `
 		INSERT INTO operation_log (
 			operation,
 			actor_kind,

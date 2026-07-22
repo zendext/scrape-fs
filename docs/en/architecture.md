@@ -83,7 +83,7 @@ Persistent internal identities use SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` va
 
 The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. Later Object and Scrape migrations extend those tables before their corresponding behavior creates rows.
 
-The first version pins one SQLite connection. Repository reads and namespace transactions serialize access to that connection, so another goroutine cannot execute a read inside an uncommitted transaction.
+The first version pins one SQLite connection and exposes it only through controlled access. One Repository operation owns the connection at a time; concurrent or reentrant Repository calls return `ErrBusy` instead of entering an uncommitted transaction or waiting indefinitely. An `Update` callback uses the read methods on its `Transaction` and does not call Repository methods.
 
 ## 4. Mount and Library
 

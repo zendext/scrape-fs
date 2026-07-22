@@ -29,29 +29,25 @@ func NewRepository(opened *database.DB) *Repository {
 
 func (repository *Repository) GlobalRoot(ctx context.Context) (Node, error) {
 	var node Node
-	err := repository.database.UseConnection(func(connection *sql.Conn) error {
+	err := repository.useConnection(func(connection *sql.Conn) error {
 		var err error
-		node, err = queryNode(ctx, connection, "id = ?", int64(1))
+		node, err = globalRoot(ctx, connection)
 		return err
 	})
 	if err != nil {
-		return Node{}, fmt.Errorf("read global root: %w", err)
-	}
-	if node.Kind != GlobalRoot {
-		return Node{}, fmt.Errorf("%w: node 1 is %s", ErrInvalidRoot, node.Kind)
+		return Node{}, err
 	}
 	return node, nil
 }
 
 func (repository *Repository) NamespaceVersion(ctx context.Context) (int64, error) {
 	var version int64
-	if err := repository.database.UseConnection(func(connection *sql.Conn) error {
-		return connection.QueryRowContext(
-			ctx,
-			"SELECT version FROM namespace_state WHERE singleton = 1",
-		).Scan(&version)
+	if err := repository.useConnection(func(connection *sql.Conn) error {
+		var err error
+		version, err = namespaceVersion(ctx, connection)
+		return err
 	}); err != nil {
-		return 0, fmt.Errorf("read namespace version: %w", err)
+		return 0, err
 	}
 	return version, nil
 }
@@ -67,34 +63,10 @@ func (repository *Repository) Lookup(
 	}
 
 	var current Node
-	err = repository.database.UseConnection(func(connection *sql.Conn) error {
+	err = repository.useConnection(func(connection *sql.Conn) error {
 		var err error
-		current, err = queryNode(ctx, connection, "id = ?", libraryRootID)
-		if err != nil {
-			return fmt.Errorf("read library root: %w", err)
-		}
-		if current.Kind != LibraryRoot {
-			return fmt.Errorf(
-				"%w: node %d is %s",
-				ErrInvalidRoot,
-				libraryRootID,
-				current.Kind,
-			)
-		}
-
-		for _, component := range components {
-			current, err = queryNode(
-				ctx,
-				connection,
-				"parent_id = ? AND name = ?",
-				current.ID,
-				component,
-			)
-			if err != nil {
-				return fmt.Errorf("lookup component %q: %w", component, err)
-			}
-		}
-		return nil
+		current, err = lookupComponents(ctx, connection, libraryRootID, components)
+		return err
 	})
 	if err != nil {
 		return Node{}, err
@@ -102,6 +74,8 @@ func (repository *Repository) Lookup(
 	return current, nil
 }
 
+// Update holds exclusive database access for the callback. The callback must
+// use Transaction read methods and must not call methods on a Repository.
 func (repository *Repository) Update(
 	ctx context.Context,
 	operation Operation,
@@ -116,7 +90,7 @@ func (repository *Repository) Update(
 	}
 
 	var version int64
-	err = repository.database.UseConnection(func(connection *sql.Conn) error {
+	err = repository.useConnection(func(connection *sql.Conn) error {
 		var err error
 		version, err = repository.update(
 			ctx,
@@ -130,6 +104,14 @@ func (repository *Repository) Update(
 	return version, err
 }
 
+func (repository *Repository) useConnection(use func(*sql.Conn) error) error {
+	err := repository.database.UseConnection(use)
+	if errors.Is(err, database.ErrConnectionBusy) {
+		return ErrBusy
+	}
+	return err
+}
+
 func (repository *Repository) update(
 	ctx context.Context,
 	connection *sql.Conn,
@@ -141,6 +123,8 @@ func (repository *Repository) update(
 	if err != nil {
 		return 0, fmt.Errorf("begin namespace transaction: %w", err)
 	}
+	defer transaction.Rollback()
+
 	rollback := func(cause error) error {
 		rollbackErr := transaction.Rollback()
 		if rollbackErr == nil || errors.Is(rollbackErr, sql.ErrTxDone) {
@@ -213,6 +197,26 @@ type Transaction struct {
 	transaction *sql.Tx
 	now         func() time.Time
 	changed     bool
+}
+
+func (transaction *Transaction) GlobalRoot(ctx context.Context) (Node, error) {
+	return globalRoot(ctx, transaction.transaction)
+}
+
+func (transaction *Transaction) NamespaceVersion(ctx context.Context) (int64, error) {
+	return namespaceVersion(ctx, transaction.transaction)
+}
+
+func (transaction *Transaction) Lookup(
+	ctx context.Context,
+	libraryRootID int64,
+	relativePath string,
+) (Node, error) {
+	components, err := ValidateRelativePath(relativePath)
+	if err != nil {
+		return Node{}, err
+	}
+	return lookupComponents(ctx, transaction.transaction, libraryRootID, components)
 }
 
 func (transaction *Transaction) CreateNode(
@@ -607,6 +611,62 @@ func classifyMutationError(action string, err error) error {
 
 type nodeQuery interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func globalRoot(ctx context.Context, query nodeQuery) (Node, error) {
+	node, err := queryNode(ctx, query, "id = ?", int64(1))
+	if err != nil {
+		return Node{}, fmt.Errorf("read global root: %w", err)
+	}
+	if node.Kind != GlobalRoot {
+		return Node{}, fmt.Errorf("%w: node 1 is %s", ErrInvalidRoot, node.Kind)
+	}
+	return node, nil
+}
+
+func namespaceVersion(ctx context.Context, query nodeQuery) (int64, error) {
+	var version int64
+	if err := query.QueryRowContext(
+		ctx,
+		"SELECT version FROM namespace_state WHERE singleton = 1",
+	).Scan(&version); err != nil {
+		return 0, fmt.Errorf("read namespace version: %w", err)
+	}
+	return version, nil
+}
+
+func lookupComponents(
+	ctx context.Context,
+	query nodeQuery,
+	libraryRootID int64,
+	components []string,
+) (Node, error) {
+	current, err := queryNode(ctx, query, "id = ?", libraryRootID)
+	if err != nil {
+		return Node{}, fmt.Errorf("read library root: %w", err)
+	}
+	if current.Kind != LibraryRoot {
+		return Node{}, fmt.Errorf(
+			"%w: node %d is %s",
+			ErrInvalidRoot,
+			libraryRootID,
+			current.Kind,
+		)
+	}
+
+	for _, component := range components {
+		current, err = queryNode(
+			ctx,
+			query,
+			"parent_id = ? AND name = ?",
+			current.ID,
+			component,
+		)
+		if err != nil {
+			return Node{}, fmt.Errorf("lookup component %q: %w", component, err)
+		}
+	}
+	return current, nil
 }
 
 func queryNode(
