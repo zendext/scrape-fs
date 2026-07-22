@@ -343,6 +343,56 @@ func TestTransactionCreateLibraryRollsBackLibraryAndRoot(t *testing.T) {
 	assertVersionAndLogCount(t, database, 0, 0)
 }
 
+func TestTransactionCreateLibraryRejectsUnavailableProfileWithoutMutation(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+
+	_, err := repository.Update(
+		ctx,
+		testOperation("library.create"),
+		func(transaction *Transaction) error {
+			_, err := transaction.CreateLibrary(ctx, CreateLibrary{
+				Name:           "unavailable-profile",
+				ProfileName:    "unavailable",
+				ProfileVersion: 99,
+				Creator:        Actor{Kind: ActorSystem},
+				UID:            1000,
+				GID:            1000,
+				RootMode:       0o775,
+				DirectoryMode:  0o775,
+				ProjectionMode: 0o444,
+				OverlayMode:    0o664,
+			})
+			return err
+		},
+	)
+	if !errors.Is(err, ErrProfileNotFound) {
+		t.Fatalf("CreateLibrary error = %v, want ErrProfileNotFound", err)
+	}
+
+	libraries, listErr := repository.Libraries(ctx)
+	if listErr != nil {
+		t.Fatalf("Libraries: %v", listErr)
+	}
+	if len(libraries) != 0 {
+		t.Errorf("Libraries = %#v, want empty", libraries)
+	}
+	var roots int
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
+		return connection.QueryRowContext(
+			ctx,
+			"SELECT COUNT(*) FROM nodes WHERE kind = 'LIBRARY_ROOT'",
+		).Scan(&roots)
+	}); err != nil {
+		t.Fatalf("count LibraryRoot nodes: %v", err)
+	}
+	if roots != 0 {
+		t.Errorf("LibraryRoot count = %d, want 0", roots)
+	}
+	assertVersionAndLogCount(t, database, 0, 0)
+}
+
 func TestLibrariesRejectsMismatchedRoot(t *testing.T) {
 	database := openTestDatabase(t)
 	repository := NewRepository(database)

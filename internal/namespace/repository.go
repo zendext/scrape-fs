@@ -807,6 +807,17 @@ func validateCreateLibrary(request CreateLibrary) error {
 			ErrInvalidLibrary,
 		)
 	}
+	switch {
+	case request.ProfileName == "jellyfin" && request.ProfileVersion == 1,
+		request.ProfileName == "plex" && request.ProfileVersion == 1:
+	default:
+		return fmt.Errorf(
+			"%w: %s@%d",
+			ErrProfileNotFound,
+			request.ProfileName,
+			request.ProfileVersion,
+		)
+	}
 	return nil
 }
 

@@ -2,14 +2,12 @@ package library
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io/fs"
 
 	"github.com/zendext/scrape-fs/internal/namespace"
 )
 
-var ErrProfileNotFound = errors.New("profile not found")
+var ErrProfileNotFound = namespace.ErrProfileNotFound
 
 type ProfileIdentifier struct {
 	Name    string
@@ -66,14 +64,6 @@ func (service *Service) Create(
 	if err := create.Validate(); err != nil {
 		return namespace.Library{}, err
 	}
-	if !isBuiltInProfile(request.Profile) {
-		return namespace.Library{}, fmt.Errorf(
-			"%w: %s@%d",
-			ErrProfileNotFound,
-			request.Profile.Name,
-			request.Profile.Version,
-		)
-	}
 
 	var created namespace.Library
 	_, err := service.repository.Update(ctx, namespace.Operation{
@@ -100,14 +90,4 @@ func (service *Service) Get(ctx context.Context, name string) (namespace.Library
 
 func (service *Service) List(ctx context.Context) ([]namespace.Library, error) {
 	return service.repository.Libraries(ctx)
-}
-
-func isBuiltInProfile(identifier ProfileIdentifier) bool {
-	switch identifier {
-	case ProfileIdentifier{Name: "jellyfin", Version: 1},
-		ProfileIdentifier{Name: "plex", Version: 1}:
-		return true
-	default:
-		return false
-	}
 }
