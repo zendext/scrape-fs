@@ -675,6 +675,72 @@ func TestNamespaceMigrationEnforcesOperationDetailsShape(t *testing.T) {
 	if details != `{"paths":["library"],"node_kinds":["LIBRARY_ROOT"]}` {
 		t.Errorf("operation details = %s, want original snapshot", details)
 	}
+
+	if _, err := database.conn.ExecContext(
+		context.Background(),
+		"DELETE FROM operation_log WHERE id = ?",
+		logID,
+	); err == nil {
+		t.Fatal("delete operation log entry succeeded")
+	}
+	assertTableCount(t, database.conn, "operation_log", 1)
+
+	scrapeResult, err := database.conn.ExecContext(
+		context.Background(),
+		"INSERT INTO scrapes DEFAULT VALUES",
+	)
+	if err != nil {
+		t.Fatalf("insert Scrape placeholder: %v", err)
+	}
+	scrapeID, err := scrapeResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("Scrape LastInsertId: %v", err)
+	}
+	logResult, err := database.conn.ExecContext(context.Background(), `
+		INSERT INTO operation_log (
+			operation,
+			actor_kind,
+			actor_id,
+			scrape_id,
+			namespace_version,
+			details_json,
+			created_at
+		) VALUES (
+			'test.scrape',
+			'system',
+			NULL,
+			?,
+			0,
+			'{"paths":["library"],"node_kinds":["LIBRARY_ROOT"]}',
+			1
+		)
+	`, scrapeID)
+	if err != nil {
+		t.Fatalf("insert Scrape operation log: %v", err)
+	}
+	scrapeLogID, err := logResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("Scrape operation log LastInsertId: %v", err)
+	}
+
+	if _, err := database.conn.ExecContext(
+		context.Background(),
+		"DELETE FROM scrapes WHERE id = ?",
+		scrapeID,
+	); err != nil {
+		t.Fatalf("delete referenced Scrape: %v", err)
+	}
+	var persistedScrapeID sql.NullInt64
+	if err := database.conn.QueryRowContext(
+		context.Background(),
+		"SELECT scrape_id FROM operation_log WHERE id = ?",
+		scrapeLogID,
+	).Scan(&persistedScrapeID); err != nil {
+		t.Fatalf("read Scrape operation log: %v", err)
+	}
+	if persistedScrapeID.Valid {
+		t.Errorf("operation log scrape ID = %d, want NULL", persistedScrapeID.Int64)
+	}
 }
 
 type globalRootRecord struct {

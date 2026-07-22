@@ -271,7 +271,7 @@ operation_log
 要求：
 
 - 命名空间操作的日志与对应修改处于同一 SQLite 事务；
-- operation log 记录插入后不可修改；
+- operation log 只允许追加，不得改写或删除；删除被引用的 Scrape 时，只允许通过 `ON DELETE SET NULL` 清空 `scrape_id`；
 - `actor_kind` 至少区分 control、agent、fuse 和 system；
 - `details_json` 使用非空且长度相同的 `paths` 与 `node_kinds` 数组，按相同下标保存路径和节点类型快照；
 - 日志不得通过强外键阻止节点或 Library retire；

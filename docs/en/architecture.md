@@ -273,7 +273,7 @@ operation_log
 Requirements:
 
 - namespace changes and their log entry share one SQLite transaction;
-- operation-log entries are immutable after insertion;
+- operation-log entries are append-only and cannot be rewritten or deleted; deleting a referenced Scrape may clear only `scrape_id` through `ON DELETE SET NULL`;
 - `actor_kind` distinguishes at least control, agent, fuse, and system;
 - `details_json` stores non-empty, equally sized `paths` and `node_kinds` arrays whose entries are paired snapshots;
 - strong foreign keys MUST NOT prevent node or Library retirement;

@@ -481,8 +481,25 @@ END;
 
 CREATE TRIGGER operation_log_protect_update
 BEFORE UPDATE ON operation_log
+WHEN NOT (
+	OLD.scrape_id IS NOT NULL
+	AND NEW.scrape_id IS NULL
+	AND NEW.id IS OLD.id
+	AND NEW.operation IS OLD.operation
+	AND NEW.actor_kind IS OLD.actor_kind
+	AND NEW.actor_id IS OLD.actor_id
+	AND NEW.namespace_version IS OLD.namespace_version
+	AND NEW.details_json IS OLD.details_json
+	AND NEW.created_at IS OLD.created_at
+)
 BEGIN
 	SELECT RAISE(ABORT, 'operation log entries cannot be updated');
+END;
+
+CREATE TRIGGER operation_log_protect_delete
+BEFORE DELETE ON operation_log
+BEGIN
+	SELECT RAISE(ABORT, 'operation log entries cannot be deleted');
 END;
 
 CREATE INDEX operation_log_namespace_version
