@@ -94,6 +94,10 @@ func (service *Service) Create(
 	return created, nil
 }
 
+func (service *Service) Get(ctx context.Context, name string) (namespace.Library, error) {
+	return service.repository.Library(ctx, name)
+}
+
 func (service *Service) List(ctx context.Context) ([]namespace.Library, error) {
 	return service.repository.Libraries(ctx)
 }

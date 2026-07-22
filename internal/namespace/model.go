@@ -8,6 +8,7 @@ import (
 var (
 	ErrConflict         = errors.New("namespace conflict")
 	ErrInvalidLibrary   = errors.New("invalid library")
+	ErrLibraryNotFound  = errors.New("library not found")
 	ErrInvalidNode      = errors.New("invalid namespace node")
 	ErrInvalidOperation = errors.New("invalid namespace operation")
 	ErrInvalidPath      = errors.New("invalid relative namespace path")

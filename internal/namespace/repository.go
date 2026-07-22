@@ -52,6 +52,31 @@ func (repository *Repository) NamespaceVersion(ctx context.Context) (int64, erro
 	return version, nil
 }
 
+func (repository *Repository) Library(ctx context.Context, name string) (Library, error) {
+	if err := validateName(name); err != nil {
+		return Library{}, fmt.Errorf("%w: invalid name: %v", ErrInvalidLibrary, err)
+	}
+
+	var library Library
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var err error
+		library, err = queryLibrary(
+			ctx,
+			connection,
+			"libraries.status = 'ACTIVE' AND libraries.name = ?",
+			name,
+		)
+		return err
+	})
+	if errors.Is(err, ErrNotFound) {
+		return Library{}, fmt.Errorf("%w: %q", ErrLibraryNotFound, name)
+	}
+	if err != nil {
+		return Library{}, fmt.Errorf("get Library %q: %w", name, err)
+	}
+	return library, nil
+}
+
 func (repository *Repository) Libraries(ctx context.Context) ([]Library, error) {
 	var libraries []Library
 	err := repository.useConnection(ctx, func(connection *database.Connection) error {

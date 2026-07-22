@@ -56,6 +56,35 @@ func TestServiceCreateAndListLibraries(t *testing.T) {
 	assertVersionAndLogCount(t, opened, 2, 2)
 }
 
+func TestServiceGetLibraryByName(t *testing.T) {
+	opened := openTestDatabase(t)
+	service := NewService(namespace.NewRepository(opened))
+	ctx := context.Background()
+
+	created, err := service.Create(ctx, CreateRequest{
+		Name:    "jellyfin",
+		Profile: ProfileIdentifier{Name: "jellyfin", Version: 1},
+		Actor:   namespace.Actor{Kind: namespace.ActorSystem},
+		UID:     1000,
+		GID:     1000,
+		Modes:   DefaultModes,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	found, err := service.Get(ctx, "jellyfin")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if found != created {
+		t.Errorf("Get = %#v, want %#v", found, created)
+	}
+	if _, err := service.Get(ctx, "missing"); !errors.Is(err, namespace.ErrLibraryNotFound) {
+		t.Fatalf("Get missing error = %v, want namespace.ErrLibraryNotFound", err)
+	}
+}
+
 func TestServiceCreateRejectsMissingProfileWithoutMutation(t *testing.T) {
 	opened := openTestDatabase(t)
 	service := NewService(namespace.NewRepository(opened))

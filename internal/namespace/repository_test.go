@@ -215,6 +215,81 @@ func TestTransactionCreateLibraryPersistsMatchingRoot(t *testing.T) {
 	assertVersionAndLogCount(t, database, 1, 1)
 }
 
+func TestRepositoryLibraryReturnsActiveLibraryByExactName(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+
+	var created Library
+	if _, err := repository.Update(
+		ctx,
+		testOperation("library.create"),
+		func(transaction *Transaction) error {
+			var err error
+			created, err = transaction.CreateLibrary(ctx, CreateLibrary{
+				Name:           "library",
+				ProfileName:    "jellyfin",
+				ProfileVersion: 1,
+				Creator:        Actor{Kind: ActorSystem},
+				UID:            1000,
+				GID:            1000,
+				RootMode:       0o775,
+				DirectoryMode:  0o775,
+				ProjectionMode: 0o444,
+				OverlayMode:    0o664,
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("CreateLibrary: %v", err)
+	}
+
+	found, err := repository.Library(ctx, "library")
+	if err != nil {
+		t.Fatalf("Library: %v", err)
+	}
+	if found != created {
+		t.Errorf("Library = %#v, want %#v", found, created)
+	}
+
+	if err := database.UseConnection(ctx, func(connection *databasepkg.Connection) error {
+		transaction, err := connection.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err := transaction.ExecContext(ctx, `
+			INSERT INTO libraries (
+				name,
+				status,
+				root_node_id,
+				profile_name,
+				profile_version,
+				uid,
+				gid,
+				root_mode,
+				directory_mode,
+				projection_file_mode,
+				overlay_file_mode,
+				created_at,
+				updated_at,
+				retired_at
+			) VALUES ('retired', 'RETIRED', NULL, 'jellyfin', 1, 1000, 1000, 509, 509, 292, 436, 1, 1, 1)
+		`); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}); err != nil {
+		t.Fatalf("insert retired Library: %v", err)
+	}
+
+	for _, name := range []string{"Library", "missing", "retired"} {
+		if _, err := repository.Library(ctx, name); !errors.Is(err, ErrLibraryNotFound) {
+			t.Errorf("Library(%q) error = %v, want ErrLibraryNotFound", name, err)
+		}
+	}
+}
+
 func TestTransactionCreateLibraryRollsBackLibraryAndRoot(t *testing.T) {
 	database := openTestDatabase(t)
 	repository := NewRepository(database)
