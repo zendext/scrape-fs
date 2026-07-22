@@ -14,14 +14,16 @@
 ## 2. 进程模型
 
 ```text
-scrapefs CLI
-      │ Unix socket
-      ▼
+外部 Agent Skill / 脚本 / 控制用户
+               │
+               ▼
+          scrapefs CLI
+               │ Unix socket
+               ▼
 scrapefsd
 ├── Control API
-├── Scrape manager
-├── Agent session manager
-├── Profile renderer
+├── Scrape plan service
+├── Profile validator
 ├── Namespace service
 ├── Projection service
 ├── Object store
@@ -39,10 +41,11 @@ scrapefsd
 - 挂载和卸载 FUSE；
 - 创建、删除或修改 ProjectionFile 和 OverlayFile；
 - 应用和撤销 Scrape；
-- 执行垃圾回收；
-- 管理 Agent session。
+- 执行垃圾回收。
 
-CLI 和 Agent 禁止直接访问 SQLite 或 object store。
+CLI 和外部 Agent 禁止直接访问 SQLite 或 object store。外部 Agent 使用调用它的用户身份读取宿主源文件、调用自己的媒体和元数据工具，并通过 CLI 提交显式 Projection Plan。它不是 daemon 插件，也不获得额外文件系统权限。
+
+NFO、海报等 artifact 在 Plan applied 后通过普通 FUSE 文件操作创建。ScrapeFS 不区分 OverlayFile 由人工、脚本还是 Agent 创建。
 
 控制协议使用配置的 Unix socket。默认值：
 
@@ -248,7 +251,7 @@ SQLite 保存单调递增的 `namespace_version`。
 - projection add/mv/rm；
 - scrape apply/undo；
 - Library create/rename/recursive remove；
-- Agent 创建 OverlayFile。
+- 通过 FUSE 创建 OverlayFile。
 
 以下操作不增加版本：
 
@@ -279,7 +282,7 @@ operation_log
 - 命名空间操作的日志与对应修改处于同一 SQLite 事务；
 - daemon 的 Repository API 只允许追加 operation log，不提供 update 或 delete 操作；
 - 删除被引用的 Scrape 时，可以通过声明式外键 `ON DELETE SET NULL` 清空 `scrape_id`；
-- `actor_kind` 至少区分 control、agent、fuse 和 system；
+- `actor_kind` 区分 control、fuse 和 system；已发布 schema 中的 `agent` 值保留为 legacy 值，外部 Agent 通过 CLI 或 FUSE 操作时分别记录为 control 或 fuse；
 - `details_json` 使用非空且长度相同的 `paths` 与 `node_kinds` 数组，按相同下标保存路径和节点类型快照；Repository 在插入前校验每个路径和节点类型；
 - 日志不得通过强外键阻止节点或 Library retire；
 - 第一版日志用于审计、doctor 和人工恢复分析；

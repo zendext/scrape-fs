@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-ScrapeFS is an agent-assisted media scraping and virtual directory filesystem for Linux.
+ScrapeFS is an external-agent-assisted media organization and virtual directory filesystem for Linux.
 
 It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
 
@@ -13,7 +13,7 @@ It projects media files from one or more local filesystems into player-friendly 
 - **Library**: a virtual media library exposed under the FUSE mount, such as `jellyfin` or `plex`.
 - **Projection**: a read-only mapping from an external source file to a virtual library path.
 - **OverlayFile**: a writable file managed by ScrapeFS, such as an NFO file, poster, or downloaded subtitle.
-- **Scrape**: an agent-assisted workflow that identifies media and generates a reviewable batch of Projections.
+- **Scrape**: a Projection plan submitted by an external tool, validated by ScrapeFS, and applied atomically.
 - **Profile**: deterministic naming and directory rules for a media player.
 
 `Node` is an internal implementation term for an entry in the virtual filesystem tree. It is not part of the user-facing API.
@@ -57,17 +57,17 @@ scrapefs projection add \
 
 Removing or renaming the Projection does not modify the source file.
 
-## Agent-Assisted Scrape
+## External Agent Skill
 
-When media identification is needed:
+When media identification is needed, an external Agent skill reads the source directory, probes media, queries metadata, and submits an explicit plan:
 
 ```bash
-scrapefs scrape \
-  /mnt/disk1/downloads/Dune.2021.REMUX \
-  --library jellyfin
+scrapefs scrape submit --file /tmp/dune.scrape.json
+scrapefs scrape diff scrape-42 --against namespace
+scrapefs scrape apply scrape-42 --revision 1
 ```
 
-The daemon enumerates only the selected file or directory, gives the resulting file manifest to the Agent, renders target paths through the selected Profile, and shows the result before applying it.
+`scrapefsd` does not run a model or expose file-read, `ffprobe`, or network tools to an Agent. It securely opens only the sources explicitly named in the plan, validates paths and conflicts, and creates the Projections atomically. The external Agent creates NFO files and artwork through ordinary FUSE operations after apply.
 
 ## First-Version Boundaries
 
@@ -78,9 +78,10 @@ The first version targets:
 - movies, standard `SxxEyy` episodes, and external subtitles;
 - read-only source Projections;
 - writable OverlayFiles;
-- interactive CLI review and confirmation.
+- versioned JSON Scrape plans;
+- a machine-readable CLI for people and external Agent skills.
 
-It does not target torrent management, downloader integration, a GUI, writable Projections, a complete POSIX filesystem, dynamic Profile plugins, or cross-host Scrape import.
+It does not target an embedded model provider, daemon-side Agent sessions, torrent management, downloader integration, a GUI, writable Projections, a complete POSIX filesystem, dynamic Profile plugins, or cross-host path translation.
 
 ## Development
 
@@ -112,7 +113,7 @@ gofmt -w .
 - [Use cases](docs/en/use-cases.md)
 - [Architecture](docs/en/architecture.md)
 - [Projection model](docs/en/projection.md)
-- [Scrape and Agent workflow](docs/en/scrape.md)
+- [Scrape plans and the external Agent workflow](docs/en/scrape.md)
 - [Filesystem and object storage](docs/en/filesystem.md)
 - [Operations and CLI](docs/en/operations.md)
 - [First-version acceptance criteria](docs/en/acceptance.md)

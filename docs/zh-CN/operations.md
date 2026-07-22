@@ -4,11 +4,10 @@
 
 ## 1. 控制面授权
 
-第一版使用三个身份边界：
+第一版控制面使用两个身份角色：
 
 1. **管理员**：root 或配置的管理员 UID，可管理 Library 和 daemon。
 2. **控制用户**：属于 `scrapefs-control` 组，可选择源路径、创建 Projection、执行 Scrape、apply/undo、查看 status/doctor。
-3. **Agent provider**：在 daemon 进程内运行，或由 daemon 以自身有效 UID 启动为受信 worker；只能通过 Agent controller 访问当前 session。
 
 推荐 socket：
 
@@ -23,9 +22,7 @@ daemon 必须通过 Unix peer credentials 获取调用者身份。
 
 `scrapefs-control` 成员是可信源路径选择者。daemon 服务账号应只拥有预期媒体目录的读取权限，避免控制用户借 daemon 读取其他敏感文件。
 
-Agent session token 不能用于普通控制命令。
-
-第一版不单独配置 Agent UID，也不将 Unix UID 作为 daemon 与 Agent 之间的隔离边界。独立进程形式的 Agent worker 必须使用 daemon 的有效 UID，并携带当前 session token。不可信外部 Agent worker 需要独立 UID 或 sandbox，不属于第一版范围。
+外部 Agent Skill 以调用它的用户身份运行。它没有 daemon-side session token 或专用权限，只能使用该用户已有的宿主文件系统、控制 CLI 和 FUSE 权限。远程或不可信 Agent 的进程隔离、凭据和网络访问由启动它的用户负责，不属于 ScrapeFS 权限模型。
 
 ## 2. Library 生命周期
 
@@ -33,11 +30,10 @@ Agent session token 不能用于普通控制命令。
 
 递归删除前不得存在：
 
-- draft、waiting_input 或 ready Scrape；
-- 活动 Agent session；
-- 进行中的 artifact upload。
+- draft 或 ready Scrape；
+- 进行中的命名空间写事务。
 
-管理员必须先手动取消 session、discard Scrape，再执行 recursive remove。
+管理员必须先 discard 未应用 Scrape，并等待在途写事务结束，再执行 recursive remove。
 
 recursive remove 必须在单个 SQLite 事务中：
 
@@ -130,16 +126,14 @@ scrapefs projection mv
 scrapefs projection rm
 scrapefs projection rebind
 
-scrapefs scrape
+scrapefs scrape submit
 scrapefs scrape list
 scrapefs scrape show
 scrapefs scrape diff
-scrapefs scrape answer
 scrapefs scrape revise
 scrapefs scrape validate
 scrapefs scrape apply
 scrapefs scrape undo
-scrapefs scrape clone
 scrapefs scrape discard
 scrapefs scrape export
 
@@ -151,6 +145,8 @@ daemon：
 ```text
 scrapefsd
 ```
+
+所有供自动化调用的命令必须支持机器可读 JSON 输出。`scrape submit` 和 `scrape revise` 使用 `--file <path>` 读取 UTF-8 JSON，并使用 `--file -` 从 stdin 读取。非 TTY 或显式机器可读模式不得提示输入或自动 apply。
 
 ## 8. 第一版配置
 
@@ -192,21 +188,25 @@ socket_path = "/run/scrapefs/scrapefs.sock"
 socket_mode = 0o660
 administrator_uid = 0
 
-[agent]
-max_text_file_size = "4MiB"
-max_binary_file_size = "32MiB"
-max_session_total_size = "256MiB"
-max_upload_duration = "120s"
-
 [gc]
 orphan_grace_period = "24h"
 ```
 
 `storage.overlay_store_path` 是 OverlayFile 内容的实际落盘根目录，也就是 object store 根目录，不再配置第二个 Overlay 路径。
 
-第一版不配置 Agent UID。Agent 使用 daemon 进程的有效 UID。
+外部 Agent 不通过 daemon 配置。模型、metadata provider、凭据、媒体工具和 Skill 配置均由外部 Agent 自己管理。
 
-该进程 UID 只决定 Agent worker 的运行身份，不决定 Agent 创建的虚拟 OverlayFile owner。虚拟 owner 使用执行 `scrape apply` 的确认者 UID/GID。
+当前已实现的早期配置解析器仍兼容以下 legacy 字段：
+
+```toml
+[agent]
+max_text_file_size = "4MiB"
+max_binary_file_size = "32MiB"
+max_session_total_size = "256MiB"
+max_upload_duration = "120s"
+```
+
+这些字段不配置外部 Agent，也不属于目标 v1 Agent Skill 工作流。后续实现任务必须在删除或改为通用 Overlay 限制之间作出兼容性决定；在该任务完成前，当前解析和校验行为保持不变。
 
 固定行为：
 
@@ -225,7 +225,7 @@ orphan_grace_period = "24h"
 - size 使用带二进制单位的字符串，第一版支持 `KiB`、`MiB` 和 `GiB`；
 - 路径使用字符串。
 
-解析必须拒绝未知字段、超出范围的 UID、无效 mode 和非正 size quota。单文件 quota 不得大于 `max_session_total_size`。FUSE TTL 必须非负；`max_upload_duration` 和 `orphan_grace_period` 必须为正数。`negative_timeout` 可以为 `0s`。
+解析必须拒绝未知字段、超出范围的 UID、无效 mode 和非正 size quota。对 legacy `[agent]` 字段，单文件 quota 不得大于 `max_session_total_size`，`max_upload_duration` 必须为正数。FUSE TTL 必须非负；`orphan_grace_period` 必须为正数。`negative_timeout` 可以为 `0s`。
 
 ### 8.4 路径约束
 

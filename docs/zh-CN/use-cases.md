@@ -10,7 +10,7 @@
 | --- | --- |
 | 管理员 | 管理 Library、daemon 和系统配置 |
 | 控制用户 | 创建 Projection、执行 Scrape、确认和撤销结果 |
-| Agent | 在受限 session 中识别媒体和生成 Scrape revision |
+| 外部 Agent Skill | 使用调用者权限识别媒体、生成 Plan 并调用 CLI |
 | 媒体播放器 | 读取 ProjectionFile，并通过 FUSE 创建或修改 OverlayFile |
 | daemon | 执行安全校验、持久化、FUSE 操作和恢复 |
 
@@ -131,50 +131,47 @@ ProjectionFile 可读且内容只读，源文件保持不变。
 - [Projection 模型](projection.md)
 - [文件系统与对象存储](filesystem.md)
 
-## UC-03 Scrape 一个电影目录
+## UC-03 提交外部 Agent 生成的 Scrape Plan
 
 ### 参与者
 
-控制用户、Agent
+控制用户、外部 Agent Skill
 
 ### 目标
 
-识别一个任意命名的电影目录，并生成可预览的 Projection 草稿。
+识别一个任意命名的电影目录，并提交可预览、可原子应用的 Projection Plan。
 
 ### 前置条件
 
 - daemon 已 ready；
 - 目标 Library 为 ACTIVE；
-- daemon 可以读取用户指定目录；
-- Agent provider 可用。
+- 外部 Agent 可以使用调用者权限读取源目录；
+- daemon 服务账号可以读取 Plan 显式列出的源文件。
 
 ### 触发
 
 ```bash
-scrapefs scrape \
-  /mnt/disk1/downloads/Dune.2021.REMUX \
-  --library jellyfin
+scrapefs scrape submit --file /tmp/dune.scrape.json
 ```
 
 ### 主流程
 
-1. daemon 只枚举指定目录及必要后代。
-2. daemon 创建不可修改的 Scrape 文件清单。
-3. daemon 创建受限 Agent session。
-4. Agent 读取文件名、现有文本元数据和受控 probe 结果。
-5. Agent 生成 MediaModel。
-6. Jellyfin Profile 生成 RenderedEntry。
-7. daemon 执行路径安全和冲突检查。
-8. Scrape 进入 ready。
-9. CLI 展示媒体信息、Projection 树、ignored 文件和 warning。
+1. 外部 Agent 枚举源目录并使用自己的 `ffprobe` 和元数据工具。
+2. 外部 Agent 处理媒体识别歧义并生成 `scrapefs.scrape/v1` JSON。
+3. CLI 以控制用户身份向 daemon 提交 Plan。
+4. daemon 严格解析 Schema，并安全打开每个 entry 的 source。
+5. daemon 保存源文件身份快照。
+6. daemon 执行通用路径、Profile 和冲突检查。
+7. daemon 创建不可变 revision。
+8. 没有 blocking error 时 Scrape 进入 ready，否则进入 draft。
+9. CLI 展示 source-to-target diff、ignored source 和 warning。
 
 ### 备选流程
 
-- 输入是普通文件：只检查该文件。
-- Agent 无法确定媒体：Scrape 进入 waiting_input。
-- 源文件在分析期间变化：相关操作返回 `ESTALE`。
+- Schema、权限或 source 类型无效：拒绝提交且不创建 Scrape。
+- 源文件在提交期间变化：返回 `ESTALE`。
 - 路径安全检查失败：Scrape 不进入 ready。
-- Agent 失败：Scrape 保持 draft 并记录错误。
+- 目标冲突：保存 draft revision 供外部 Agent 修正。
 
 ### 结果
 
@@ -182,89 +179,86 @@ scrapefs scrape \
 
 ### 相关规格
 
-- [Scrape 与 Agent 工作流](scrape.md)
+- [Scrape Plan 与外部 Agent 工作流](scrape.md)
 - [Projection 模型](projection.md)
 
-## UC-04 回答媒体识别歧义
+## UC-04 修正媒体识别结果
 
 ### 参与者
 
-控制用户、Agent
+控制用户、外部 Agent Skill
 
 ### 目标
 
-解决 Agent 无法确定作品、季集或文件角色的问题。
+在外部解决作品、季集、字幕关联或文件角色歧义后，提交完整替换 Plan。
 
 ### 前置条件
 
-- Scrape 状态为 waiting_input；
-- Question 属于当前 revision。
+- Scrape 状态为 draft 或 ready；
+- 外部 Agent 已从用户或元数据源获得修正信息。
 
 ### 触发
 
 ```bash
-scrapefs scrape answer scrape-42 question-1 candidate-2021
+scrapefs scrape revise scrape-42 --file corrected.json
 ```
 
 ### 主流程
 
-1. daemon 校验 Question 属于当前 revision。
-2. daemon 保存 Answer。
-3. Agent 根据 Answer 重新生成 MediaModel。
-4. Profile 重新渲染目标路径。
-5. daemon重新执行安全和冲突检查。
-6. daemon 创建新 revision。
-7. 没有剩余问题时 Scrape 进入 ready。
+1. 外部 Agent 根据新信息重新生成完整 Plan。
+2. daemon 严格解析并校验替换 Plan。
+3. daemon 重新安全打开并快照全部选中 source。
+4. daemon 重新执行路径、Profile 和冲突检查。
+5. daemon 创建新的不可变 revision。
+6. CLI 展示与前一 revision 的 diff。
 
 ### 备选流程
 
-- Question 属于旧 revision：拒绝 Answer。
-- 仍有未回答问题：Scrape 保持 waiting_input。
-- 重新渲染失败：Scrape 返回 draft 并记录错误。
+- 替换 Plan 无效：拒绝且保留当前 revision。
+- 仍有 blocking conflict：新 revision 保持 draft。
+- Scrape 已 applied、undone 或 discarded：拒绝 revise。
 
 ### 结果
 
-产生新的不可变 revision，旧 revision 保留用于 diff。
+新 revision 成为当前 revision，旧 revision 保留用于审阅。
 
 ### 相关规格
 
-- [Scrape 与 Agent 工作流](scrape.md)
+- [Scrape Plan 与外部 Agent 工作流](scrape.md)
 
 ## UC-05 修改 Scrape 目标路径
 
 ### 参与者
 
-控制用户
+控制用户、外部 Agent Skill
 
 ### 目标
 
-在应用前修正 Agent 或 Profile 生成的目标路径。
+在应用前修正 Plan 中的目标路径。
 
 ### 前置条件
 
-- Scrape 状态为 draft、waiting_input 或 ready；
-- 新路径位于同一 Library。
+- Scrape 状态为 draft 或 ready；
+- 替换 Plan 仍引用同一 Library。
 
 ### 触发
 
 ```bash
-scrapefs scrape revise scrape-42 \
-  --target rendered-01="Movies/Dune (2021)/Dune (2021).mkv"
+scrapefs scrape revise scrape-42 --file corrected-paths.json
 ```
 
 ### 主流程
 
-1. daemon读取当前 revision。
-2. daemon 应用手动 override。
-3. daemon执行不可绕过的路径安全检查。
-4. Profile 对命名规范生成 warning。
-5. daemon 创建新 revision。
-6. CLI 展示与前一 revision 的 diff。
+1. 外部 Agent 或控制用户修改 Plan 中的 target。
+2. daemon 对完整替换 Plan 执行不可绕过的路径安全检查。
+3. Profile 对命名规范生成 warning。
+4. daemon 创建新 revision。
+5. CLI 展示与前一 revision 的 diff。
 
 ### 备选流程
 
-- 路径包含 `..` 或逃逸 LibraryRoot：拒绝。
-- 目标与已有节点冲突：Scrape 不进入 ready。
+- target 包含 `..` 或逃逸 LibraryRoot：拒绝。
+- target 与已有节点冲突：Scrape 不进入 ready。
 - Scrape 已 applied、undone 或 discarded：拒绝修改。
 
 ### 结果
@@ -273,7 +267,7 @@ scrapefs scrape revise scrape-42 \
 
 ### 相关规格
 
-- [Scrape 与 Agent 工作流](scrape.md)
+- [Scrape Plan 与外部 Agent 工作流](scrape.md)
 
 ## UC-06 应用 Scrape
 
@@ -295,7 +289,7 @@ scrapefs scrape revise scrape-42 \
 ### 触发
 
 ```bash
-scrapefs scrape apply scrape-42
+scrapefs scrape apply scrape-42 --revision 1
 ```
 
 ### 主流程
@@ -322,11 +316,11 @@ scrapefs scrape apply scrape-42
 
 ### 结果
 
-全部 Projection 同时发布，源文件保持不变。后续 Agent artifact 的虚拟 owner 使用本次保存的确认者 UID/GID。
+全部 Projection 同时发布，源文件保持不变。外部 Agent 后续通过 FUSE 创建 OverlayFile 时使用 FUSE 调用者身份。
 
 ### 相关规格
 
-- [Scrape 与 Agent 工作流](scrape.md)
+- [Scrape Plan 与外部 Agent 工作流](scrape.md)
 - [系统架构](architecture.md)
 
 ## UC-07 撤销 Scrape
@@ -351,13 +345,12 @@ scrapefs scrape undo scrape-42
 
 ### 主流程
 
-1. daemon 禁止该 Scrape 的新 Agent artifact 请求。
-2. daemon 在事务中删除 `origin_scrape_id` 匹配的 ProjectionFile。
-3. daemon 清理空的 managed Directory。
-4. daemon 写 operation log。
-5. daemon 将 Scrape 标记为 undone。
-6. daemon 增加 namespace version 并提交。
-7. CLI 列出仍然保留的 Agent OverlayFile。
+1. daemon 在事务中删除 `origin_scrape_id` 匹配的 ProjectionFile。
+2. daemon 清理空的 managed Directory。
+3. daemon 写 operation log。
+4. daemon 将 Scrape 标记为 undone。
+5. daemon 增加 namespace version 并提交。
+6. CLI 列出仍然保留或阻止目录清理的 OverlayFile。
 
 ### 备选流程
 
@@ -371,7 +364,7 @@ Scrape 的 Projection 消失，源文件和 OverlayFile 保留。
 
 ### 相关规格
 
-- [Scrape 与 Agent 工作流](scrape.md)
+- [Scrape Plan 与外部 Agent 工作流](scrape.md)
 
 ## UC-08 重命名或删除 Projection
 
@@ -582,7 +575,7 @@ scrapefs library remove jellyfin
 
 非空 Library 使用显式 recursive remove：
 
-1. 管理员先取消活动 session 并 discard 未应用 Scrape。
+1. 管理员先 discard 未应用 Scrape，并等待在途命名空间写事务结束。
 2. daemon 在事务中删除 Library 节点树。
 3. daemon 将 `root_node_id` 置空并标记 RETIRED。
 4. 事务提交后回收 Overlay object。
@@ -590,7 +583,7 @@ scrapefs library remove jellyfin
 ### 备选流程
 
 - 普通删除非空 Library：返回 `ENOTEMPTY`。
-- 存在活动 Scrape 或 Agent session：recursive remove 失败。
+- 存在活动 Scrape 或在途命名空间写事务：recursive remove 失败。
 
 ### 结果
 

@@ -1,29 +1,94 @@
-# Scrape and Agent Workflow
+# Scrape Plans and the External Agent Workflow
 
 **English** | [简体中文](../zh-CN/scrape.md)
 
-> This is an English translation. If the English and Chinese documents conflict, the Chinese documentation is authoritative.
+A Scrape is a set of Projections submitted by an external tool, validated by ScrapeFS, and applied atomically.
 
-A Scrape is an Agent-assisted workflow that generates a reviewable batch of Projections from a user-selected file or directory.
+Media identification does not run inside `scrapefsd`. An external Agent skill, script, or manual tool reads source directories, runs `ffprobe`, queries metadata, resolves ambiguity, and selects target paths. ScrapeFS is responsible only for deterministic source validation, path validation, conflict checks, review, apply, and undo.
 
-## 1. Create a Scrape
+## 1. External Agent Boundary
+
+The external Agent:
+
+- reads the host filesystem with the invoking control user's identity;
+- chooses its own model, prompts, metadata providers, and media-probing tools;
+- produces an explicit source-to-target Projection plan;
+- submits and reviews the plan through the `scrapefs` CLI;
+- creates NFO files, artwork, and other OverlayFiles through ordinary FUSE operations after the plan is applied.
+
+ScrapeFS does not provide:
+
+- an embedded model provider;
+- a daemon-side Agent session or session token;
+- a model tool-calling loop;
+- arbitrary file-read, `ffprobe`, or network-query Agent APIs;
+- a MediaModel, Question/Answer loop, or Agent-specific Overlay API.
+
+The external Agent is not an additional authorization boundary. It can use only its own host-filesystem permissions, control CLI permissions, and FUSE permissions.
+
+## 2. Plan Format
+
+The first version accepts UTF-8 JSON only. The CLI reads a versioned plan from a file or stdin:
 
 ```bash
-scrapefs scrape \
-  /mnt/disk1/downloads/Dune.2021.REMUX \
-  --library jellyfin
+scrapefs scrape submit --file /tmp/dune.scrape.json
+scrapefs scrape submit --file -
 ```
 
-A Scrape does not move or reorganize the source directory.
+```json
+{
+  "schema": "scrapefs.scrape/v1",
+  "library": "jellyfin",
+  "entries": [
+    {
+      "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.2021.REMUX.mkv",
+      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).mkv"
+    },
+    {
+      "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.zh.ass",
+      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).zh.ass"
+    }
+  ],
+  "ignored": [
+    {
+      "source": "/mnt/disk1/downloads/Dune.2021.REMUX/sample.mkv",
+      "reason": "sample video"
+    }
+  ]
+}
+```
 
-For a regular-file input, the daemon checks only that file. For a directory input, the daemon enumerates only that directory and the descendants required for media identification.
+Rules:
 
-## 2. Scrape Data
+- `schema` is `scrapefs.scrape/v1`;
+- `library` references an ACTIVE Library;
+- `entries` is non-empty;
+- `source` is a lexically normalized absolute local path;
+- `target` is relative to LibraryRoot and passes generic and Profile validation;
+- one plan cannot contain a duplicate target;
+- `ignored` is review-only, creates no node, and does not authorize the daemon to read that path;
+- unknown fields and invalid types are rejected;
+- the first version does not support YAML or cross-host path translation.
+
+## 3. Submit and Source Snapshots
+
+`scrape submit` is called by a control user. Control users are trusted source-path selectors.
+
+For each entry, the daemon:
+
+1. opens `source` through the secure source-file primitive;
+2. rejects symlinks, magic links, directories, and other non-regular files;
+3. stores the normalized path, device, inode, size, mode, and nanosecond timestamps;
+4. closes descriptors that are no longer needed after submission;
+5. safely reopens and revalidates the identity before apply.
+
+A plan cannot ask the daemon to enumerate a parent directory, read file contents, run a command, or access the network.
+
+## 4. Scrape Data
 
 ```text
 scrapes
 ├── id
-├── source_path
 ├── library_id
 ├── profile_name
 ├── profile_version
@@ -39,330 +104,158 @@ scrapes
 └── updated_at
 ```
 
-States:
+Statuses:
 
 ```text
 draft
-waiting_input
 ready
 applied
 undone
 discarded
 ```
 
-## 3. Scrape File Manifest
+Schema or authorization errors reject submission without creating a Scrape. Reviewable path conflicts, Profile warnings, or source-state problems are retained in a draft revision. A plan without blocking errors becomes ready.
 
-After enumeration, the daemon stores:
+## 5. Revisions
 
-```text
-scrape_files
-├── id
-├── scrape_id
-├── source_path
-├── relative_path
-├── parent_id
-├── name
-├── file_type
-├── device_id
-├── inode
-├── mode
-├── size
-├── atime_ns
-├── mtime_ns
-├── ctime_ns
-└── created_at
+Each `submit` creates revision 1. `scrape revise` creates a new immutable revision from a complete replacement plan:
+
+```bash
+scrapefs scrape revise scrape-42 --file corrected.json
 ```
-
-`file_type` is one of:
-
-```text
-regular
-directory
-unsupported
-```
-
-Rules:
-
-- the manifest belongs only to the current Scrape;
-- the completed manifest is immutable;
-- the Agent may reference only regular files in the manifest;
-- a new directory read creates a new Scrape;
-- there is no separate Source Scan domain model.
-
-## 4. Media Probing
-
-The Agent requests controlled text reads or `ffprobe` through `scrape_file_id`.
-
-The daemon safely reopens the file and validates device, inode, size, and mtime.
-
-The Agent cannot provide an arbitrary local path, command-line arguments, or shell command.
-
-Probe execution has a timeout and maximum output size. The first version does not maintain a generic Probe history.
-
-## 5. Agent Session
-
-```text
-agent_sessions
-├── id
-├── scrape_id
-├── library_id
-├── status
-├── token_hash
-├── expires_at
-├── created_at
-└── updated_at
-```
-
-States:
-
-```text
-ANALYSIS
-ARTIFACT
-CANCELLED
-EXPIRED
-COMPLETED
-```
-
-The Agent may:
-
-- read the current Scrape manifest;
-- request controlled text reads and ffprobe;
-- generate MediaModel;
-- generate structured Questions;
-- generate a new revision from Answers.
-
-The Agent cannot:
-
-- read outside the current Scrape;
-- submit an arbitrary absolute path;
-- modify source files;
-- access SQLite, the object store, or FUSE directly;
-- apply, undo, or discard a Scrape;
-- manage Libraries.
-
-The first-version Agent provider runs inside the daemon or as a trusted worker launched under the daemon's effective UID. A separate worker still presents the current session token when calling the Agent API.
-
-The first version does not support an untrusted external Agent worker isolated by a separate Unix UID or sandbox.
-
-## 6. MediaModel
-
-```yaml
-schema: scrapefs.media/v1
-
-media:
-  kind: movie | series
-  title: string
-  original_title: string | null
-  year: integer | null
-  provider_ids:
-    tmdb: string | null
-    tvdb: string | null
-    imdb: string | null
-  edition: string | null
-  version: string | null
-
-items:
-  - id: media-item-1
-    scrape_file_id: file-01
-    role: primary_video | episode | subtitle | extra | metadata_source
-    season: integer | null
-    episodes: [integer]
-    language: string | null
-    target_item_ids: [media-item-id]
-    subtitle:
-      default: boolean
-      forced: boolean
-      sdh: boolean
-    extra_type: trailer | featurette | interview | sample | other | null
-
-ignored:
-  - scrape_file_id: file-99
-    reason: string
-```
-
-Constraints:
-
-- a movie has at least one primary video;
-- an episode has a season and at least one episode number;
-- a subtitle explicitly references its target video or episode;
-- every scrape_file_id belongs to the current Scrape;
-- only regular files can become Projections.
-
-## 7. Profile Output
-
-```yaml
-schema: scrapefs.rendered-entry/v1
-
-id: rendered-01
-scrape_file_id: file-01
-media_item_id: media-item-1
-kind: projection
-target: Movies/Dune (2021)/Dune (2021).mkv
-artifact_root: Movies/Dune (2021)
-manual_override: false
-warnings: []
-```
-
-`target` and `artifact_root` are relative to LibraryRoot.
-
-Profile interface:
-
-```go
-type Profile interface {
-    Name() string
-    Version() string
-
-    Render(MediaModel, ScrapeFileManifest) (RenderResult, error)
-    ValidatePathSafety(relativePath string) error
-    ValidateConformance(entry RenderedEntry) []Warning
-}
-```
-
-Path-safety errors cannot be overridden. Nonconforming player names produce warnings shown at final confirmation.
-
-## 8. Revision
-
-Initial Agent analysis, analysis after an Answer, user revision, manual path override, and Profile rerendering create immutable revisions.
 
 ```text
 scrape_revisions
 ├── scrape_id
 ├── revision
-├── media_model
-├── rendered_entries
-├── questions
-├── answers
+├── plan
+├── source_snapshots
+├── validation_result
 ├── warnings
-├── created_by
+├── created_by_uid
 └── created_at
 ```
 
-After showing a revision, the CLI sends its expected revision number with apply. A changed current revision causes apply to fail and requires new confirmation.
+After the CLI displays a revision, apply includes the expected revision. The daemon rejects apply when the current revision has changed and requires another review.
 
-The first version has no Approval table and no cryptographic revision hash.
-
-## 9. State Transitions
+State transitions:
 
 ```text
 none -> draft
-draft -> waiting_input
+none -> ready
 draft -> ready
-draft/waiting_input/ready -> discarded
-waiting_input -> draft
-ready -> draft
+draft/ready -> draft
+draft/ready -> discarded
 ready -> applied
 applied -> undone
-applied/undone -> clone as a new draft
 ```
 
-Answering all Questions does not directly produce ready. Agent analysis, Profile rendering, path safety, and conflict validation run again.
+An applied, undone, or discarded Scrape cannot be revised.
 
-Discarding an unapplied Scrape cancels its Agent session.
+## 6. Validate, Diff, and Export
 
-## 10. Diff and Export
+```text
+scrapefs scrape show scrape-42
+scrapefs scrape validate scrape-42
+scrapefs scrape diff scrape-42
+scrapefs scrape diff scrape-42 --against namespace
+scrapefs scrape export scrape-42
+```
 
-`scrape diff` compares the current revision with the previous revision.
+`validate` rechecks the Library, Profile, source identities, path safety, and namespace conflicts and creates an immutable revision with the same plan plus fresh source snapshots and validation results. It does not modify an existing revision.
 
-`scrape diff --against namespace` shows:
+`diff --against namespace` displays:
 
 - Projections to create;
-- directories to create or reuse;
+- managed directories to create or reuse;
 - existing paths;
 - path conflicts;
-- naming warnings.
+- Profile warnings;
+- ignored sources.
 
-`scrape export` uses:
+`export` returns only the current `scrapefs.scrape/v1` plan in a form that can be submitted again. Daemon-owned source snapshots, validation results, and namespace diffs are available through `show --json` and `diff --json` and cannot bypass validation on resubmission.
 
-```yaml
-schema: scrapefs.scrape/v1
-```
+Every automation-facing command supports machine-readable JSON output. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically.
 
-It exports the current Scrape, file manifest, MediaModel, and RenderedEntries for diagnostics and review. The first version has no import.
+## 7. Apply
 
-## 11. Apply
-
-Apply verifies:
+Before apply, the daemon confirms:
 
 - the caller has control permission;
-- Scrape is ready;
-- expected revision matches current revision;
-- selected source identities still match;
-- Library is ACTIVE;
-- Profile is available;
-- path-safety validation passes;
-- target paths do not conflict.
+- the Scrape is ready;
+- the expected revision equals the current revision;
+- every source identity still matches;
+- the Library is ACTIVE;
+- the Profile version is available;
+- every path-safety check passes;
+- no target path conflicts.
 
 Atomic flow:
 
-1. read the ready Scrape and expected revision;
-2. revalidate source identities and target paths;
-3. construct the candidate namespace change;
-4. start a SQLite write transaction;
-5. recheck conflicts;
-6. create Directory and ProjectionFile nodes;
-7. write the operation log;
-8. set Scrape to applied;
-9. store applied revision and the confirming user's UID/GID;
-10. increment namespace version;
-11. commit;
-12. update the in-memory index and invalidate FUSE caches.
+1. Read the ready Scrape and expected revision.
+2. Safely reopen and revalidate every source.
+3. Rerun generic and Profile path validation.
+4. Build the complete candidate namespace change.
+5. Start a SQLite write transaction.
+6. Recheck path conflicts.
+7. Create all Directories and ProjectionFiles.
+8. Write one batch operation-log entry.
+9. Mark the Scrape applied.
+10. Store the applied revision and confirming UID/GID.
+11. Increment namespace version once.
+12. Commit.
+13. Update the in-memory index and invalidate FUSE caches.
 
-Steps 4 through 11 share one transaction.
+Steps 5 through 12 use one transaction. The plan implementation cannot simulate an atomic batch by repeatedly invoking a direct Projection operation that commits independently.
 
-Repeated apply returns `AlreadyApplied`.
+Repeated apply of an applied Scrape returns `AlreadyApplied`.
 
-## 12. Undo
+## 8. Undo
 
-One SQLite transaction:
+Undo uses one SQLite transaction to:
 
-1. removes ProjectionFiles whose `origin_scrape_id` matches;
-2. removes empty managed directories toward LibraryRoot;
-3. writes the operation log;
-4. sets Scrape to undone;
-5. increments namespace version.
+1. remove ProjectionFiles whose `origin_scrape_id` matches;
+2. prune empty managed directories toward LibraryRoot;
+3. write the operation log;
+4. mark the Scrape undone;
+5. increment namespace version once.
 
-Undo does not remove OverlayFiles. The CLI lists remaining Agent artifacts from that Scrape.
+Undo does not remove OverlayFiles created through FUSE. The CLI lists OverlayFiles that prevent directory pruning or remain below former target directories.
 
-Repeated undo returns `AlreadyUndone`.
+Repeated undo of an undone Scrape returns `AlreadyUndone`.
 
-## 13. Agent Artifacts
+## 9. Overlay Artifacts
 
-After apply, the daemon resolves Profile artifact roots to node IDs and moves the session to ARTIFACT.
+After the plan is applied, the external Agent can create artifacts through ordinary FUSE operations:
 
-```text
-scrape_artifact_roots
-├── scrape_id
-├── revision
-├── root_node_id
-└── relative_path_snapshot
+```bash
+printf '%s' "$NFO" > \
+  "/mnt/scrapefs/jellyfin/Movies/Dune (2021) [tmdbid-438631]/movie.nfo"
+
+cp poster.jpg \
+  "/mnt/scrapefs/jellyfin/Movies/Dune (2021) [tmdbid-438631]/poster.jpg"
 ```
 
-The daemon restores this scope after restart.
+These files follow ordinary FUSE create, write, rename, and permission semantics:
 
-The Agent creates files only below allowed roots and cannot overwrite an existing node.
+- virtual UID/GID comes from the FUSE caller;
+- mode follows ordinary umask and Library permission rules;
+- backing objects retain daemon-private permissions;
+- Scrape undo does not automatically remove OverlayFiles;
+- ScrapeFS does not distinguish files created by a person, script, or Agent.
 
-For an Agent-created OverlayFile:
+## 10. Agent Skill Contract
 
-- virtual UID/GID use the Scrape's `confirmed_by_uid` and `confirmed_by_gid` captured at apply;
-- virtual mode uses `Library.overlay_file_mode`, defaulting to `0664`;
-- `creator_kind=agent` records provenance and does not determine virtual ownership;
-- the backing object remains private to the daemon.
+The external Agent skill documents:
 
-First-version API:
+- supported media, subtitle, and local metadata formats;
+- source enumeration and sample-ignore rules;
+- `ffprobe` and metadata-query behavior;
+- Plex and Jellyfin Profile naming rules;
+- `scrapefs.scrape/v1` generation;
+- submit, show, diff, revise, validate, apply, and undo workflows;
+- the user confirmation boundary;
+- FUSE OverlayFile creation after apply;
+- recovery from `ESTALE`, path conflicts, and partial artifact failures.
 
-```text
-overlay.put_text
-overlay.put_stream
-overlay.stat
-```
-
-Scrape undo, session cancellation or expiry, and Library retirement immediately stop new artifact writes without deleting committed OverlayFiles.
-
-Recommended quotas:
-
-```text
-max_text_file_size     = 4 MiB
-max_binary_file_size   = 32 MiB
-max_session_total_size = 256 MiB
-max_upload_duration    = 120s
-```
+The skill is not a daemon plugin. Updating the skill cannot change the ScrapeFS authorization model, plan schema, or path-safety rules.

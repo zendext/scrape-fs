@@ -16,14 +16,16 @@ This document defines the process boundary, persistence model, Library model, an
 ## 2. Process Model
 
 ```text
-scrapefs CLI
-      │ Unix socket
-      ▼
+external Agent skill / script / control user
+                    │
+                    ▼
+               scrapefs CLI
+                    │ Unix socket
+                    ▼
 scrapefsd
 ├── Control API
-├── Scrape manager
-├── Agent session manager
-├── Profile renderer
+├── Scrape plan service
+├── Profile validator
 ├── Namespace service
 ├── Projection service
 ├── Object store
@@ -41,10 +43,11 @@ Only the daemon may:
 - mount and unmount FUSE;
 - create, remove, or modify ProjectionFiles and OverlayFiles;
 - apply and undo Scrapes;
-- run garbage collection;
-- manage Agent sessions.
+- run garbage collection.
 
-The CLI and Agent MUST NOT access SQLite or the object store directly.
+The CLI and external Agent MUST NOT access SQLite or the object store directly. The external Agent reads host source files with the invoking user's identity, uses its own media and metadata tools, and submits an explicit Projection plan through the CLI. It is not a daemon plugin and receives no additional filesystem permission.
+
+Artifacts such as NFO files and artwork are created through ordinary FUSE operations after the plan is applied. ScrapeFS does not distinguish an OverlayFile created by a person, script, or Agent.
 
 The control protocol uses the configured Unix socket. Default:
 
@@ -250,7 +253,7 @@ Each successful transaction that changes namespace structure increments it once,
 - projection add, mv, and rm;
 - scrape apply and undo;
 - Library create, rename, and recursive removal;
-- Agent-created OverlayFiles.
+- OverlayFiles created through FUSE.
 
 The following do not increment it:
 
@@ -281,7 +284,7 @@ Requirements:
 - namespace changes and their log entry share one SQLite transaction;
 - the daemon Repository API is append-only and exposes no operation-log update or delete operation;
 - deleting a referenced Scrape may clear `scrape_id` through the declarative `ON DELETE SET NULL` foreign key;
-- `actor_kind` distinguishes at least control, agent, fuse, and system;
+- `actor_kind` distinguishes control, fuse, and system; the `agent` value in the released schema remains a legacy value, while an external Agent operation is recorded as control or fuse according to the interface it uses;
 - `details_json` stores non-empty, equally sized `paths` and `node_kinds` arrays whose entries are paired snapshots; the Repository validates each path and node kind before insertion;
 - strong foreign keys MUST NOT prevent node or Library retirement;
 - the first version uses the log for audit, doctor, and manual recovery analysis;

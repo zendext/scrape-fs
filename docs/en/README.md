@@ -7,7 +7,7 @@
 1. [First-version use cases](use-cases.md)
 2. [Architecture](architecture.md)
 3. [Projection model](projection.md)
-4. [Scrape and Agent workflow](scrape.md)
+4. [Scrape plans and the external Agent workflow](scrape.md)
 5. [Filesystem and object storage](filesystem.md)
 6. [Operations and CLI](operations.md)
 7. [First-version acceptance criteria](acceptance.md)
