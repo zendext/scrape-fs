@@ -32,6 +32,7 @@ scrapes
 ├── status
 ├── validated_namespace_version
 ├── confirmed_by_uid
+├── confirmed_by_gid
 ├── confirmed_at
 ├── last_error
 ├── created_at
@@ -139,7 +140,9 @@ The Agent cannot:
 - apply, undo, or discard a Scrape;
 - manage Libraries.
 
-An external Agent worker requires both the configured Agent Unix UID and the current session token.
+The first-version Agent provider runs inside the daemon or as a trusted worker launched under the daemon's effective UID. A separate worker still presents the current session token when calling the Agent API.
+
+The first version does not support an untrusted external Agent worker isolated by a separate Unix UID or sandbox.
 
 ## 6. MediaModel
 
@@ -299,7 +302,7 @@ Atomic flow:
 6. create Directory and ProjectionFile nodes;
 7. write the operation log;
 8. set Scrape to applied;
-9. store applied revision and confirming user;
+9. store applied revision and the confirming user's UID/GID;
 10. increment namespace version;
 11. commit;
 12. update the in-memory index and invalidate FUSE caches.
@@ -337,6 +340,13 @@ scrape_artifact_roots
 The daemon restores this scope after restart.
 
 The Agent creates files only below allowed roots and cannot overwrite an existing node.
+
+For an Agent-created OverlayFile:
+
+- virtual UID/GID use the Scrape's `confirmed_by_uid` and `confirmed_by_gid` captured at apply;
+- virtual mode uses `Library.overlay_file_mode`, defaulting to `0664`;
+- `creator_kind=agent` records provenance and does not determine virtual ownership;
+- the backing object remains private to the daemon.
 
 First-version API:
 

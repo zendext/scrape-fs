@@ -79,6 +79,8 @@
 
 - The FUSE mount enables `default_permissions`.
 - FUSE create uses caller UID/GID and kernel-processed mode.
+- Agent-created OverlayFiles use the apply confirmer's UID/GID and the Library overlay mode.
+- Overlay backing objects use daemon ownership and `0600` and do not follow virtual chmod/chown.
 - ProjectionFile is always read-only.
 - The daemon single-instance lock works.
 - Readiness is sent only after database, index, mount, and socket are available.

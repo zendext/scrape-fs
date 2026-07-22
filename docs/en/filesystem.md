@@ -50,6 +50,14 @@ For an OverlayFile or Directory created through FUSE:
 - mode is the kernel-supplied mode after umask;
 - the daemon does not apply umask again.
 
+For an OverlayFile created by Agent through the controller:
+
+- UID/GID come from the confirming user captured when the corresponding Scrape was applied;
+- mode uses `Library.overlay_file_mode`, defaulting to `0664`;
+- the daemon does not attempt to read or emulate the CLI process's umask.
+
+Virtual UID/GID/mode are stored in SQLite and are independent from the backing object's Unix owner and mode.
+
 Defined errors:
 
 - ProjectionFile chmod/chown: `EROFS`;
@@ -154,18 +162,22 @@ FUSE rename and `projection mv` across Libraries return `EXDEV`.
 
 ## 6. Object Store
 
+The object-store root is configured by `storage.overlay_store_path` and is the actual on-disk location of OverlayFile contents. Default layout:
+
 ```text
 /var/lib/scrapefs/objects/
 ├── staging/
 └── live/
 ```
 
-Only the daemon accesses the object store:
+Only the daemon accesses the object store. Directories and backing objects use the daemon's effective UID/GID:
 
 ```text
-owner: scrapefs
-mode: 0700
+directory mode: 0700
+object mode:    0600
 ```
+
+FUSE chmod/chown changes only virtual metadata in SQLite and does not change the backing object's owner or mode.
 
 SQLite stores:
 

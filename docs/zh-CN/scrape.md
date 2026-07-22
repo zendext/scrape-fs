@@ -30,6 +30,7 @@ scrapes
 ├── status
 ├── validated_namespace_version
 ├── confirmed_by_uid
+├── confirmed_by_gid
 ├── confirmed_at
 ├── last_error
 ├── created_at
@@ -137,7 +138,9 @@ Agent 禁止：
 - apply、undo 或 discard Scrape；
 - 管理 Library。
 
-外部 Agent worker 必须同时使用配置的 Agent Unix UID 和当前 session 的短期 token。
+第一版 Agent provider 在 daemon 进程内运行，或由 daemon 以自身有效 UID 启动为受信 worker。独立 worker 调用 Agent API 时仍必须携带当前 session 的短期 token。
+
+第一版不支持使用独立 Unix UID 或 sandbox 隔离的不可信外部 Agent worker。
 
 ## 6. MediaModel
 
@@ -297,7 +300,7 @@ apply 前必须确认：
 6. 创建 Directory 和 ProjectionFile。
 7. 写 operation log。
 8. Scrape 状态改为 applied。
-9. 保存 applied revision 和确认者。
+9. 保存 applied revision，以及确认者的 UID/GID。
 10. namespace version 增加 1。
 11. 提交事务。
 12. 更新内存索引并失效 FUSE 缓存。
@@ -335,6 +338,13 @@ scrape_artifact_roots
 daemon 重启后必须从该表恢复写入范围。
 
 Agent 只能在允许的 root 下创建文件，禁止覆盖已有节点。
+
+Agent 创建 OverlayFile 时：
+
+- 虚拟 UID/GID 使用该 Scrape 执行 apply 时保存的 `confirmed_by_uid` 和 `confirmed_by_gid`；
+- 虚拟 mode 使用 `Library.overlay_file_mode`，默认 `0664`；
+- `creator_kind=agent` 记录文件来源，不决定虚拟 owner；
+- backing object 仍使用 daemon 私有权限。
 
 第一版 API：
 

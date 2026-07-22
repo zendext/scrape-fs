@@ -48,6 +48,14 @@ noexec
 - mode 使用内核传入的、已应用 umask 的值；
 - daemon 不得重复应用 umask。
 
+Agent 通过 controller 创建 OverlayFile 时：
+
+- UID/GID 来自对应 Scrape 在 apply 时保存的确认者 UID/GID；
+- mode 使用 `Library.overlay_file_mode`，默认 `0664`；
+- 不尝试读取或模拟 CLI 进程的 umask。
+
+虚拟 UID/GID/mode 保存在 SQLite，与 backing object 的 Unix owner 和 mode 相互独立。
+
 确定错误：
 
 - ProjectionFile chmod/chown：`EROFS`；
@@ -152,18 +160,22 @@ RENAME_NOREPLACE
 
 ## 6. Object Store
 
+object store 根目录由 `storage.overlay_store_path` 配置，它是 OverlayFile 内容的实际落盘位置。默认布局：
+
 ```text
 /var/lib/scrapefs/objects/
 ├── staging/
 └── live/
 ```
 
-object store 只允许 daemon 访问：
+object store 只允许 daemon 访问。目录和 backing object 使用 daemon 的有效 UID/GID：
 
 ```text
-owner: scrapefs
-mode: 0700
+directory mode: 0700
+object mode:    0600
 ```
+
+FUSE chmod/chown 只修改 SQLite 中的虚拟元数据，不修改 backing object 的 owner 或 mode。
 
 SQLite 保存：
 
