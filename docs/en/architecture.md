@@ -72,12 +72,20 @@ Requirements:
 3. The daemon holds the validated database parent-directory file descriptor and opens the database and sidecars relative to it, so later ancestor-path replacement cannot redirect SQLite.
 4. The daemon checks `PRAGMA user_version` before applying persistent PRAGMA changes. Rejecting a newer schema version must not change the database journal mode.
 5. All writes use explicit transactions.
-6. Namespace writes should use `BEGIN IMMEDIATE`.
+6. Namespace writes use `BEGIN IMMEDIATE`.
 7. Migrations finish before the FUSE mount is created.
 8. Migration or PRAGMA validation failure prevents readiness.
 9. SQLite commit is the persistence point for database state.
 
 SQLite's own locking and transaction semantics protect database consistency. The additional daemon lock gives one process exclusive ownership of the full ScrapeFS runtime, including the database, in-memory indexes, mount, object store, and control socket, and fails an accidental duplicate start before SQLite is opened. The fixed lock path is on the host runtime filesystem outside the ScrapeFS FUSE mount. This process lock is unrelated to file-lock operations exposed through FUSE.
+
+Persistent internal identities use SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` values and Go `int64`, so deleted node IDs are not reused. Persisted timestamps use UTC Unix nanoseconds in SQLite `INTEGER` columns.
+
+The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. Later Object and Scrape migrations extend those tables before their corresponding behavior creates rows.
+
+The schema uses declarative local integrity only: `STRICT` tables, primary keys, `NOT NULL`, row-local `CHECK` constraints, foreign keys, and unique indexes. SQLite triggers do not implement namespace business rules, lifecycle policy, namespace-version policy, or operation-log policy.
+
+The Repository is the sole namespace mutation boundary. It owns cross-row and cross-table validation, protected-node behavior, conflict classification, namespace-version changes, and operation-log creation. The first version pins one SQLite connection and exposes it only through a serialized, context-aware queue. A queue callback receives a scoped connection lease instead of the raw `sql.Conn`; connection, row, and transaction wrappers expire when the callback ends, and unfinished transactions are rolled back before the queue advances. An `Update` callback uses the read methods on its namespace `Transaction` and does not call Repository methods.
 
 ## 4. Mount and Library
 
@@ -168,6 +176,8 @@ OVERLAY_FILE
 
 GlobalRoot and LibraryRoot are protected directories.
 
+The initial migration creates GlobalRoot once with node ID `1`, an empty name, mode `0755`, and the daemon effective UID/GID. This bootstrap node is not an ordinary namespace operation.
+
 Node IDs are globally unique within a ScrapeFS instance.
 
 Name uniqueness:
@@ -214,6 +224,10 @@ Field rules:
 - Directory uses neither source nor object fields.
 - `managed_directory=true` marks a directory created automatically by a Scrape or `projection add`.
 - A directly created ProjectionFile has a null `origin_scrape_id`.
+- LibraryRoot has GlobalRoot as its parent.
+- Directory, ProjectionFile, and OverlayFile have LibraryRoot or Directory as their parent.
+
+The Repository validates parent kinds before creation. It does not expose generic rename, move, kind-change, delete, or arbitrary node-update methods in the persistent namespace core. Later operations must provide their own exact mutation methods and validate protected roots, child relationships, and ancestor cycles within the same transaction.
 
 Node IDs map stably to FUSE inodes:
 
@@ -225,6 +239,10 @@ Node IDs map stably to FUSE inodes:
 ## 6. Namespace Version
 
 SQLite stores a monotonically increasing `namespace_version`.
+
+The initial namespace version is `0`. Creating GlobalRoot during migration does not increment it and does not write an operation-log entry.
+
+A namespace transaction that makes no structural change does not increment the version or write a structural operation-log entry.
 
 Each successful transaction that changes namespace structure increments it once, including:
 
@@ -261,8 +279,10 @@ operation_log
 Requirements:
 
 - namespace changes and their log entry share one SQLite transaction;
+- the daemon Repository API is append-only and exposes no operation-log update or delete operation;
+- deleting a referenced Scrape may clear `scrape_id` through the declarative `ON DELETE SET NULL` foreign key;
 - `actor_kind` distinguishes at least control, agent, fuse, and system;
-- `details_json` stores required path and node-kind snapshots;
+- `details_json` stores non-empty, equally sized `paths` and `node_kinds` arrays whose entries are paired snapshots; the Repository validates each path and node kind before insertion;
 - strong foreign keys MUST NOT prevent node or Library retirement;
 - the first version uses the log for audit, doctor, and manual recovery analysis;
 - event replay is not provided.

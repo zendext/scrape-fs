@@ -70,12 +70,20 @@ PRAGMA busy_timeout = 5000;
 3. daemon 必须持续持有已校验的数据库父目录文件描述符，并相对该描述符打开数据库和 sidecar，避免后续祖先路径替换将 SQLite 重定向到其他位置。
 4. daemon 必须在应用持久化 PRAGMA 前检查 `PRAGMA user_version`。拒绝更新版本的 schema 时不得改变数据库 journal mode。
 5. 所有写操作使用显式事务。
-6. 命名空间写事务应使用 `BEGIN IMMEDIATE`。
+6. 命名空间写事务使用 `BEGIN IMMEDIATE`。
 7. migration 必须在 FUSE mount 前完成。
 8. migration 或 PRAGMA 校验失败时 daemon 不得进入 ready。
 9. SQLite commit 是数据库状态的持久化提交点。
 
 SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 daemon 锁使一个进程独占完整 ScrapeFS 运行时，包括数据库、内存索引、mount、object store 和控制 socket，并在打开 SQLite 前拒绝意外重复启动。固定锁路径位于 ScrapeFS FUSE mount 之外的宿主运行时文件系统。该进程锁与通过 FUSE 暴露的文件锁操作无关。
+
+持久化内部 ID 使用 SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`，Go 中表示为 `int64`，因此已删除节点的 ID 不会复用。持久化时间使用 SQLite `INTEGER` 保存 UTC Unix 纳秒。
+
+基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。后续 Object 和 Scrape migration 必须在对应行为开始创建记录前扩展这些表。
+
+schema 只使用声明式局部完整性约束：`STRICT` 表、主键、`NOT NULL`、行内 `CHECK`、外键和唯一索引。SQLite trigger 不实现命名空间业务规则、生命周期策略、namespace version 策略或 operation log 策略。
+
+Repository 是唯一的命名空间修改边界，负责跨行和跨表校验、受保护节点行为、冲突分类、namespace version 变更和 operation log 创建。第一版固定使用一个 SQLite 连接，并且只通过支持 context 取消的串行队列访问。队列回调获得有作用域的 connection lease，而不是原始 `sql.Conn`；回调结束后 connection、row 和 transaction wrapper 全部失效，未结束事务会在队列继续前回滚。`Update` 回调使用对应 namespace `Transaction` 的读取方法，不调用 Repository 方法。
 
 ## 4. Mount 和 Library
 
@@ -166,6 +174,8 @@ OVERLAY_FILE
 
 GlobalRoot 和 LibraryRoot 是受保护的特殊目录。
 
+初始 migration 只创建一次 GlobalRoot，其节点 ID 固定为 `1`，名称为空，mode 为 `0755`，UID/GID 使用首次初始化时 daemon 的有效 UID/GID。该 bootstrap 节点不属于普通命名空间操作。
+
 所有节点 ID 在整个实例中全局唯一。
 
 名称唯一约束：
@@ -212,6 +222,10 @@ nodes
 - Directory 不使用 source/object 字段。
 - `managed_directory=true` 表示由 Scrape 或 `projection add` 自动创建。
 - 直接创建的 ProjectionFile 的 `origin_scrape_id` 为空。
+- LibraryRoot 的父节点必须是 GlobalRoot。
+- Directory、ProjectionFile 和 OverlayFile 的父节点必须是 LibraryRoot 或 Directory。
+
+Repository 在创建节点前校验父节点类型。持久命名空间核心不提供通用 rename、move、kind 变更、delete 或任意节点 update 方法。后续操作必须提供各自的精确修改方法，并在同一事务中校验受保护根节点、子节点关系和祖先环。
 
 节点 ID 必须稳定映射为 FUSE inode：
 
@@ -223,6 +237,10 @@ nodes
 ## 6. Namespace Version
 
 SQLite 保存单调递增的 `namespace_version`。
+
+初始 namespace version 为 `0`。migration 创建 GlobalRoot 时不增加版本，也不写 operation log。
+
+未发生结构修改的命名空间事务不增加版本，也不写结构操作日志。
 
 任何成功改变节点结构的事务只增加一次版本，包括：
 
@@ -259,8 +277,10 @@ operation_log
 要求：
 
 - 命名空间操作的日志与对应修改处于同一 SQLite 事务；
+- daemon 的 Repository API 只允许追加 operation log，不提供 update 或 delete 操作；
+- 删除被引用的 Scrape 时，可以通过声明式外键 `ON DELETE SET NULL` 清空 `scrape_id`；
 - `actor_kind` 至少区分 control、agent、fuse 和 system；
-- `details_json` 保存受影响节点的路径和类型快照；
+- `details_json` 使用非空且长度相同的 `paths` 与 `node_kinds` 数组，按相同下标保存路径和节点类型快照；Repository 在插入前校验每个路径和节点类型；
 - 日志不得通过强外键阻止节点或 Library retire；
 - 第一版日志用于审计、doctor 和人工恢复分析；
 - 第一版不提供事件重放。

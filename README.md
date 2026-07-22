@@ -6,7 +6,7 @@ ScrapeFS is an agent-assisted media scraping and virtual directory filesystem fo
 
 It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
 
-> Status: early implementation. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite with required PRAGMAs, and runs versioned migrations. Namespace services, the control socket, and FUSE behavior are not implemented yet.
+> Status: early implementation. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite, and provides the transactional persistent namespace core. Library application services, the control socket, and FUSE behavior are not implemented yet.
 
 ## Core Model
 
