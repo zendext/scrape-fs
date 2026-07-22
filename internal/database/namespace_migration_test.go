@@ -194,6 +194,62 @@ func TestNamespaceMigrationEnforcesNodeConstraints(t *testing.T) {
 		}
 	})
 
+	t.Run("update or replace cannot delete a conflicting sibling", func(t *testing.T) {
+		database := openNamespaceTestDatabase(t)
+		libraryRootID := insertLibraryRoot(t, database.conn, "library")
+		sourceID, err := insertTestNode(
+			context.Background(),
+			database.conn,
+			&libraryRootID,
+			"source",
+			"DIRECTORY",
+			nil,
+			nil,
+			true,
+		)
+		if err != nil {
+			t.Fatalf("insert source: %v", err)
+		}
+		targetID, err := insertTestNode(
+			context.Background(),
+			database.conn,
+			&libraryRootID,
+			"target",
+			"DIRECTORY",
+			nil,
+			nil,
+			true,
+		)
+		if err != nil {
+			t.Fatalf("insert target: %v", err)
+		}
+
+		if _, err := database.conn.ExecContext(
+			context.Background(),
+			"UPDATE OR REPLACE nodes SET name = 'target' WHERE id = ?",
+			sourceID,
+		); err == nil {
+			t.Fatal("UPDATE OR REPLACE conflicting sibling succeeded")
+		}
+
+		for id, name := range map[int64]string{
+			sourceID: "source",
+			targetID: "target",
+		} {
+			var got string
+			if err := database.conn.QueryRowContext(
+				context.Background(),
+				"SELECT name FROM nodes WHERE id = ?",
+				id,
+			).Scan(&got); err != nil {
+				t.Fatalf("read node %d: %v", id, err)
+			}
+			if got != name {
+				t.Errorf("node %d name = %q, want %q", id, got, name)
+			}
+		}
+	})
+
 	t.Run("invalid parent kind", func(t *testing.T) {
 		database := openNamespaceTestDatabase(t)
 		parentID := int64(1)

@@ -6,7 +6,6 @@ import (
 )
 
 var (
-	ErrBusy             = errors.New("namespace repository is busy")
 	ErrConflict         = errors.New("namespace conflict")
 	ErrInvalidNode      = errors.New("invalid namespace node")
 	ErrInvalidOperation = errors.New("invalid namespace operation")

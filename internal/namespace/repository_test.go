@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -58,7 +57,7 @@ func TestRepositoryUpdateCommitsVersionAndLogAtomically(t *testing.T) {
 	var actorID *int64
 	var loggedVersion int64
 	var details string
-	if err := database.UseConnection(func(connection *sql.Conn) error {
+	if err := database.UseConnection(ctx, func(connection *sql.Conn) error {
 		return connection.QueryRowContext(ctx, `
 			SELECT operation, actor_kind, actor_id, namespace_version, details_json
 			FROM operation_log
@@ -112,7 +111,7 @@ func TestRepositoryUpdateRollsBackNodesVersionAndLog(t *testing.T) {
 
 	assertVersionAndLogCount(t, database, 0, 0)
 	var count int
-	if err := database.UseConnection(func(connection *sql.Conn) error {
+	if err := database.UseConnection(ctx, func(connection *sql.Conn) error {
 		return connection.QueryRowContext(
 			ctx,
 			"SELECT COUNT(*) FROM nodes WHERE name = 'rolled-back'",
@@ -157,7 +156,7 @@ func TestRepositoryUpdateRollsBackWhenOperationLogFails(t *testing.T) {
 
 	assertVersionAndLogCount(t, database, 0, 0)
 	var count int
-	if err := database.UseConnection(func(connection *sql.Conn) error {
+	if err := database.UseConnection(ctx, func(connection *sql.Conn) error {
 		return connection.QueryRowContext(
 			ctx,
 			"SELECT COUNT(*) FROM nodes WHERE name = 'rolled-back-log'",
@@ -208,7 +207,7 @@ func TestRepositoryUpdateRollsBackAfterPanic(t *testing.T) {
 
 	assertVersionAndLogCount(t, database, 0, 0)
 	var count int
-	if err := database.UseConnection(func(connection *sql.Conn) error {
+	if err := database.UseConnection(ctx, func(connection *sql.Conn) error {
 		return connection.QueryRowContext(
 			ctx,
 			"SELECT COUNT(*) FROM nodes WHERE name = 'panicked'",
@@ -292,7 +291,7 @@ func TestRepositoryUpdateRejectsInvalidOperationBeforeMutation(t *testing.T) {
 	assertVersionAndLogCount(t, database, 0, 0)
 }
 
-func TestRepositoryRejectsLookupDuringUpdate(t *testing.T) {
+func TestRepositoryQueuesLookupDuringUpdate(t *testing.T) {
 	database := openTestDatabase(t)
 	writer := NewRepository(database)
 	reader := NewRepository(database)
@@ -330,6 +329,16 @@ func TestRepositoryRejectsLookupDuringUpdate(t *testing.T) {
 	}()
 
 	libraryRootID := <-created
+
+	cancelledContext, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if _, err := reader.Lookup(cancelledContext, libraryRootID, "missing"); !errors.Is(
+		err,
+		context.DeadlineExceeded,
+	) {
+		t.Fatalf("cancelled Lookup error = %v, want context deadline exceeded", err)
+	}
+
 	lookupDone := make(chan error, 1)
 	go func() {
 		_, err := reader.Lookup(ctx, libraryRootID, "missing")
@@ -338,24 +347,21 @@ func TestRepositoryRejectsLookupDuringUpdate(t *testing.T) {
 
 	select {
 	case err := <-lookupDone:
-		if !errors.Is(err, ErrBusy) {
-			t.Fatalf("Lookup error = %v, want ErrBusy", err)
-		}
-	case <-time.After(750 * time.Millisecond):
-		t.Fatal("Lookup deadlocked while Update held the connection")
+		t.Fatalf("queued Lookup returned before Update completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	close(release)
 	if err := <-updateDone; !errors.Is(err, transactionFailure) {
 		t.Fatalf("Update error = %v, want transaction failure", err)
 	}
-	if _, err := reader.Lookup(ctx, libraryRootID, "missing"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Lookup after rollback error = %v, want ErrNotFound", err)
+	if err := <-lookupDone; !errors.Is(err, ErrNotFound) {
+		t.Fatalf("queued Lookup error = %v, want ErrNotFound", err)
 	}
 	assertVersionAndLogCount(t, database, 0, 0)
 }
 
-func TestRepositoryRejectsConcurrentUpdate(t *testing.T) {
+func TestRepositoryQueuesConcurrentUpdate(t *testing.T) {
 	database := openTestDatabase(t)
 	firstRepository := NewRepository(database)
 	secondRepository := NewRepository(database)
@@ -384,51 +390,16 @@ func TestRepositoryRejectsConcurrentUpdate(t *testing.T) {
 
 	select {
 	case err := <-secondDone:
-		if !errors.Is(err, ErrBusy) {
-			t.Fatalf("second Update error = %v, want ErrBusy", err)
-		}
-	case <-time.After(750 * time.Millisecond):
-		t.Fatal("second Update deadlocked")
+		t.Fatalf("second Update returned before first completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	close(release)
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first Update: %v", err)
 	}
-	if _, err := secondRepository.Update(
-		ctx,
-		testOperation("test.retry"),
-		func(*Transaction) error { return nil },
-	); err != nil {
-		t.Fatalf("retry Update: %v", err)
-	}
-	assertVersionAndLogCount(t, database, 0, 0)
-}
-
-func TestRepositoryRejectsReentrantReadDuringUpdate(t *testing.T) {
-	database := openTestDatabase(t)
-	repository := NewRepository(database)
-	ctx := context.Background()
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := repository.Update(ctx, testOperation("test.reentrant"), func(*Transaction) error {
-			_, err := repository.NamespaceVersion(ctx)
-			if !errors.Is(err, ErrBusy) {
-				return fmt.Errorf("NamespaceVersion error = %v, want ErrBusy", err)
-			}
-			return nil
-		})
-		done <- err
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Update: %v", err)
-		}
-	case <-time.After(750 * time.Millisecond):
-		t.Fatal("reentrant Repository read deadlocked")
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second Update: %v", err)
 	}
 	assertVersionAndLogCount(t, database, 0, 0)
 }
@@ -567,6 +538,39 @@ func TestCreateNodeRejectsWritableProjectionMode(t *testing.T) {
 	})
 	if !errors.Is(err, ErrInvalidNode) {
 		t.Fatalf("Update error = %v, want ErrInvalidNode", err)
+	}
+	assertVersionAndLogCount(t, database, 0, 0)
+}
+
+func TestCreateNodeMapsDuplicateSiblingToConflict(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	ctx := context.Background()
+	globalRoot, err := repository.GlobalRoot(ctx)
+	if err != nil {
+		t.Fatalf("GlobalRoot: %v", err)
+	}
+
+	_, err = repository.Update(ctx, testOperation("test.duplicate"), func(transaction *Transaction) error {
+		request := CreateNode{
+			ParentID: globalRoot.ID,
+			Name:     "library",
+			Kind:     LibraryRoot,
+			Creator:  Actor{Kind: ActorSystem},
+			Attributes: Attributes{
+				Mode: 0o775,
+				UID:  1000,
+				GID:  1000,
+			},
+		}
+		if _, err := transaction.CreateNode(ctx, request); err != nil {
+			return err
+		}
+		_, err := transaction.CreateNode(ctx, request)
+		return err
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("Update error = %v, want ErrConflict", err)
 	}
 	assertVersionAndLogCount(t, database, 0, 0)
 }
@@ -845,7 +849,7 @@ func assertVersionAndLogCount(t *testing.T, opened *database.DB, wantVersion, wa
 	t.Helper()
 
 	var version int64
-	if err := opened.UseConnection(func(connection *sql.Conn) error {
+	if err := opened.UseConnection(context.Background(), func(connection *sql.Conn) error {
 		return connection.QueryRowContext(
 			context.Background(),
 			"SELECT version FROM namespace_state WHERE singleton = 1",
@@ -858,7 +862,7 @@ func assertVersionAndLogCount(t *testing.T, opened *database.DB, wantVersion, wa
 	}
 
 	var logs int64
-	if err := opened.UseConnection(func(connection *sql.Conn) error {
+	if err := opened.UseConnection(context.Background(), func(connection *sql.Conn) error {
 		return connection.QueryRowContext(
 			context.Background(),
 			"SELECT COUNT(*) FROM operation_log",

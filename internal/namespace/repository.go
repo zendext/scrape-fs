@@ -29,7 +29,7 @@ func NewRepository(opened *database.DB) *Repository {
 
 func (repository *Repository) GlobalRoot(ctx context.Context) (Node, error) {
 	var node Node
-	err := repository.useConnection(func(connection *sql.Conn) error {
+	err := repository.useConnection(ctx, func(connection *sql.Conn) error {
 		var err error
 		node, err = globalRoot(ctx, connection)
 		return err
@@ -42,7 +42,7 @@ func (repository *Repository) GlobalRoot(ctx context.Context) (Node, error) {
 
 func (repository *Repository) NamespaceVersion(ctx context.Context) (int64, error) {
 	var version int64
-	if err := repository.useConnection(func(connection *sql.Conn) error {
+	if err := repository.useConnection(ctx, func(connection *sql.Conn) error {
 		var err error
 		version, err = namespaceVersion(ctx, connection)
 		return err
@@ -63,7 +63,7 @@ func (repository *Repository) Lookup(
 	}
 
 	var current Node
-	err = repository.useConnection(func(connection *sql.Conn) error {
+	err = repository.useConnection(ctx, func(connection *sql.Conn) error {
 		var err error
 		current, err = lookupComponents(ctx, connection, libraryRootID, components)
 		return err
@@ -90,7 +90,7 @@ func (repository *Repository) Update(
 	}
 
 	var version int64
-	err = repository.useConnection(func(connection *sql.Conn) error {
+	err = repository.useConnection(ctx, func(connection *sql.Conn) error {
 		var err error
 		version, err = repository.update(
 			ctx,
@@ -104,12 +104,11 @@ func (repository *Repository) Update(
 	return version, err
 }
 
-func (repository *Repository) useConnection(use func(*sql.Conn) error) error {
-	err := repository.database.UseConnection(use)
-	if errors.Is(err, database.ErrConnectionBusy) {
-		return ErrBusy
-	}
-	return err
+func (repository *Repository) useConnection(
+	ctx context.Context,
+	use func(*sql.Conn) error,
+) error {
+	return repository.database.UseConnection(ctx, use)
 }
 
 func (repository *Repository) update(
@@ -599,10 +598,14 @@ func classifyMutationError(action string, err error) error {
 		switch sqliteError.Code() {
 		case sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY, sqlite3.SQLITE_CONSTRAINT_UNIQUE:
 			return fmt.Errorf("%s: %w: %v", action, ErrConflict, err)
+		case sqlite3.SQLITE_CONSTRAINT_TRIGGER:
+			if strings.Contains(err.Error(), "namespace conflict:") {
+				return fmt.Errorf("%s: %w: %v", action, ErrConflict, err)
+			}
+			return fmt.Errorf("%s: %w: %v", action, ErrInvalidNode, err)
 		case sqlite3.SQLITE_CONSTRAINT_CHECK,
 			sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY,
-			sqlite3.SQLITE_CONSTRAINT_NOTNULL,
-			sqlite3.SQLITE_CONSTRAINT_TRIGGER:
+			sqlite3.SQLITE_CONSTRAINT_NOTNULL:
 			return fmt.Errorf("%s: %w: %v", action, ErrInvalidNode, err)
 		}
 	}

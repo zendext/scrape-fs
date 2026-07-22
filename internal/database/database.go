@@ -17,7 +17,6 @@ const DefaultLockPath = "/run/scrapefs/scrapefsd.lock"
 
 var (
 	ErrAlreadyRunning           = errors.New("scrapefsd is already running")
-	ErrConnectionBusy           = errors.New("database connection is busy")
 	ErrUnsupportedSchemaVersion = errors.New("unsupported database schema version")
 )
 
@@ -26,13 +25,13 @@ type Options struct {
 }
 
 type DB struct {
-	pool         *sql.DB
-	conn         *sql.Conn
-	directory    *os.File
-	lock         *os.File
-	connectionMu sync.Mutex
-	closeOnce    sync.Once
-	closeErr     error
+	pool           *sql.DB
+	conn           *sql.Conn
+	directory      *os.File
+	lock           *os.File
+	connectionGate chan struct{}
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 func Open(ctx context.Context, databasePath string) (*DB, error) {
@@ -123,26 +122,38 @@ func openWithPrepareHook(
 		return nil, err
 	}
 
+	connectionGate := make(chan struct{}, 1)
+	connectionGate <- struct{}{}
 	return &DB{
-		pool:      pool,
-		conn:      conn,
-		directory: prepared.directory,
-		lock:      lock,
+		pool:           pool,
+		conn:           conn,
+		directory:      prepared.directory,
+		lock:           lock,
+		connectionGate: connectionGate,
 	}, nil
 }
 
-func (database *DB) UseConnection(use func(*sql.Conn) error) error {
-	if !database.connectionMu.TryLock() {
-		return ErrConnectionBusy
+func (database *DB) UseConnection(
+	ctx context.Context,
+	use func(*sql.Conn) error,
+) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-database.connectionGate:
 	}
-	defer database.connectionMu.Unlock()
+	defer func() {
+		database.connectionGate <- struct{}{}
+	}()
 	return use(database.conn)
 }
 
 func (database *DB) Close() error {
 	database.closeOnce.Do(func() {
-		database.connectionMu.Lock()
-		defer database.connectionMu.Unlock()
+		<-database.connectionGate
+		defer func() {
+			database.connectionGate <- struct{}{}
+		}()
 		database.closeErr = errors.Join(
 			database.conn.Close(),
 			database.pool.Close(),

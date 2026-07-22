@@ -179,7 +179,20 @@ WHEN EXISTS (
 	  AND name = NEW.name
  )
 BEGIN
-	SELECT RAISE(ABORT, 'existing namespace node cannot be replaced');
+	SELECT RAISE(ABORT, 'namespace conflict: existing node cannot be replaced');
+END;
+
+CREATE TRIGGER nodes_prevent_update_replacement
+BEFORE UPDATE OF parent_id, name ON nodes
+WHEN EXISTS (
+	SELECT 1
+	FROM nodes
+	WHERE id <> OLD.id
+	  AND parent_id IS NEW.parent_id
+	  AND name = NEW.name
+ )
+BEGIN
+	SELECT RAISE(ABORT, 'namespace conflict: sibling node already exists');
 END;
 
 CREATE TRIGGER nodes_validate_parent_insert
