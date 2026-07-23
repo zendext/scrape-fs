@@ -16,6 +16,7 @@ import (
 	"github.com/zendext/scrape-fs/internal/database"
 	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"github.com/zendext/scrape-fs/internal/objectstore"
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
 )
 
@@ -49,19 +50,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			configuration config.Config,
 			opened databaseCloser,
 		) error {
-			database, ok := opened.(*database.DB)
-			if !ok {
-				return fmt.Errorf("unsupported database implementation %T", opened)
-			}
-			repository := namespace.NewRepository(database)
-			return control.Serve(
-				ctx,
-				configuration.Control.SocketPath,
-				configuration.Control.SocketMode,
-				configuration.Control.AdministratorUID,
-				projectionbatch.NewService(repository),
-				library.NewService(repository),
-			)
+			return serveRuntime(ctx, configuration, opened, control.Serve)
 		},
 	)
 }
@@ -72,6 +61,43 @@ type databaseCloser interface {
 }
 type databaseOpener func(string) (databaseCloser, error)
 type daemonServer func(context.Context, config.Config, databaseCloser) error
+type controlServer func(
+	context.Context,
+	string,
+	os.FileMode,
+	uint32,
+	control.BatchService,
+	control.LibraryService,
+) error
+
+func serveRuntime(
+	ctx context.Context,
+	configuration config.Config,
+	opened databaseCloser,
+	serveControl controlServer,
+) (err error) {
+	database, ok := opened.(*database.DB)
+	if !ok {
+		return fmt.Errorf("unsupported database implementation %T", opened)
+	}
+	store, err := objectstore.Open(configuration.Storage.OverlayStorePath, database)
+	if err != nil {
+		return fmt.Errorf("initialize object store: %w", err)
+	}
+	defer func() {
+		err = errors.Join(err, store.Close())
+	}()
+
+	repository := namespace.NewRepository(database)
+	return serveControl(
+		ctx,
+		configuration.Control.SocketPath,
+		configuration.Control.SocketMode,
+		configuration.Control.AdministratorUID,
+		projectionbatch.NewService(repository),
+		library.NewService(repository),
+	)
+}
 
 func runWithLoader(args []string, stdout, stderr io.Writer, load configLoader) int {
 	return runWithDependencies(

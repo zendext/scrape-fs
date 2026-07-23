@@ -6,7 +6,7 @@ ScrapeFS is an external-agent-assisted media organization and virtual directory 
 
 It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
 
-> Status: early implementation. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite, and serves authenticated Library and Projection Batch operations through the Unix control socket. Direct Projection services exist but are not exposed through the control CLI yet. FUSE behavior is not implemented yet.
+> Status: early implementation. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite and the Overlay object store, and serves authenticated Library and Projection Batch operations through the Unix control socket. Direct Projection services exist but are not exposed through the control CLI yet. FUSE behavior is not implemented yet.
 
 ## Core Model
 

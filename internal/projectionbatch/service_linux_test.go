@@ -778,7 +778,8 @@ func createObject(t *testing.T, opened *database.DB) int64 {
 		defer transaction.Rollback()
 		result, err := transaction.ExecContext(
 			context.Background(),
-			"INSERT INTO objects DEFAULT VALUES",
+			`INSERT INTO objects (state, created_at_ns, live_at_ns, updated_at_ns)
+			 VALUES ('LIVE', 1, 1, 1)`,
 		)
 		if err != nil {
 			return err

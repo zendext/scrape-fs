@@ -86,7 +86,7 @@ SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 dae
 
 持久化内部 ID 使用 SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`，Go 中表示为 `int64`，因此已删除节点的 ID 不会复用。持久化时间使用 SQLite `INTEGER` 保存 UTC Unix 纳秒。
 
-基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。`scrapes` 是已发布的 legacy storage 名称；schema migration 3 在不修改已发布 migration 的前提下扩展它保存 applied Batch provenance，并新增 `projection_batch_entries` 保存有序的 source identity 和 target 历史。
+基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。`scrapes` 是已发布的 legacy storage 名称；schema migration 3 在不修改已发布 migration 的前提下扩展它保存 applied Batch provenance，并新增 `projection_batch_entries` 保存有序的 source identity 和 target 历史。schema migration 4 扩展已发布的 `objects` 占位表，保存 `STAGING`/`LIVE` 生命周期状态和时间戳。
 
 schema 只使用声明式局部完整性约束：`STRICT` 表、主键、`NOT NULL`、行内 `CHECK`、外键和唯一索引。SQLite trigger 不实现命名空间业务规则、生命周期策略、namespace version 策略或 operation log 策略。
 

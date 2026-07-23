@@ -573,6 +573,11 @@ func (transaction *Transaction) CreateNode(
 	if err := validateCreateNode(request); err != nil {
 		return Node{}, err
 	}
+	if request.Kind == OverlayFile {
+		if err := transaction.validateLiveObject(ctx, *request.ObjectID); err != nil {
+			return Node{}, err
+		}
+	}
 	if err := transaction.validateParent(ctx, request); err != nil {
 		return Node{}, err
 	}
@@ -666,6 +671,77 @@ func (transaction *Transaction) CreateNode(
 	}
 	transaction.changed = true
 	return node, nil
+}
+
+func (transaction *Transaction) CreateOverlay(
+	ctx context.Context,
+	objectID int64,
+	request CreateOverlay,
+) (Node, error) {
+	if objectID <= 0 {
+		return Node{}, fmt.Errorf("%w: object ID must be positive", ErrInvalidObject)
+	}
+	objectIDCopy := objectID
+	nodeRequest := CreateNode{
+		ParentID:   request.ParentID,
+		Name:       request.Name,
+		Kind:       OverlayFile,
+		ObjectID:   &objectIDCopy,
+		Creator:    request.Creator,
+		Attributes: request.Attributes,
+	}
+	if err := validateCreateNode(nodeRequest); err != nil {
+		return Node{}, err
+	}
+
+	now := transaction.now().UTC().UnixNano()
+	result, err := transaction.transaction.ExecContext(ctx, `
+		UPDATE objects
+		SET state = 'LIVE', live_at_ns = ?, updated_at_ns = ?
+		WHERE id = ?
+		  AND state = 'STAGING'
+	`, now, now, objectID)
+	if err != nil {
+		return Node{}, fmt.Errorf("promote backing object %d: %w", objectID, err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return Node{}, fmt.Errorf("read promoted backing object count: %w", err)
+	}
+	if updated != 1 {
+		return Node{}, fmt.Errorf(
+			"%w: object %d is missing or not STAGING",
+			ErrInvalidObject,
+			objectID,
+		)
+	}
+	return transaction.CreateNode(ctx, nodeRequest)
+}
+
+func (transaction *Transaction) validateLiveObject(
+	ctx context.Context,
+	objectID int64,
+) error {
+	var state string
+	if err := transaction.transaction.QueryRowContext(
+		ctx,
+		"SELECT state FROM objects WHERE id = ?",
+		objectID,
+	).Scan(&state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: object %d does not exist", ErrInvalidObject, objectID)
+		}
+		return fmt.Errorf("read backing object %d: %w", objectID, err)
+	}
+	if state != "LIVE" {
+		return fmt.Errorf(
+			"%w: object %d state is %s, want LIVE",
+			ErrInvalidObject,
+			objectID,
+			state,
+		)
+	}
+	return nil
 }
 
 func (transaction *Transaction) CreateProjectionBatch(
