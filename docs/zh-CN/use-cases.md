@@ -9,8 +9,8 @@
 | 参与者 | 说明 |
 | --- | --- |
 | 管理员 | 管理 Library、daemon 和系统配置 |
-| 控制用户 | 创建 Projection、执行 Scrape、确认和撤销结果 |
-| Agent | 在受限 session 中识别媒体和生成 Scrape revision |
+| 控制用户 | 创建 Projection、validate/apply Batch、确认和撤销结果 |
+| 外部 Agent Skill | 使用调用者权限识别媒体、生成 Batch 并调用 CLI |
 | 媒体播放器 | 读取 ProjectionFile，并通过 FUSE 创建或修改 OverlayFile |
 | daemon | 执行安全校验、持久化、FUSE 操作和恢复 |
 
@@ -20,11 +20,11 @@
 | --- | --- |
 | UC-01 | 创建 Library |
 | UC-02 | 手动创建单条 Projection |
-| UC-03 | Scrape 一个电影目录 |
-| UC-04 | 回答媒体识别歧义 |
-| UC-05 | 修改 Scrape 目标路径 |
-| UC-06 | 应用 Scrape |
-| UC-07 | 撤销 Scrape |
+| UC-03 | Validate 外部 Agent 生成的 Projection Batch |
+| UC-04 | 修正无效 Batch |
+| UC-05 | 原子应用 Projection Batch |
+| UC-06 | 通过 FUSE 创建媒体 artifact |
+| UC-07 | 撤销 Projection Batch |
 | UC-08 | 重命名或删除 Projection |
 | UC-09 | 播放器原子更新 OverlayFile |
 | UC-10 | 处理源文件丢失或被替换 |
@@ -71,7 +71,7 @@ scrapefs library add jellyfin --profile jellyfin@1
 
 ### 结果
 
-Library 为 ACTIVE，可以接收 Projection 和 Scrape。
+Library 为 ACTIVE，可以接收 direct Projection 和 Projection Batch。
 
 ### 相关规格
 
@@ -131,106 +131,90 @@ ProjectionFile 可读且内容只读，源文件保持不变。
 - [Projection 模型](projection.md)
 - [文件系统与对象存储](filesystem.md)
 
-## UC-03 Scrape 一个电影目录
+## UC-03 Validate 外部 Agent 生成的 Projection Batch
 
 ### 参与者
 
-控制用户、Agent
+控制用户、外部 Agent Skill
 
 ### 目标
 
-识别一个任意命名的电影目录，并生成可预览的 Projection 草稿。
+识别一个任意命名的电影目录，并在不改变 namespace 的情况下预览 Projection Batch。
 
 ### 前置条件
 
 - daemon 已 ready；
 - 目标 Library 为 ACTIVE；
-- daemon 可以读取用户指定目录；
-- Agent provider 可用。
+- 外部 Agent 可以使用调用者权限读取源目录；
+- daemon 服务账号可以读取 Batch 显式列出的 source。
 
 ### 触发
 
 ```bash
-scrapefs scrape \
-  /mnt/disk1/downloads/Dune.2021.REMUX \
-  --library jellyfin
+scrapefs projection batch validate --file /tmp/dune.batch.json --json
 ```
 
 ### 主流程
 
-1. daemon 只枚举指定目录及必要后代。
-2. daemon 创建不可修改的 Scrape 文件清单。
-3. daemon 创建受限 Agent session。
-4. Agent 读取文件名、现有文本元数据和受控 probe 结果。
-5. Agent 生成 MediaModel。
-6. Jellyfin Profile 生成 RenderedEntry。
-7. daemon 执行路径安全和冲突检查。
-8. Scrape 进入 ready。
-9. CLI 展示媒体信息、Projection 树、ignored 文件和 warning。
+1. 外部 Agent 枚举源目录并使用自己的 `ffprobe` 和 metadata 工具。
+2. 外部 Agent 处理媒体识别歧义并生成 `scrapefs.projection-batch/v1` JSON。
+3. daemon 严格解析 Batch，并安全打开每个 source。
+4. daemon 执行通用路径、Profile 和冲突检查。
+5. daemon 返回 diff、warning、digest 和 namespace version。
+6. daemon 关闭 source fd，不写 SQLite。
 
 ### 备选流程
 
-- 输入是普通文件：只检查该文件。
-- Agent 无法确定媒体：Scrape 进入 waiting_input。
-- 源文件在分析期间变化：相关操作返回 `ESTALE`。
-- 路径安全检查失败：Scrape 不进入 ready。
-- Agent 失败：Scrape 保持 draft 并记录错误。
+- Schema、权限或 source 类型无效：validate 失败。
+- source 在检查期间变化：返回 `ESTALE`。
+- target 不安全或冲突：返回 blocking error。
 
 ### 结果
 
-生成未应用的 Scrape revision，FUSE 命名空间尚未变化。
+外部 Agent 获得审阅结果和 digest，FUSE namespace 与数据库保持不变。
 
 ### 相关规格
 
-- [Scrape 与 Agent 工作流](scrape.md)
+- [Projection Batch 与外部 Agent 工作流](scrape.md)
 - [Projection 模型](projection.md)
 
-## UC-04 回答媒体识别歧义
+## UC-04 修正无效 Batch
 
 ### 参与者
 
-控制用户、Agent
+控制用户、外部 Agent Skill
 
 ### 目标
 
-解决 Agent 无法确定作品、季集或文件角色的问题。
+在外部解决媒体识别、target 或冲突问题后重新 validate Batch。
 
 ### 前置条件
 
-- Scrape 状态为 waiting_input；
-- Question 属于当前 revision。
+- 上一次 validate 返回 blocking error 或用户要求修改；
+- 外部 Agent 持有原始 Batch JSON。
 
 ### 触发
 
 ```bash
-scrapefs scrape answer scrape-42 question-1 candidate-2021
+scrapefs projection batch validate --file corrected.batch.json --json
 ```
 
 ### 主流程
 
-1. daemon 校验 Question 属于当前 revision。
-2. daemon 保存 Answer。
-3. Agent 根据 Answer 重新生成 MediaModel。
-4. Profile 重新渲染目标路径。
-5. daemon重新执行安全和冲突检查。
-6. daemon 创建新 revision。
-7. 没有剩余问题时 Scrape 进入 ready。
-
-### 备选流程
-
-- Question 属于旧 revision：拒绝 Answer。
-- 仍有未回答问题：Scrape 保持 waiting_input。
-- 重新渲染失败：Scrape 返回 draft 并记录错误。
+1. 外部 Agent 修改自己的 Batch 文件。
+2. daemon 将修改后的文件视为全新无状态请求。
+3. daemon 重新执行全部 source、路径、Profile 和冲突检查。
+4. daemon 返回新的 digest 和 diff。
 
 ### 结果
 
-产生新的不可变 revision，旧 revision 保留用于 diff。
+daemon 不保存旧版本或 revision；外部 Agent 负责比较和保存修改历史。
 
 ### 相关规格
 
-- [Scrape 与 Agent 工作流](scrape.md)
+- [Projection Batch 与外部 Agent 工作流](scrape.md)
 
-## UC-05 修改 Scrape 目标路径
+## UC-05 原子应用 Projection Batch
 
 ### 参与者
 
@@ -238,98 +222,89 @@ scrapefs scrape answer scrape-42 question-1 candidate-2021
 
 ### 目标
 
-在应用前修正 Agent 或 Profile 生成的目标路径。
+原子发布用户刚确认的 Batch。
 
 ### 前置条件
 
-- Scrape 状态为 draft、waiting_input 或 ready；
-- 新路径位于同一 Library。
-
-### 触发
-
-```bash
-scrapefs scrape revise scrape-42 \
-  --target rendered-01="Movies/Dune (2021)/Dune (2021).mkv"
-```
-
-### 主流程
-
-1. daemon读取当前 revision。
-2. daemon 应用手动 override。
-3. daemon执行不可绕过的路径安全检查。
-4. Profile 对命名规范生成 warning。
-5. daemon 创建新 revision。
-6. CLI 展示与前一 revision 的 diff。
-
-### 备选流程
-
-- 路径包含 `..` 或逃逸 LibraryRoot：拒绝。
-- 目标与已有节点冲突：Scrape 不进入 ready。
-- Scrape 已 applied、undone 或 discarded：拒绝修改。
-
-### 结果
-
-新 revision 成为当前 revision，应用时必须重新确认。
-
-### 相关规格
-
-- [Scrape 与 Agent 工作流](scrape.md)
-
-## UC-06 应用 Scrape
-
-### 参与者
-
-控制用户
-
-### 目标
-
-将用户刚确认的 Scrape revision 原子发布到 FUSE 命名空间。
-
-### 前置条件
-
-- Scrape 状态为 ready；
-- CLI 已展示当前 revision；
+- CLI 已展示 validate 结果；
 - 调用者确认应用；
+- 调用者持有 validate 返回的 digest；
 - Library 为 ACTIVE。
 
 ### 触发
 
 ```bash
-scrapefs scrape apply scrape-42
+scrapefs projection batch apply \
+  --file /tmp/dune.batch.json \
+  --expected-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 ### 主流程
 
-1. CLI 提交 Scrape ID 和 expected revision。
+1. daemon 重新解析 Batch 并校验 expected digest。
 2. daemon 从 Unix peer credentials 获取确认者 UID/GID。
-3. daemon 确认 revision 未变化。
-4. daemon 重新校验全部选中源文件身份。
-5. daemon 重新检查路径安全和冲突。
-6. daemon 在一个 SQLite 事务中创建 Directory 和 ProjectionFile。
-7. daemon 写 operation log。
-8. daemon 将 Scrape 标记为 applied，并保存确认者 UID/GID。
-9. daemon 增加 namespace version 并提交。
-10. daemon 更新内存索引并失效 FUSE 缓存。
-11. 目标目录立即可见。
+3. daemon 重新安全打开并校验全部 source。
+4. daemon 重新检查路径、Profile 和冲突。
+5. daemon 在一个 SQLite 事务中创建 applied Batch provenance、Directory 和 ProjectionFile。
+6. daemon 写一条 batch operation log。
+7. daemon 增加 namespace version 并提交。
+8. daemon 更新内存索引并失效 FUSE 缓存。
+9. CLI 返回稳定 Batch ID。
 
 ### 备选流程
 
-- revision 已变化：拒绝并要求重新查看。
-- 源文件变化：返回 `ESTALE`。
-- 目标发生冲突：返回 `EEXIST`。
-- 事务失败：不留下部分 Projection。
-- Scrape 已 applied：返回 `AlreadyApplied`。
+- digest 不匹配：拒绝并要求重新 validate。
+- source 变化：返回 `ESTALE`。
+- target 发生冲突：返回 `EEXIST`。
+- 事务失败：不留下 provenance、目录或 Projection。
 
 ### 结果
 
-全部 Projection 同时发布，源文件保持不变。后续 Agent artifact 的虚拟 owner 使用本次保存的确认者 UID/GID。
+全部 Projection 同时发布，源文件保持不变。
 
 ### 相关规格
 
-- [Scrape 与 Agent 工作流](scrape.md)
+- [Projection Batch 与外部 Agent 工作流](scrape.md)
 - [系统架构](architecture.md)
 
-## UC-07 撤销 Scrape
+## UC-06 通过 FUSE 创建媒体 Artifact
+
+### 参与者
+
+外部 Agent Skill
+
+### 目标
+
+在 Batch applied 后创建 NFO、海报等 OverlayFile。
+
+### 前置条件
+
+- Batch 已 applied；
+- 外部 Agent 对目标目录有 FUSE 写权限。
+
+### 触发
+
+```bash
+cp poster.jpg \
+  "/mnt/scrapefs/jellyfin/Movies/Dune (2021) [tmdbid-438631]/poster.jpg"
+```
+
+### 主流程
+
+1. 外部 Agent 使用普通 FUSE create/write/rename。
+2. OverlayFile 使用 FUSE 调用者 UID/GID 和普通 mode。
+3. backing object 使用 daemon 私有权限。
+
+### 结果
+
+Artifact 可见；ScrapeFS 不记录其创建者是人工、脚本还是 Agent。
+
+### 相关规格
+
+- [文件系统与对象存储](filesystem.md)
+- [Projection Batch 与外部 Agent 工作流](scrape.md)
+
+## UC-07 撤销 Projection Batch
 
 ### 参与者
 
@@ -337,41 +312,40 @@ scrapefs scrape apply scrape-42
 
 ### 目标
 
-删除某次 Scrape 创建的 Projection，同时保留源文件和 OverlayFile。
+删除某次 Batch 创建的 Projection，同时保留源文件和 OverlayFile。
 
 ### 前置条件
 
-- Scrape 状态为 applied。
+- Batch 状态为 applied。
 
 ### 触发
 
 ```bash
-scrapefs scrape undo scrape-42
+scrapefs projection batch undo batch-42
 ```
 
 ### 主流程
 
-1. daemon 禁止该 Scrape 的新 Agent artifact 请求。
-2. daemon 在事务中删除 `origin_scrape_id` 匹配的 ProjectionFile。
-3. daemon 清理空的 managed Directory。
-4. daemon 写 operation log。
-5. daemon 将 Scrape 标记为 undone。
-6. daemon 增加 namespace version 并提交。
-7. CLI 列出仍然保留的 Agent OverlayFile。
+1. daemon 在事务中删除 legacy `origin_scrape_id` 指向 Batch 的 ProjectionFile。
+2. daemon 清理空的 managed Directory。
+3. daemon 写 operation log。
+4. daemon 将 Batch 标记为 undone，并保存调用者 UID/GID。
+5. daemon 增加 namespace version 并提交。
+6. CLI 列出仍然保留或阻止目录清理的 OverlayFile。
 
 ### 备选流程
 
 - Projection 已被用户删除：视为已经不存在。
 - 目录中仍有 OverlayFile 或其他 Projection：保留目录。
-- Scrape 已 undone：返回 `AlreadyUndone`。
+- Batch 已 undone：返回 `AlreadyUndone`。
 
 ### 结果
 
-Scrape 的 Projection 消失，源文件和 OverlayFile 保留。
+Batch 的 Projection 消失，源文件和 OverlayFile 保留。
 
 ### 相关规格
 
-- [Scrape 与 Agent 工作流](scrape.md)
+- [Projection Batch 与外部 Agent 工作流](scrape.md)
 
 ## UC-08 重命名或删除 Projection
 
@@ -582,7 +556,7 @@ scrapefs library remove jellyfin
 
 非空 Library 使用显式 recursive remove：
 
-1. 管理员先取消活动 session 并 discard 未应用 Scrape。
+1. 管理员等待在途命名空间写事务结束。
 2. daemon 在事务中删除 Library 节点树。
 3. daemon 将 `root_node_id` 置空并标记 RETIRED。
 4. 事务提交后回收 Overlay object。
@@ -590,7 +564,7 @@ scrapefs library remove jellyfin
 ### 备选流程
 
 - 普通删除非空 Library：返回 `ENOTEMPTY`。
-- 存在活动 Scrape 或 Agent session：recursive remove 失败。
+- 存在在途命名空间写事务：recursive remove 失败。
 
 ### 结果
 

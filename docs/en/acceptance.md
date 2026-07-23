@@ -13,18 +13,19 @@
 - `projection rm` does not delete the source.
 - Removing a Projection cleans empty managed directories.
 
-## 2. Scrape
+## 2. Projection Batch
 
-- Scrape enumerates only the user-selected path.
-- A file input does not trigger directory traversal.
-- The Scrape file manifest is immutable after creation.
-- The Agent references only file IDs from the current Scrape.
-- Answer completion triggers new analysis, rendering, and validation.
-- Apply matches the revision the user just confirmed.
-- A changed revision invalidates the old confirmation request.
-- Apply leaves no partial Projection batch.
-- Failed apply leaves Scrape ready.
-- Applied Scrape cannot apply again.
+- A batch accepts only versioned UTF-8 JSON.
+- Unknown fields, invalid types, empty entries, duplicate sources, and duplicate targets are rejected.
+- Each entry explicitly contains an absolute source and Library-relative target.
+- The daemon does not enumerate directories, read source contents, run commands, or access the network on behalf of a batch.
+- Validate safely opens every source and returns the diff, warnings, digest, and namespace version.
+- Validate writes nothing to SQLite and creates no pending batch, snapshot, or revision.
+- The digest uses `sha256:<64 lowercase hex>`, is independent of JSON whitespace and object-field order, and preserves `entries` array order.
+- Apply requires the expected digest and revalidates every source, Profile, path, and conflict.
+- Apply creates provenance and every Projection in one transaction without partial results.
+- Failed apply leaves no batch provenance.
+- Successful apply returns a stable batch ID.
 - Undo runs in one transaction.
 - Undo does not remove OverlayFiles.
 
@@ -55,16 +56,14 @@
 - Missing object returns `EIO`.
 - GC does not delete referenced, actively opened, or grace-period objects.
 
-## 5. Agent
+## 5. External Agent Integration
 
-- Agent cannot apply, undo, discard, or manage Libraries.
-- Agent cannot submit an arbitrary absolute path.
-- Agent reads only files from the current Scrape.
-- Agent cannot create visible artifacts before apply.
-- Agent writes only below the current Scrape artifact root.
-- Agent cannot overwrite an existing file.
-- Session cancellation or expiry, Scrape undo, and Library retirement stop further writes.
-- Agent upload quotas are enforced.
+- `scrapefsd` embeds no model provider, Agent session, or tool-calling loop.
+- An external Agent uses only the invoking user's existing host-filesystem, control CLI, and FUSE permissions.
+- The external Agent submits an explicit source-to-target batch using `scrapefs.projection-batch/v1`.
+- Automation commands provide machine-readable JSON, and non-TTY mode does not prompt or apply automatically.
+- After the batch is applied, the external Agent creates OverlayFiles through ordinary FUSE operations.
+- ScrapeFS does not change OverlayFile semantics based on whether a person, script, or Agent created the file.
 
 ## 6. Library
 
@@ -79,7 +78,7 @@
 
 - The FUSE mount enables `default_permissions`.
 - FUSE create uses caller UID/GID and kernel-processed mode.
-- Agent-created OverlayFiles use the apply confirmer's UID/GID and the Library overlay mode.
+- OverlayFiles created by an external Agent through FUSE use the FUSE caller's UID/GID and ordinary create mode.
 - Overlay backing objects use daemon ownership and `0600` and do not follow virtual chmod/chown.
 - ProjectionFile is always read-only.
 - The daemon acquires `/run/scrapefs/scrapefsd.lock` on the host filesystem before opening SQLite.
@@ -89,9 +88,9 @@
 - Normal shutdown does not use lazy unmount.
 - Daemon restart recovers from SQLite and the object store.
 
-## 8. First-Version Agent Scope
+## 8. First-Version Agent Skill Scope
 
-Should support:
+The skill should cover:
 
 - single-file movies;
 - one movie per directory;
@@ -101,10 +100,11 @@ Should support:
 - sample-file exclusion;
 - Plex and Jellyfin;
 - reading existing NFO files;
-- structured questions;
-- manual revision and path override.
+- generating `scrapefs.projection-batch/v1`;
+- batch validate, user confirmation, apply, show, and undo;
+- creating NFO files and artwork through FUSE after apply.
 
-May return `UnsupportedFeature` for:
+The skill may reject or require manual handling for:
 
 - BDMV and DVD;
 - anime absolute episode numbering;
@@ -113,3 +113,5 @@ May return `UnsupportedFeature` for:
 - complex extras;
 - music and image libraries;
 - remote network sources.
+
+These format capabilities belong to the skill and do not change the ScrapeFS batch schema. ScrapeFS requires only that a Projection source in the batch is a safely openable local regular file.

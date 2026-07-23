@@ -1,12 +1,14 @@
-# Scrape and Agent Workflow
+# Projection Batches and the External Agent Workflow
 
 **English** | [简体中文](../zh-CN/scrape.md)
 
-> This is an English translation. If the English and Chinese documents conflict, the Chinese documentation is authoritative.
+Media identification does not run inside `scrapefsd`. An external Agent skill, script, or manual tool reads source directories, runs `ffprobe`, queries metadata, resolves ambiguity, and generates an explicit Projection batch. ScrapeFS is responsible only for deterministic validation, preview, atomic apply, and batch undo.
 
-A Scrape is an Agent-assisted workflow that generates a reviewable batch of Projections from a user-selected file or directory.
+The batch JSON is an external input document, not a daemon-side plan. ScrapeFS does not persist unapplied batches or maintain draft, ready, revision, revise, or discard lifecycles.
 
-## 1. Create a Scrape
+## 1. Difference from the Earlier Specification
+
+The earlier specification planned:
 
 ```bash
 scrapefs scrape \
@@ -14,355 +16,257 @@ scrapefs scrape \
   --library jellyfin
 ```
 
-A Scrape does not move or reorganize the source directory.
+That command implied that the daemon would enumerate the source directory, run Agent analysis, and generate Projections. The behavior was never implemented and is removed from the target v1 CLI contract without a compatibility alias.
 
-For a regular-file input, the daemon checks only that file. For a directory input, the daemon enumerates only that directory and the descendants required for media identification.
+A later external-Agent design considered persisting `scrapefs.scrape/v1` plans, revisions, and pending approval state in the daemon. The external Agent already owns work context and user interaction, so that duplicate state is no longer part of v1.
 
-## 2. Scrape Data
+Responsibilities are now split as follows:
 
-```text
-scrapes
-├── id
-├── source_path
-├── library_id
-├── profile_name
-├── profile_version
-├── current_revision
-├── applied_revision
-├── status
-├── validated_namespace_version
-├── confirmed_by_uid
-├── confirmed_by_gid
-├── confirmed_at
-├── last_error
-├── created_at
-└── updated_at
+1. An external Agent or another tool performs media scraping and generates `scrapefs.projection-batch/v1` JSON.
+2. `projection batch validate` validates and previews the batch without persistence.
+3. `projection batch apply` revalidates and atomically creates all Projections.
+4. After successful apply, the daemon stores only minimal batch provenance for audit and undo.
+
+## 2. External Agent Boundary
+
+The external Agent:
+
+- reads the host filesystem with the invoking control user's identity;
+- chooses its own model, prompts, metadata providers, and media-probing tools;
+- owns ignored-source handling, candidate comparison, user confirmation, and batch-file storage;
+- validates and applies batches through the `scrapefs` CLI;
+- creates NFO files, artwork, and other OverlayFiles through ordinary FUSE operations after apply.
+
+ScrapeFS does not provide:
+
+- an embedded model provider;
+- a daemon-side Agent session or session token;
+- a model tool-calling loop;
+- arbitrary file-read, `ffprobe`, or network-query Agent APIs;
+- a MediaModel, Question/Answer loop, pending plan, or Agent-specific Overlay API.
+
+The external Agent is not an additional authorization boundary. It can use only its own host-filesystem permissions, control CLI permissions, and FUSE permissions.
+
+## 3. Batch Format
+
+The first version accepts strict UTF-8 JSON only. The CLI reads a batch from a file or stdin:
+
+```bash
+scrapefs projection batch validate --file /tmp/dune.batch.json
+scrapefs projection batch validate --file -
 ```
 
-States:
-
-```text
-draft
-waiting_input
-ready
-applied
-undone
-discarded
-```
-
-## 3. Scrape File Manifest
-
-After enumeration, the daemon stores:
-
-```text
-scrape_files
-├── id
-├── scrape_id
-├── source_path
-├── relative_path
-├── parent_id
-├── name
-├── file_type
-├── device_id
-├── inode
-├── mode
-├── size
-├── atime_ns
-├── mtime_ns
-├── ctime_ns
-└── created_at
-```
-
-`file_type` is one of:
-
-```text
-regular
-directory
-unsupported
+```json
+{
+  "schema": "scrapefs.projection-batch/v1",
+  "library": "jellyfin",
+  "entries": [
+    {
+      "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.2021.REMUX.mkv",
+      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).mkv"
+    },
+    {
+      "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.zh.ass",
+      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).zh.ass"
+    }
+  ]
+}
 ```
 
 Rules:
 
-- the manifest belongs only to the current Scrape;
-- the completed manifest is immutable;
-- the Agent may reference only regular files in the manifest;
-- a new directory read creates a new Scrape;
-- there is no separate Source Scan domain model.
+- `schema` is `scrapefs.projection-batch/v1`;
+- `library` references an ACTIVE Library;
+- `entries` is non-empty;
+- `source` is a lexically normalized absolute local path;
+- `target` is relative to LibraryRoot and passes generic and Profile validation;
+- one batch cannot contain a duplicate source or target;
+- unknown fields and invalid types are rejected;
+- the first version does not support YAML, remote sources, or cross-host path translation.
 
-## 4. Media Probing
+Media titles, provider IDs, ignored sources, confidence, and Agent reasoning are outside the batch schema. The external Agent can retain those details in its own work context.
 
-The Agent requests controlled text reads or `ffprobe` through `scrape_file_id`.
+## 4. Stateless Validate
 
-The daemon safely reopens the file and validates device, inode, size, and mtime.
-
-The Agent cannot provide an arbitrary local path, command-line arguments, or shell command.
-
-Probe execution has a timeout and maximum output size. The first version does not maintain a generic Probe history.
-
-## 5. Agent Session
-
-```text
-agent_sessions
-├── id
-├── scrape_id
-├── library_id
-├── status
-├── token_hash
-├── expires_at
-├── created_at
-└── updated_at
+```bash
+scrapefs projection batch validate \
+  --file /tmp/dune.batch.json \
+  --json
 ```
 
-States:
+The daemon:
 
-```text
-ANALYSIS
-ARTIFACT
-CANCELLED
-EXPIRED
-COMPLETED
-```
+1. strictly parses the batch;
+2. resolves the ACTIVE Library and current Profile;
+3. checks every source through the secure source-file primitive;
+4. rejects symlinks, magic links, directories, and other non-regular files;
+5. runs generic and Profile path validation;
+6. checks conflicts within the batch and against the current namespace;
+7. computes a SHA-256 digest of the normalized batch;
+8. returns the diff, warnings, digest, and current namespace version;
+9. closes every source fd and writes nothing to SQLite.
 
-The Agent may:
+Example result:
 
-- read the current Scrape manifest;
-- request controlled text reads and ffprobe;
-- generate MediaModel;
-- generate structured Questions;
-- generate a new revision from Answers.
-
-The Agent cannot:
-
-- read outside the current Scrape;
-- submit an arbitrary absolute path;
-- modify source files;
-- access SQLite, the object store, or FUSE directly;
-- apply, undo, or discard a Scrape;
-- manage Libraries.
-
-The first-version Agent provider runs inside the daemon or as a trusted worker launched under the daemon's effective UID. A separate worker still presents the current session token when calling the Agent API.
-
-The first version does not support an untrusted external Agent worker isolated by a separate Unix UID or sandbox.
-
-## 6. MediaModel
-
-```yaml
-schema: scrapefs.media/v1
-
-media:
-  kind: movie | series
-  title: string
-  original_title: string | null
-  year: integer | null
-  provider_ids:
-    tmdb: string | null
-    tvdb: string | null
-    imdb: string | null
-  edition: string | null
-  version: string | null
-
-items:
-  - id: media-item-1
-    scrape_file_id: file-01
-    role: primary_video | episode | subtitle | extra | metadata_source
-    season: integer | null
-    episodes: [integer]
-    language: string | null
-    target_item_ids: [media-item-id]
-    subtitle:
-      default: boolean
-      forced: boolean
-      sdh: boolean
-    extra_type: trailer | featurette | interview | sample | other | null
-
-ignored:
-  - scrape_file_id: file-99
-    reason: string
-```
-
-Constraints:
-
-- a movie has at least one primary video;
-- an episode has a season and at least one episode number;
-- a subtitle explicitly references its target video or episode;
-- every scrape_file_id belongs to the current Scrape;
-- only regular files can become Projections.
-
-## 7. Profile Output
-
-```yaml
-schema: scrapefs.rendered-entry/v1
-
-id: rendered-01
-scrape_file_id: file-01
-media_item_id: media-item-1
-kind: projection
-target: Movies/Dune (2021)/Dune (2021).mkv
-artifact_root: Movies/Dune (2021)
-manual_override: false
-warnings: []
-```
-
-`target` and `artifact_root` are relative to LibraryRoot.
-
-Profile interface:
-
-```go
-type Profile interface {
-    Name() string
-    Version() string
-
-    Render(MediaModel, ScrapeFileManifest) (RenderResult, error)
-    ValidatePathSafety(relativePath string) error
-    ValidateConformance(entry RenderedEntry) []Warning
+```json
+{
+  "schema": "scrapefs.projection-batch-validation/v1",
+  "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "namespace_version": 42,
+  "valid": true,
+  "entries": [],
+  "warnings": []
 }
 ```
 
-Path-safety errors cannot be overridden. Nonconforming player names produce warnings shown at final confirmation.
+The digest is computed from the strictly parsed normalized batch and is formatted as `sha256:` followed by 64 lowercase hexadecimal digits. Input JSON whitespace and object-field order do not affect it; `entries` array order is preserved. `namespace_version` is review information only. A changed version causes apply to recheck conflicts but does not fail solely because the version differs.
 
-## 8. Revision
+Validate creates no pending batch, source snapshot, revision, or operation-log entry. The external Agent retains the original batch JSON and revalidates after changing it.
 
-Initial Agent analysis, analysis after an Answer, user revision, manual path override, and Profile rerendering create immutable revisions.
+## 5. Atomic Apply
 
-```text
-scrape_revisions
-├── scrape_id
-├── revision
-├── media_model
-├── rendered_entries
-├── questions
-├── answers
-├── warnings
-├── created_by
-└── created_at
+```bash
+scrapefs projection batch apply \
+  --file /tmp/dune.batch.json \
+  --expected-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-After showing a revision, the CLI sends its expected revision number with apply. A changed current revision causes apply to fail and requires new confirmation.
-
-The first version has no Approval table and no cryptographic revision hash.
-
-## 9. State Transitions
-
-```text
-none -> draft
-draft -> waiting_input
-draft -> ready
-draft/waiting_input/ready -> discarded
-waiting_input -> draft
-ready -> draft
-ready -> applied
-applied -> undone
-applied/undone -> clone as a new draft
-```
-
-Answering all Questions does not directly produce ready. Agent analysis, Profile rendering, path safety, and conflict validation run again.
-
-Discarding an unapplied Scrape cancels its Agent session.
-
-## 10. Diff and Export
-
-`scrape diff` compares the current revision with the previous revision.
-
-`scrape diff --against namespace` shows:
-
-- Projections to create;
-- directories to create or reuse;
-- existing paths;
-- path conflicts;
-- naming warnings.
-
-`scrape export` uses:
-
-```yaml
-schema: scrapefs.scrape/v1
-```
-
-It exports the current Scrape, file manifest, MediaModel, and RenderedEntries for diagnostics and review. The first version has no import.
-
-## 11. Apply
-
-Apply verifies:
+Before apply, the daemon confirms:
 
 - the caller has control permission;
-- Scrape is ready;
-- expected revision matches current revision;
-- selected source identities still match;
-- Library is ACTIVE;
-- Profile is available;
-- path-safety validation passes;
-- target paths do not conflict.
+- the expected digest matches the normalized submitted batch;
+- every source is still safely openable and regular;
+- the Library is ACTIVE;
+- the Profile version is available;
+- every path-safety check passes;
+- no target conflicts exist within the batch or namespace.
 
 Atomic flow:
 
-1. read the ready Scrape and expected revision;
-2. revalidate source identities and target paths;
-3. construct the candidate namespace change;
-4. start a SQLite write transaction;
-5. recheck conflicts;
-6. create Directory and ProjectionFile nodes;
-7. write the operation log;
-8. set Scrape to applied;
-9. store applied revision and the confirming user's UID/GID;
-10. increment namespace version;
-11. commit;
-12. update the in-memory index and invalidate FUSE caches.
+1. Parse the batch again and validate the expected digest.
+2. Safely reopen every source and retain its apply-time identity.
+3. Rerun generic path, Profile, and conflict validation.
+4. Build the complete candidate namespace change.
+5. Start a SQLite write transaction.
+6. Recheck target conflicts.
+7. Create a minimal applied-batch provenance record.
+8. Create all managed Directories and ProjectionFiles.
+9. Write one batch operation-log entry.
+10. Increment namespace version once.
+11. Commit.
+12. Update the in-memory index and invalidate FUSE caches.
 
-Steps 4 through 11 share one transaction.
+Steps 5 through 11 use one transaction. The implementation cannot simulate an atomic batch by repeatedly invoking independently committing `projection add` operations.
 
-Repeated apply returns `AlreadyApplied`.
+A successful result returns a stable batch ID:
 
-## 12. Undo
-
-One SQLite transaction:
-
-1. removes ProjectionFiles whose `origin_scrape_id` matches;
-2. removes empty managed directories toward LibraryRoot;
-3. writes the operation log;
-4. sets Scrape to undone;
-5. increments namespace version.
-
-Undo does not remove OverlayFiles. The CLI lists remaining Agent artifacts from that Scrape.
-
-Repeated undo returns `AlreadyUndone`.
-
-## 13. Agent Artifacts
-
-After apply, the daemon resolves Profile artifact roots to node IDs and moves the session to ARTIFACT.
-
-```text
-scrape_artifact_roots
-├── scrape_id
-├── revision
-├── root_node_id
-└── relative_path_snapshot
+```json
+{
+  "schema": "scrapefs.projection-batch-result/v1",
+  "batch_id": "batch-42",
+  "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "namespace_version": 43
+}
 ```
 
-The daemon restores this scope after restart.
+The same batch may be applied again while its targets do not exist; the digest is not an idempotency key. Existing targets return a conflict and are never silently treated as success.
 
-The Agent creates files only below allowed roots and cannot overwrite an existing node.
+## 6. Applied Batch Provenance
 
-For an Agent-created OverlayFile:
-
-- virtual UID/GID use the Scrape's `confirmed_by_uid` and `confirmed_by_gid` captured at apply;
-- virtual mode uses `Library.overlay_file_mode`, defaulting to `0664`;
-- `creator_kind=agent` records provenance and does not determine virtual ownership;
-- the backing object remains private to the daemon.
-
-First-version API:
+Only a successfully applied batch is persisted:
 
 ```text
-overlay.put_text
-overlay.put_stream
-overlay.stat
+projection batch provenance
+├── id
+├── library_id
+├── profile_name
+├── profile_version
+├── digest
+├── status
+├── applied_by_uid
+├── applied_by_gid
+├── applied_at
+├── undone_by_uid
+├── undone_by_gid
+└── undone_at
 ```
 
-Scrape undo, session cancellation or expiry, and Library retirement immediately stop new artifact writes without deleting committed OverlayFiles.
-
-Recommended quotas:
+Statuses:
 
 ```text
-max_text_file_size     = 4 MiB
-max_binary_file_size   = 32 MiB
-max_session_total_size = 256 MiB
-max_upload_duration    = 120s
+applied
+undone
 ```
+
+The foundational namespace migration already released the names `scrapes`, `nodes.origin_scrape_id`, and `operation_log.scrape_id`. The first version may extend those legacy storage names for batch provenance instead of rewriting a released migration. They are internal storage names and are not part of the CLI or JSON schema.
+
+A batch does not store external Agent prompts, conversations, metadata responses, or unapplied JSON. ProjectionFiles store source identity, and the operation log stores batch path snapshots.
+
+## 7. Show, List, and Undo
+
+```text
+scrapefs projection batch list
+scrapefs projection batch show batch-42
+scrapefs projection batch undo batch-42
+```
+
+`show` displays provenance, created Projections, and operation-log snapshots for an applied or undone batch only. It exposes no pending plan.
+
+Undo uses one SQLite transaction to:
+
+1. remove ProjectionFiles whose legacy `origin_scrape_id` references the batch;
+2. prune empty managed directories toward LibraryRoot;
+3. write the operation log;
+4. mark the batch undone and save caller UID/GID;
+5. increment namespace version once.
+
+Undo does not remove OverlayFiles created through FUSE. The CLI lists OverlayFiles that prevent directory pruning or remain below former target directories.
+
+Repeated undo of an undone batch returns `AlreadyUndone`.
+
+## 8. Relationship to Direct Projection
+
+Issue #8 implements a direct operation that creates one Projection. Direct and batch operations share:
+
+- secure source opening and identity extraction;
+- Library resolution;
+- generic and Profile path validation;
+- conflict classification;
+- candidate Projection construction.
+
+The direct operation commits its own single-Projection transaction. The batch operation owns one caller transaction and creates every entry without invoking an independently committing direct operation.
+
+## 9. Overlay Artifacts
+
+After batch apply, the external Agent can create artifacts through ordinary FUSE operations:
+
+```bash
+printf '%s' "$NFO" > \
+  "/mnt/scrapefs/jellyfin/Movies/Dune (2021) [tmdbid-438631]/movie.nfo"
+
+cp poster.jpg \
+  "/mnt/scrapefs/jellyfin/Movies/Dune (2021) [tmdbid-438631]/poster.jpg"
+```
+
+These files follow ordinary FUSE create, write, rename, and permission semantics:
+
+- virtual UID/GID comes from the FUSE caller;
+- mode follows ordinary umask and Library permission rules;
+- backing objects retain daemon-private permissions;
+- batch undo does not automatically remove OverlayFiles;
+- ScrapeFS does not distinguish files created by a person, script, or Agent.
+
+## 10. Agent Skill Contract
+
+The external Agent skill documents:
+
+- supported media, subtitle, and local metadata formats;
+- source enumeration and sample-ignore rules;
+- `ffprobe` and metadata-query behavior;
+- Plex and Jellyfin Profile naming rules;
+- `scrapefs.projection-batch/v1` generation;
+- validate, user confirmation, apply, show, and undo workflows;
+- FUSE OverlayFile creation after apply;
+- recovery from source changes, path conflicts, and partial artifact failures.
+
+The skill is not a daemon plugin. Updating the skill cannot change the ScrapeFS authorization model, batch schema, or path-safety rules.

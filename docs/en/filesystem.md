@@ -50,13 +50,9 @@ For an OverlayFile or Directory created through FUSE:
 - mode is the kernel-supplied mode after umask;
 - the daemon does not apply umask again.
 
-For an OverlayFile created by Agent through the controller:
-
-- UID/GID come from the confirming user captured when the corresponding Scrape was applied;
-- mode uses `Library.overlay_file_mode`, defaulting to `0664`;
-- the daemon does not attempt to read or emulate the CLI process's umask.
-
 Virtual UID/GID/mode are stored in SQLite and are independent from the backing object's Unix owner and mode.
+
+An external Agent creates OverlayFiles through ordinary FUSE operations and therefore follows the same FUSE request context, umask, and permission checks. ScrapeFS provides no Agent controller that bypasses these rules.
 
 Defined errors:
 

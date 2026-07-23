@@ -14,14 +14,16 @@
 ## 2. 进程模型
 
 ```text
-scrapefs CLI
-      │ Unix socket
-      ▼
+外部 Agent Skill / 脚本 / 控制用户
+               │
+               ▼
+          scrapefs CLI
+               │ Unix socket
+               ▼
 scrapefsd
 ├── Control API
-├── Scrape manager
-├── Agent session manager
-├── Profile renderer
+├── Projection batch service
+├── Profile validator
 ├── Namespace service
 ├── Projection service
 ├── Object store
@@ -38,11 +40,12 @@ scrapefsd
 - 访问 object store；
 - 挂载和卸载 FUSE；
 - 创建、删除或修改 ProjectionFile 和 OverlayFile；
-- 应用和撤销 Scrape；
-- 执行垃圾回收；
-- 管理 Agent session。
+- 应用和撤销 Projection Batch；
+- 执行垃圾回收。
 
-CLI 和 Agent 禁止直接访问 SQLite 或 object store。
+CLI 和外部 Agent 禁止直接访问 SQLite 或 object store。外部 Agent 使用调用它的用户身份读取宿主源文件、调用自己的媒体和 metadata 工具，并通过 CLI validate 和 apply 显式 Projection Batch。它不是 daemon 插件，也不获得额外文件系统权限。
+
+NFO、海报等 artifact 在 Batch applied 后通过普通 FUSE 文件操作创建。ScrapeFS 不区分 OverlayFile 由人工、脚本还是 Agent 创建。
 
 控制协议使用配置的 Unix socket。默认值：
 
@@ -79,7 +82,7 @@ SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 dae
 
 持久化内部 ID 使用 SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`，Go 中表示为 `int64`，因此已删除节点的 ID 不会复用。持久化时间使用 SQLite `INTEGER` 保存 UTC Unix 纳秒。
 
-基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。后续 Object 和 Scrape migration 必须在对应行为开始创建记录前扩展这些表。
+基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。`scrapes` 是已发布的 legacy storage 名称；后续 Projection Batch migration 可以扩展它保存 applied Batch provenance，而不修改已发布 migration。
 
 schema 只使用声明式局部完整性约束：`STRICT` 表、主键、`NOT NULL`、行内 `CHECK`、外键和唯一索引。SQLite trigger 不实现命名空间业务规则、生命周期策略、namespace version 策略或 operation log 策略。
 
@@ -154,8 +157,7 @@ LibraryRoot 只能通过控制面管理。普通 FUSE 用户对 GlobalRoot 执�
 切换 Library Profile 时：
 
 - 已有 Projection 路径保持不变；
-- 未应用 Scrape 继续使用创建时的 Profile；
-- 新 Scrape 使用新的 Profile；
+- 后续 direct Projection 和 Batch validate/apply 使用新的 Profile；
 - 不自动迁移已有节点；
 - 写 operation log；
 - 不增加 namespace version。
@@ -220,8 +222,9 @@ nodes
 - ProjectionFile 使用 source 字段。
 - OverlayFile 使用 `object_id`。
 - Directory 不使用 source/object 字段。
-- `managed_directory=true` 表示由 Scrape 或 `projection add` 自动创建。
+- `managed_directory=true` 表示由 Projection Batch 或 `projection add` 自动创建。
 - 直接创建的 ProjectionFile 的 `origin_scrape_id` 为空。
+- Batch 创建的 ProjectionFile 使用 legacy `origin_scrape_id` 引用 applied Batch provenance。
 - LibraryRoot 的父节点必须是 GlobalRoot。
 - Directory、ProjectionFile 和 OverlayFile 的父节点必须是 LibraryRoot 或 Directory。
 
@@ -246,9 +249,9 @@ SQLite 保存单调递增的 `namespace_version`。
 
 - create、mkdir、rename、unlink、rmdir；
 - projection add/mv/rm；
-- scrape apply/undo；
+- projection batch apply/undo；
 - Library create/rename/recursive remove；
-- Agent 创建 OverlayFile。
+- 通过 FUSE 创建 OverlayFile。
 
 以下操作不增加版本：
 
@@ -256,9 +259,9 @@ SQLite 保存单调递增的 `namespace_version`。
 - chmod、chown、utimens；
 - Projection rebind；
 - Library Profile 切换；
-- Scrape revision 变化。
+- 无状态 projection batch validate。
 
-ready Scrape 保存 `validated_namespace_version`。apply 时版本不同必须重新检查冲突，但不得仅因版本不同直接失败。
+Batch validate 返回 `namespace_version` 供审阅。apply 始终重新检查冲突；版本不同不得单独导致失败。
 
 ## 7. Operation Log
 
@@ -278,8 +281,8 @@ operation_log
 
 - 命名空间操作的日志与对应修改处于同一 SQLite 事务；
 - daemon 的 Repository API 只允许追加 operation log，不提供 update 或 delete 操作；
-- 删除被引用的 Scrape 时，可以通过声明式外键 `ON DELETE SET NULL` 清空 `scrape_id`；
-- `actor_kind` 至少区分 control、agent、fuse 和 system；
+- `scrape_id` 是已发布的 legacy storage 名称，用于关联 applied Projection Batch；删除被引用的 provenance 时可以通过 `ON DELETE SET NULL` 清空；
+- `actor_kind` 区分 control、fuse 和 system；已发布 schema 中的 `agent` 值保留为 legacy 值，外部 Agent 通过 CLI 或 FUSE 操作时分别记录为 control 或 fuse；
 - `details_json` 使用非空且长度相同的 `paths` 与 `node_kinds` 数组，按相同下标保存路径和节点类型快照；Repository 在插入前校验每个路径和节点类型；
 - 日志不得通过强外键阻止节点或 Library retire；
 - 第一版日志用于审计、doctor 和人工恢复分析；

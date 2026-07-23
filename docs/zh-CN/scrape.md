@@ -1,10 +1,14 @@
-# Scrape 与 Agent 工作流
+# Projection Batch 与外部 Agent 工作流
 
 [English](../en/scrape.md) | **简体中文**
 
-Scrape 是 Agent 根据用户指定的文件或目录生成批量 Projection 草稿的工作流。
+媒体识别不在 `scrapefsd` 中执行。外部 Agent Skill、脚本或人工工具负责读取源目录、调用 `ffprobe`、查询元数据、处理歧义并生成显式的 Projection Batch。ScrapeFS 只负责确定性的校验、预览、原子 apply 和 batch undo。
 
-## 1. 创建 Scrape
+Batch JSON 是外部输入文档，不是 daemon-side Plan。ScrapeFS 不持久化未应用 Batch，不维护 draft、ready、revision、revise 或 discard 生命周期。
+
+## 1. 与早期规范的差异
+
+早期规范计划使用：
 
 ```bash
 scrapefs scrape \
@@ -12,355 +16,257 @@ scrapefs scrape \
   --library jellyfin
 ```
 
-Scrape 不移动或整理源目录。
+该命令意味着 daemon 枚举源目录、运行 Agent 分析并生成 Projection。这个行为尚未实现，并从目标 v1 CLI 契约中移除，不提供兼容 alias。
 
-输入为普通文件时只检查该文件。输入为目录时，daemon 只枚举该目录及媒体识别所需的后代，禁止默认遍历其他目录或整个文件系统。
+后续的外部 Agent 设计曾考虑由 daemon 持久化 `scrapefs.scrape/v1` Plan、revision 和待确认状态。外部 Agent 已经拥有工作上下文并负责用户交互，因此这层状态重复且不再属于 v1。
 
-## 2. Scrape 数据
+当前职责拆分为：
 
-```text
-scrapes
-├── id
-├── source_path
-├── library_id
-├── profile_name
-├── profile_version
-├── current_revision
-├── applied_revision
-├── status
-├── validated_namespace_version
-├── confirmed_by_uid
-├── confirmed_by_gid
-├── confirmed_at
-├── last_error
-├── created_at
-└── updated_at
+1. 外部 Agent 或其他工具执行媒体刮削并生成 `scrapefs.projection-batch/v1` JSON。
+2. `projection batch validate` 无状态校验并预览 Batch。
+3. `projection batch apply` 重新校验并原子创建全部 Projection。
+4. apply 成功后，daemon 只保存用于审计和 undo 的最小 Batch provenance。
+
+## 2. 外部 Agent 边界
+
+外部 Agent：
+
+- 使用调用它的控制用户身份读取宿主文件系统；
+- 自行决定使用的模型、提示词、metadata provider 和媒体探测工具；
+- 自行处理 ignored source、候选比较、用户确认和 Batch 文件保存；
+- 通过 `scrapefs` CLI validate 和 apply Batch；
+- apply 后通过普通 FUSE 文件操作创建 NFO、海报等 OverlayFile。
+
+ScrapeFS 不提供：
+
+- 内置模型 provider；
+- daemon-side Agent session 或 session token；
+- 模型工具调用循环；
+- 任意文件读取、`ffprobe` 或网络查询 Agent API；
+- MediaModel、Question/Answer、pending Plan 或 Agent 专用 Overlay API。
+
+外部 Agent 不是额外的权限边界。它只能使用自身的宿主文件系统权限、控制 CLI 权限和 FUSE 权限。
+
+## 3. Batch 格式
+
+第一版只接受严格的 UTF-8 JSON。CLI 从文件或 stdin 读取：
+
+```bash
+scrapefs projection batch validate --file /tmp/dune.batch.json
+scrapefs projection batch validate --file -
 ```
 
-状态：
-
-```text
-draft
-waiting_input
-ready
-applied
-undone
-discarded
-```
-
-## 3. Scrape 文件清单
-
-daemon 枚举成功后保存：
-
-```text
-scrape_files
-├── id
-├── scrape_id
-├── source_path
-├── relative_path
-├── parent_id
-├── name
-├── file_type
-├── device_id
-├── inode
-├── mode
-├── size
-├── atime_ns
-├── mtime_ns
-├── ctime_ns
-└── created_at
-```
-
-`file_type`：
-
-```text
-regular
-directory
-unsupported
+```json
+{
+  "schema": "scrapefs.projection-batch/v1",
+  "library": "jellyfin",
+  "entries": [
+    {
+      "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.2021.REMUX.mkv",
+      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).mkv"
+    },
+    {
+      "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.zh.ass",
+      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).zh.ass"
+    }
+  ]
+}
 ```
 
 规则：
 
-- 文件清单只属于当前 Scrape。
-- 文件清单创建完成后不可修改。
-- Agent 只能引用当前清单中的 regular 文件。
-- 需要重新读取目录时创建新的 Scrape。
-- 第一版不建立独立 Source Scan 模型。
+- `schema` 必须为 `scrapefs.projection-batch/v1`；
+- `library` 必须引用 ACTIVE Library；
+- `entries` 必须非空；
+- `source` 必须是经过词法规范化的绝对本地路径；
+- `target` 相对于 LibraryRoot，必须通过通用和 Profile 路径校验；
+- 同一 Batch 不能重复使用 source 或 target；
+- 未知字段和无效类型必须拒绝；
+- 第一版不支持 YAML、远程 source 或跨主机路径转换。
 
-## 4. 媒体探测
+媒体标题、provider ID、ignored source、置信度和 Agent 推理不属于 Batch Schema。外部 Agent 可以在自己的工作上下文中保留这些信息。
 
-Agent 通过 `scrape_file_id` 请求 daemon 执行受控的文本读取或 `ffprobe`。
+## 4. 无状态 Validate
 
-daemon 必须重新安全打开并校验 device、inode、size 和 mtime。
+```bash
+scrapefs projection batch validate \
+  --file /tmp/dune.batch.json \
+  --json
+```
 
-Agent 不得提供任意本地路径、工具参数或 shell 命令。
+daemon：
 
-probe 必须配置超时和最大输出。第一版不维护通用 Probe 历史表。
+1. 严格解析 Batch；
+2. 解析 ACTIVE Library 和当前 Profile；
+3. 使用安全源文件打开能力检查每个 source；
+4. 拒绝 symlink、magic link、目录和其他非 regular 文件；
+5. 执行通用路径和 Profile 校验；
+6. 检查 Batch 内部及当前 namespace 冲突；
+7. 计算规范化 Batch 的 SHA-256 digest；
+8. 返回 diff、warning、digest 和当前 namespace version；
+9. 关闭所有 source fd，不写 SQLite。
 
-## 5. Agent Session
+示例结果：
+
+```json
+{
+  "schema": "scrapefs.projection-batch-validation/v1",
+  "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "namespace_version": 42,
+  "valid": true,
+  "entries": [],
+  "warnings": []
+}
+```
+
+digest 根据严格解析后的规范化 Batch 计算，格式为 `sha256:` 后跟 64 位小写十六进制字符。输入 JSON 的空白和对象字段顺序不影响 digest，`entries` 数组顺序保留。`namespace_version` 只用于审阅；apply 时版本变化会触发重新检查，不能仅因版本不同而失败。
+
+Validate 不创建 pending Batch、source snapshot、revision 或 operation log。外部 Agent 持有原始 Batch JSON，并负责修改后重新 validate。
+
+## 5. 原子 Apply
+
+```bash
+scrapefs projection batch apply \
+  --file /tmp/dune.batch.json \
+  --expected-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+apply 前必须确认：
+
+- 调用者有控制权限；
+- expected digest 与提交 Batch 的规范化 digest 相同；
+- 所有 source 仍可安全打开且为 regular 文件；
+- Library 为 ACTIVE；
+- Profile 版本可用；
+- 所有路径安全检查通过；
+- Batch 内部和 namespace 中没有 target 冲突。
+
+原子流程：
+
+1. 重新解析 Batch 并校验 expected digest。
+2. 重新安全打开全部 source，并保存 apply-time identity。
+3. 重新执行通用路径、Profile 和冲突检查。
+4. 构建完整候选 namespace 变更。
+5. 开启 SQLite 写事务。
+6. 再次检查目标冲突。
+7. 创建最小 applied Batch provenance 记录。
+8. 创建全部 managed Directory 和 ProjectionFile。
+9. 写一条批次 operation log。
+10. namespace version 增加 1。
+11. 提交事务。
+12. 更新内存索引并失效 FUSE 缓存。
+
+步骤 5 至 11 必须处于同一事务。实现不得通过重复调用各自提交事务的 `projection add` 来模拟原子批次。
+
+成功结果返回稳定 Batch ID：
+
+```json
+{
+  "schema": "scrapefs.projection-batch-result/v1",
+  "batch_id": "batch-42",
+  "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "namespace_version": 43
+}
+```
+
+同一 Batch 可以在目标尚未存在时再次 apply；digest 不是幂等键。已存在的目标必须返回冲突，不得静默视为成功。
+
+## 6. Applied Batch Provenance
+
+只有成功 apply 的 Batch 才持久化：
 
 ```text
-agent_sessions
+projection batch provenance
 ├── id
-├── scrape_id
 ├── library_id
+├── profile_name
+├── profile_version
+├── digest
 ├── status
-├── token_hash
-├── expires_at
-├── created_at
-└── updated_at
+├── applied_by_uid
+├── applied_by_gid
+├── applied_at
+├── undone_by_uid
+├── undone_by_gid
+└── undone_at
 ```
 
 状态：
 
 ```text
-ANALYSIS
-ARTIFACT
-CANCELLED
-EXPIRED
-COMPLETED
+applied
+undone
 ```
 
-Agent 允许：
+基础 namespace migration 已发布 `scrapes`、`nodes.origin_scrape_id` 和 `operation_log.scrape_id` 名称。第一版可以扩展这些 legacy storage 名称保存 Batch provenance，避免重写已发布 migration。它们是内部存储名称，不属于 CLI 或 JSON Schema。
 
-- 读取当前 Scrape 文件清单；
-- 请求受控文本读取和 ffprobe；
-- 生成 MediaModel；
-- 生成结构化 Question；
-- 根据 Answer 生成新 revision。
+Batch 不保存外部 Agent 的 prompt、对话、metadata response 或未应用 JSON。ProjectionFile 自身保存 source identity，operation log 保存批次路径快照。
 
-Agent 禁止：
-
-- 读取当前 Scrape 范围外的路径；
-- 提交任意绝对路径；
-- 修改源文件；
-- 直接访问 SQLite、object store 或 FUSE mount；
-- apply、undo 或 discard Scrape；
-- 管理 Library。
-
-第一版 Agent provider 在 daemon 进程内运行，或由 daemon 以自身有效 UID 启动为受信 worker。独立 worker 调用 Agent API 时仍必须携带当前 session 的短期 token。
-
-第一版不支持使用独立 Unix UID 或 sandbox 隔离的不可信外部 Agent worker。
-
-## 6. MediaModel
-
-```yaml
-schema: scrapefs.media/v1
-
-media:
-  kind: movie | series
-  title: string
-  original_title: string | null
-  year: integer | null
-  provider_ids:
-    tmdb: string | null
-    tvdb: string | null
-    imdb: string | null
-  edition: string | null
-  version: string | null
-
-items:
-  - id: media-item-1
-    scrape_file_id: file-01
-    role: primary_video | episode | subtitle | extra | metadata_source
-    season: integer | null
-    episodes: [integer]
-    language: string | null
-    target_item_ids: [media-item-id]
-    subtitle:
-      default: boolean
-      forced: boolean
-      sdh: boolean
-    extra_type: trailer | featurette | interview | sample | other | null
-
-ignored:
-  - scrape_file_id: file-99
-    reason: string
-```
-
-约束：
-
-- movie 至少包含一个 primary_video；
-- episode 必须包含 season 和至少一个 episode；
-- subtitle 必须显式关联目标视频或 episode；
-- 所有 scrape_file_id 必须属于当前 Scrape；
-- Projection 只能引用 regular 文件。
-
-## 7. Profile 输出
-
-```yaml
-schema: scrapefs.rendered-entry/v1
-
-id: rendered-01
-scrape_file_id: file-01
-media_item_id: media-item-1
-kind: projection
-target: Movies/Dune (2021)/Dune (2021).mkv
-artifact_root: Movies/Dune (2021)
-manual_override: false
-warnings: []
-```
-
-`target` 和 `artifact_root` 相对于 LibraryRoot。
-
-Profile 接口：
-
-```go
-type Profile interface {
-    Name() string
-    Version() string
-
-    Render(MediaModel, ScrapeFileManifest) (RenderResult, error)
-    ValidatePathSafety(relativePath string) error
-    ValidateConformance(entry RenderedEntry) []Warning
-}
-```
-
-路径安全错误不可绕过。命名不符合播放器建议时生成 warning，并在最终确认时展示。
-
-## 8. Revision
-
-Agent 初次分析、Answer 后重新分析、用户 revise、手动路径 override 或 Profile 重新渲染时，创建新的不可变 revision。
+## 7. Show、List 和 Undo
 
 ```text
-scrape_revisions
-├── scrape_id
-├── revision
-├── media_model
-├── rendered_entries
-├── questions
-├── answers
-├── warnings
-├── created_by
-└── created_at
+scrapefs projection batch list
+scrapefs projection batch show batch-42
+scrapefs projection batch undo batch-42
 ```
 
-CLI 展示 revision 后，apply 请求必须携带期望的 revision number。当前 revision 已变化时，daemon 必须拒绝并要求重新确认。
-
-第一版不建立 Approval 表，也不计算 cryptographic revision hash。
-
-## 9. 状态转换
-
-```text
-无 -> draft
-draft -> waiting_input
-draft -> ready
-draft/waiting_input/ready -> discarded
-waiting_input -> draft
-ready -> draft
-ready -> applied
-applied -> undone
-applied/undone -> clone 为新 draft
-```
-
-回答全部问题后不得直接进入 ready，必须重新执行 Agent 分析、Profile 渲染、路径安全检查和冲突检查。
-
-discard 未应用 Scrape 时，daemon 必须取消对应 Agent session。
-
-## 10. Diff 和 Export
-
-`scrape diff` 默认比较当前 revision 与前一个 revision。
-
-`scrape diff --against namespace` 显示：
-
-- 将创建的 Projection；
-- 将创建或复用的目录；
-- 已存在路径；
-- 路径冲突；
-- 命名 warning。
-
-`scrape export` 使用：
-
-```yaml
-schema: scrapefs.scrape/v1
-```
-
-导出当前 Scrape、文件清单、MediaModel 和 RenderedEntry，用于诊断和人工审阅。第一版不提供 import。
-
-## 11. Apply
-
-apply 前必须确认：
-
-- 调用者有控制权限；
-- Scrape 状态为 ready；
-- expected revision 等于当前 revision；
-- 所有选中源文件身份仍匹配；
-- Library 为 ACTIVE；
-- Profile 可用；
-- 所有路径安全检查通过；
-- 目标路径不存在冲突。
-
-原子流程：
-
-1. 读取 ready Scrape 和 expected revision。
-2. 重新校验源文件身份和目标路径。
-3. 构建候选 namespace 变更。
-4. 开启 SQLite 写事务。
-5. 再次检查路径冲突。
-6. 创建 Directory 和 ProjectionFile。
-7. 写 operation log。
-8. Scrape 状态改为 applied。
-9. 保存 applied revision，以及确认者的 UID/GID。
-10. namespace version 增加 1。
-11. 提交事务。
-12. 更新内存索引并失效 FUSE 缓存。
-
-步骤 4 至 11 必须处于同一事务。
-
-重复 apply 已 applied Scrape 返回 `AlreadyApplied`。
-
-## 12. Undo
+`show` 只展示已 applied 或 undone Batch 的 provenance、创建的 Projection 和 operation-log 快照，不提供待处理 Plan。
 
 undo 在单个 SQLite 事务中：
 
-1. 删除 `origin_scrape_id` 匹配的 ProjectionFile。
-2. 向 LibraryRoot 清理空的 managed Directory。
-3. 写 operation log。
-4. Scrape 状态改为 undone。
+1. 删除 legacy `origin_scrape_id` 指向该 Batch 的 ProjectionFile；
+2. 向 LibraryRoot 清理空的 managed Directory；
+3. 写 operation log；
+4. 将 Batch 状态改为 undone，并保存调用者 UID/GID；
 5. namespace version 增加 1。
 
-undo 不删除 OverlayFile。CLI 必须列出该 Scrape 残留的 Agent artifact。
+undo 不删除通过 FUSE 创建的 OverlayFile。CLI 必须列出阻止目录清理或仍位于原目标目录中的 OverlayFile。
 
-重复 undo 已 undone Scrape 返回 `AlreadyUndone`。
+重复 undo 已 undone Batch 返回 `AlreadyUndone`。
 
-## 13. Agent Artifact
+## 8. 与 Direct Projection 的关系
 
-Scrape applied 后，daemon 将 Profile 输出的 artifact root 解析为节点 ID，并将 session 切换到 ARTIFACT。
+Issue #8 实现一次创建一个 Projection 的 direct operation。Direct 和 Batch 必须共享：
 
-```text
-scrape_artifact_roots
-├── scrape_id
-├── revision
-├── root_node_id
-└── relative_path_snapshot
+- source 安全打开与身份提取；
+- Library 解析；
+- 通用和 Profile 路径校验；
+- 冲突分类；
+- 候选 Projection 构建。
+
+Direct operation 自己提交单 Projection 事务。Batch operation 持有一个调用者事务并创建全部 entry，不调用 independently committing direct operation。
+
+## 9. Overlay Artifact
+
+Batch apply 后，外部 Agent 可以通过普通 FUSE 操作创建 artifact：
+
+```bash
+printf '%s' "$NFO" > \
+  "/mnt/scrapefs/jellyfin/Movies/Dune (2021) [tmdbid-438631]/movie.nfo"
+
+cp poster.jpg \
+  "/mnt/scrapefs/jellyfin/Movies/Dune (2021) [tmdbid-438631]/poster.jpg"
 ```
 
-daemon 重启后必须从该表恢复写入范围。
+这些文件遵循普通 FUSE create、write、rename 和权限语义：
 
-Agent 只能在允许的 root 下创建文件，禁止覆盖已有节点。
+- 虚拟 UID/GID 来自 FUSE 调用者；
+- mode 经过普通 umask 和 Library 权限规则处理；
+- backing object 使用 daemon 私有权限；
+- batch undo 不自动删除 OverlayFile；
+- ScrapeFS 不区分文件由人工、脚本或 Agent 创建。
 
-Agent 创建 OverlayFile 时：
+## 10. Agent Skill 契约
 
-- 虚拟 UID/GID 使用该 Scrape 执行 apply 时保存的 `confirmed_by_uid` 和 `confirmed_by_gid`；
-- 虚拟 mode 使用 `Library.overlay_file_mode`，默认 `0664`；
-- `creator_kind=agent` 记录文件来源，不决定虚拟 owner；
-- backing object 仍使用 daemon 私有权限。
+外部 Agent Skill 应当说明：
 
-第一版 API：
+- 支持的媒体、字幕和本地 metadata 格式；
+- 源目录枚举和 sample 忽略规则；
+- `ffprobe` 和 metadata 查询方式；
+- Plex/Jellyfin Profile 命名规则；
+- `scrapefs.projection-batch/v1` 生成规则；
+- validate、用户确认、apply、show 和 undo 工作流；
+- apply 后通过 FUSE 创建 OverlayFile 的方式；
+- source 变化、路径冲突和部分 artifact 失败的恢复方式。
 
-```text
-overlay.put_text
-overlay.put_stream
-overlay.stat
-```
-
-Scrape undo、session cancel/expire 或 Library retire 必须立即禁止新的 artifact 请求，但不删除已提交 OverlayFile。
-
-推荐配额：
-
-```text
-max_text_file_size     = 4 MiB
-max_binary_file_size   = 32 MiB
-max_session_total_size = 256 MiB
-max_upload_duration    = 120s
-```
+Skill 不是 daemon 插件。Skill 更新不能改变 ScrapeFS 的权限模型、Batch Schema 或路径安全规则。

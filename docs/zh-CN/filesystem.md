@@ -48,13 +48,9 @@ noexec
 - mode 使用内核传入的、已应用 umask 的值；
 - daemon 不得重复应用 umask。
 
-Agent 通过 controller 创建 OverlayFile 时：
-
-- UID/GID 来自对应 Scrape 在 apply 时保存的确认者 UID/GID；
-- mode 使用 `Library.overlay_file_mode`，默认 `0664`；
-- 不尝试读取或模拟 CLI 进程的 umask。
-
 虚拟 UID/GID/mode 保存在 SQLite，与 backing object 的 Unix owner 和 mode 相互独立。
+
+外部 Agent 创建 OverlayFile 时使用普通 FUSE 操作，因此遵循相同的 FUSE request context、umask 和权限检查。ScrapeFS 不提供绕过这些规则的 Agent controller。
 
 确定错误：
 

@@ -16,14 +16,16 @@ This document defines the process boundary, persistence model, Library model, an
 ## 2. Process Model
 
 ```text
-scrapefs CLI
-      │ Unix socket
-      ▼
+external Agent skill / script / control user
+                    │
+                    ▼
+               scrapefs CLI
+                    │ Unix socket
+                    ▼
 scrapefsd
 ├── Control API
-├── Scrape manager
-├── Agent session manager
-├── Profile renderer
+├── Projection batch service
+├── Profile validator
 ├── Namespace service
 ├── Projection service
 ├── Object store
@@ -40,11 +42,12 @@ Only the daemon may:
 - access the object store;
 - mount and unmount FUSE;
 - create, remove, or modify ProjectionFiles and OverlayFiles;
-- apply and undo Scrapes;
-- run garbage collection;
-- manage Agent sessions.
+- apply and undo Projection batches;
+- run garbage collection.
 
-The CLI and Agent MUST NOT access SQLite or the object store directly.
+The CLI and external Agent MUST NOT access SQLite or the object store directly. The external Agent reads host source files with the invoking user's identity, uses its own media and metadata tools, and validates and applies an explicit Projection batch through the CLI. It is not a daemon plugin and receives no additional filesystem permission.
+
+Artifacts such as NFO files and artwork are created through ordinary FUSE operations after the batch is applied. ScrapeFS does not distinguish an OverlayFile created by a person, script, or Agent.
 
 The control protocol uses the configured Unix socket. Default:
 
@@ -81,7 +84,7 @@ SQLite's own locking and transaction semantics protect database consistency. The
 
 Persistent internal identities use SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` values and Go `int64`, so deleted node IDs are not reused. Persisted timestamps use UTC Unix nanoseconds in SQLite `INTEGER` columns.
 
-The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. Later Object and Scrape migrations extend those tables before their corresponding behavior creates rows.
+The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. `scrapes` is a released legacy storage name. A later Projection Batch migration may extend it for applied-batch provenance without rewriting a released migration.
 
 The schema uses declarative local integrity only: `STRICT` tables, primary keys, `NOT NULL`, row-local `CHECK` constraints, foreign keys, and unique indexes. SQLite triggers do not implement namespace business rules, lifecycle policy, namespace-version policy, or operation-log policy.
 
@@ -156,8 +159,7 @@ LibraryRoot is managed only through the control API. FUSE requests to create ent
 When a Library changes Profile:
 
 - existing Projection paths remain unchanged;
-- unapplied Scrapes keep their original Profile;
-- new Scrapes use the new Profile;
+- later direct Projection and batch validate/apply operations use the new Profile;
 - existing nodes are not migrated automatically;
 - an operation-log entry is written;
 - namespace version is unchanged.
@@ -222,8 +224,9 @@ Field rules:
 - ProjectionFile uses the source fields.
 - OverlayFile uses `object_id`.
 - Directory uses neither source nor object fields.
-- `managed_directory=true` marks a directory created automatically by a Scrape or `projection add`.
+- `managed_directory=true` marks a directory created automatically by a Projection batch or `projection add`.
 - A directly created ProjectionFile has a null `origin_scrape_id`.
+- A ProjectionFile created by a batch uses legacy `origin_scrape_id` to reference applied-batch provenance.
 - LibraryRoot has GlobalRoot as its parent.
 - Directory, ProjectionFile, and OverlayFile have LibraryRoot or Directory as their parent.
 
@@ -248,9 +251,9 @@ Each successful transaction that changes namespace structure increments it once,
 
 - create, mkdir, rename, unlink, and rmdir;
 - projection add, mv, and rm;
-- scrape apply and undo;
+- projection batch apply and undo;
 - Library create, rename, and recursive removal;
-- Agent-created OverlayFiles.
+- OverlayFiles created through FUSE.
 
 The following do not increment it:
 
@@ -258,9 +261,9 @@ The following do not increment it:
 - chmod, chown, and utimens;
 - Projection rebind;
 - Library Profile changes;
-- Scrape revision changes.
+- stateless projection batch validation.
 
-A ready Scrape stores `validated_namespace_version`. Apply revalidates conflicts when the version changed, but does not fail solely because the version differs.
+Batch validation returns `namespace_version` for review. Apply always revalidates conflicts and does not fail solely because the version differs.
 
 ## 7. Operation Log
 
@@ -280,8 +283,8 @@ Requirements:
 
 - namespace changes and their log entry share one SQLite transaction;
 - the daemon Repository API is append-only and exposes no operation-log update or delete operation;
-- deleting a referenced Scrape may clear `scrape_id` through the declarative `ON DELETE SET NULL` foreign key;
-- `actor_kind` distinguishes at least control, agent, fuse, and system;
+- `scrape_id` is a released legacy storage name used to associate an applied Projection batch; deleting referenced provenance may clear it through `ON DELETE SET NULL`;
+- `actor_kind` distinguishes control, fuse, and system; the `agent` value in the released schema remains a legacy value, while an external Agent operation is recorded as control or fuse according to the interface it uses;
 - `details_json` stores non-empty, equally sized `paths` and `node_kinds` arrays whose entries are paired snapshots; the Repository validates each path and node kind before insertion;
 - strong foreign keys MUST NOT prevent node or Library retirement;
 - the first version uses the log for audit, doctor, and manual recovery analysis;

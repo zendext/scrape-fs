@@ -6,11 +6,10 @@
 
 ## 1. Control Authorization
 
-The first version uses three identity boundaries:
+The first-version control plane uses two identity roles:
 
 1. **Administrator**: root or a configured administrator UID; manages Libraries and the daemon.
-2. **Control user**: a member of `scrapefs-control`; selects source paths, creates Projections, runs Scrapes, applies/undoes them, and uses status/doctor.
-3. **Agent provider**: runs inside the daemon or as a trusted worker launched under the daemon's effective UID; accesses the current session only through the Agent controller.
+2. **Control user**: a member of `scrapefs-control`; selects source paths, creates Projections, validates/applies/undoes Projection batches, and uses status/doctor.
 
 Recommended socket:
 
@@ -25,9 +24,7 @@ The daemon obtains caller identity through Unix peer credentials.
 
 Members of `scrapefs-control` are trusted source-path selectors. The daemon service account should have read access only to intended media directories so control users cannot use it to read unrelated sensitive files.
 
-An Agent session token cannot call ordinary control operations.
-
-The first version does not configure a separate Agent UID and does not use Unix UID as an isolation boundary between the daemon and Agent. A separate Agent worker process uses the daemon's effective UID and the current session token. An untrusted external Agent worker would require a dedicated UID or sandbox and is outside the first-version scope.
+An external Agent skill runs with the identity of the user that invokes it. It has no daemon-side session token or dedicated permission and can use only that user's existing host-filesystem, control CLI, and FUSE access. The invoking user owns process isolation, credentials, and network access for a remote or untrusted Agent; those concerns are outside the ScrapeFS authorization model.
 
 ## 2. Library Lifecycle
 
@@ -35,11 +32,9 @@ Ordinary removal of a non-empty Library returns `ENOTEMPTY`.
 
 Recursive removal is rejected while the Library has:
 
-- draft, waiting_input, or ready Scrapes;
-- active Agent sessions;
-- artifact uploads in progress.
+- namespace-write transactions in progress.
 
-The administrator cancels sessions and discards Scrapes before recursive removal.
+The administrator waits for in-flight batch apply, undo, or other namespace writes before recursive removal.
 
 Recursive removal uses one SQLite transaction to:
 
@@ -132,18 +127,11 @@ scrapefs projection mv
 scrapefs projection rm
 scrapefs projection rebind
 
-scrapefs scrape
-scrapefs scrape list
-scrapefs scrape show
-scrapefs scrape diff
-scrapefs scrape answer
-scrapefs scrape revise
-scrapefs scrape validate
-scrapefs scrape apply
-scrapefs scrape undo
-scrapefs scrape clone
-scrapefs scrape discard
-scrapefs scrape export
+scrapefs projection batch validate
+scrapefs projection batch apply
+scrapefs projection batch list
+scrapefs projection batch show
+scrapefs projection batch undo
 
 scrapefs gc
 ```
@@ -153,6 +141,8 @@ Daemon:
 ```text
 scrapefsd
 ```
+
+Every automation-facing command supports machine-readable JSON output. `projection batch validate` and `projection batch apply` read UTF-8 JSON through `--file <path>` and read stdin through `--file -`. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically.
 
 ## 8. First-Version Configuration
 
@@ -194,21 +184,25 @@ socket_path = "/run/scrapefs/scrapefs.sock"
 socket_mode = 0o660
 administrator_uid = 0
 
-[agent]
-max_text_file_size = "4MiB"
-max_binary_file_size = "32MiB"
-max_session_total_size = "256MiB"
-max_upload_duration = "120s"
-
 [gc]
 orphan_grace_period = "24h"
 ```
 
 `storage.overlay_store_path` is the actual on-disk root for OverlayFile contents and is the object-store root. There is no second Overlay storage path.
 
-The first version does not configure an Agent UID. The Agent uses the daemon process's effective UID.
+The external Agent is not configured through the daemon. Its model, metadata providers, credentials, media tools, and skill configuration are managed externally.
 
-This process UID controls only the Agent worker's runtime identity. It does not determine ownership of Agent-created virtual OverlayFiles, which use the UID/GID of the user who confirmed `scrape apply`.
+The currently implemented early configuration parser still accepts these legacy fields:
+
+```toml
+[agent]
+max_text_file_size = "4MiB"
+max_binary_file_size = "32MiB"
+max_session_total_size = "256MiB"
+max_upload_duration = "120s"
+```
+
+These fields do not configure the external Agent and are not part of the target v1 Agent-skill workflow. A follow-up implementation task will decide whether to remove them or repurpose them as general Overlay limits; current parsing and validation remain unchanged until then.
 
 Fixed behavior:
 
@@ -227,7 +221,7 @@ These are not configuration fields.
 - sizes use binary-unit strings; the first version supports `KiB`, `MiB`, and `GiB`;
 - paths are strings.
 
-Parsing rejects unknown fields, out-of-range UIDs, invalid modes, and non-positive size quotas. A per-file quota must not exceed `max_session_total_size`. FUSE TTLs are non-negative; `max_upload_duration` and `orphan_grace_period` are positive. `negative_timeout` may be `0s`.
+Parsing rejects unknown fields, out-of-range UIDs, invalid modes, and non-positive size quotas. For the legacy `[agent]` fields, a per-file quota does not exceed `max_session_total_size` and `max_upload_duration` is positive. FUSE TTLs are non-negative; `orphan_grace_period` is positive. `negative_timeout` may be `0s`.
 
 ### 8.4 Path Constraints
 
