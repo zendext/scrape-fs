@@ -32,7 +32,16 @@ git worktree add .worktrees/issue-<number>-<short-description> \
 ```
 
 - Record the verification performed and the documentation impact in the pull request.
-- Merge with squash and request remote branch deletion:
+
+## Review and Merge Authorization
+
+- Open pull requests as drafts by default unless the user explicitly requests ready-for-review status.
+- After publishing a pull request, report its URL and status, then stop and wait for review or explicit merge instructions.
+- Never merge a pull request unless the user explicitly authorizes merging that specific pull request.
+- Requests to implement, land, complete, or otherwise handle an Issue do not imply authorization to merge its pull request.
+- A mergeable state, absent required checks, successful local verification, or self-review does not replace explicit user authorization.
+- Do not mark a draft pull request ready for review unless the user explicitly requests it.
+- When merge is explicitly authorized, use squash merge and request remote branch deletion:
 
 ```bash
 gh pr merge <number> --squash --delete-branch \
@@ -41,7 +50,7 @@ gh pr merge <number> --squash --delete-branch \
 
 ## Post-merge Cleanup
 
-After merging a pull request:
+After an explicitly authorized pull request merge:
 
 1. Confirm the pull request is merged with `gh pr view <number> --json state,mergedAt`.
 2. If a task worktree was used, confirm it has no uncommitted changes, then remove it with `git worktree remove <path>`.
