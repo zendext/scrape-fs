@@ -3,7 +3,9 @@
 ## GitHub Workflow
 
 - Use the authenticated GitHub CLI (`gh`) for GitHub operations.
-- Track each independently deliverable task with one Issue, one branch, and one pull request.
+- Track each independently deliverable code, configuration, or behavior task with one Issue, one branch, and one pull request.
+- Pure documentation-only changes do not require an Issue, task branch, worktree, or pull request. Update the latest `main`, verify the documentation, commit directly to `main`, and push `main`.
+- A task that combines documentation with code, configuration, generated artifacts, or behavior changes follows the Issue, branch, worktree, and pull-request workflow.
 - Write Issues in English.
 - Keep the pull request within the linked Issue's scope and use `Closes #<number>` in its body.
 - Create a separate Issue for unrelated work discovered during implementation.
@@ -11,7 +13,7 @@
 ## Worktrees
 
 - Implement code, configuration, and behavior changes in a dedicated Git worktree.
-- Documentation-only changes may be implemented without creating a separate worktree.
+- Implement pure documentation-only changes directly in the primary `main` worktree.
 - Store task worktrees under the repository's `.worktrees/` directory.
 - Name task branches `issue-<number>-<short-description>`.
 - Create a task worktree from the current remote `main` branch:
@@ -32,7 +34,17 @@ git worktree add .worktrees/issue-<number>-<short-description> \
 ```
 
 - Record the verification performed and the documentation impact in the pull request.
-- Merge with squash and request remote branch deletion:
+- For pure documentation-only changes, record the appropriate documentation verification in the direct commit workflow; no pull request is required.
+
+## Review and Merge Authorization
+
+- Open pull requests as drafts by default unless the user explicitly requests ready-for-review status.
+- After publishing a pull request, report its URL and status, then stop and wait for review or explicit merge instructions.
+- Never merge a pull request unless the user explicitly authorizes merging that specific pull request.
+- Requests to implement, land, complete, or otherwise handle an Issue do not imply authorization to merge its pull request.
+- A mergeable state, absent required checks, successful local verification, or self-review does not replace explicit user authorization.
+- Do not mark a draft pull request ready for review unless the user explicitly requests it.
+- When merge is explicitly authorized, use squash merge and request remote branch deletion:
 
 ```bash
 gh pr merge <number> --squash --delete-branch \
@@ -41,7 +53,7 @@ gh pr merge <number> --squash --delete-branch \
 
 ## Post-merge Cleanup
 
-After merging a pull request:
+After an explicitly authorized pull request merge:
 
 1. Confirm the pull request is merged with `gh pr view <number> --json state,mergedAt`.
 2. If a task worktree was used, confirm it has no uncommitted changes, then remove it with `git worktree remove <path>`.
