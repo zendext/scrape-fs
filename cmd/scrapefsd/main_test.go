@@ -511,7 +511,7 @@ func TestRunServesControlUntilContextCancellationAndClosesDatabase(t *testing.T)
 	}
 }
 
-func TestRunInvalidConfigCreatesNoRuntimeState(t *testing.T) {
+func TestRunLegacyAgentConfigCreatesNoRuntimeState(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.toml")
 	configText := `
@@ -521,10 +521,12 @@ overlay_store_path = "` + filepath.Join(tempDir, "objects") + `"
 
 [fuse]
 mountpoint = "` + filepath.Join(tempDir, "mount") + `"
-entry_timeout = "-1s"
 
 [control]
 socket_path = "` + filepath.Join(tempDir, "control.sock") + `"
+
+[agent]
+max_text_file_size = "4MiB"
 `
 	if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -537,8 +539,26 @@ socket_path = "` + filepath.Join(tempDir, "control.sock") + `"
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if exitCode := run([]string{"--config", configPath}, &stdout, &stderr); exitCode != 1 {
-		t.Fatalf("run exit code = %d, want 1; stderr=%q", exitCode, stderr.String())
+	databaseOpened := false
+	openDatabase := func(string) (databaseCloser, error) {
+		databaseOpened = true
+		return noopDatabase{}, nil
+	}
+	if exitCode := runWithDependencies(
+		[]string{"--config", configPath},
+		&stdout,
+		&stderr,
+		config.Load,
+		openDatabase,
+	); exitCode != 1 {
+		t.Fatalf("runWithDependencies exit code = %d, want 1; stderr=%q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "legacy [agent] table") ||
+		!strings.Contains(stderr.String(), "remove") {
+		t.Errorf("stderr = %q, want actionable legacy [agent] migration error", stderr.String())
+	}
+	if databaseOpened {
+		t.Fatal("legacy [agent] configuration opened the database")
 	}
 
 	after, err := os.ReadDir(tempDir)

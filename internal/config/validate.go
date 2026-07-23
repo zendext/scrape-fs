@@ -54,32 +54,9 @@ func (raw rawConfig) validate() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	maxUploadDuration, err := parseDuration("agent.max_upload_duration", raw.Agent.MaxUploadDuration, false)
-	if err != nil {
-		return Config{}, err
-	}
 	orphanGracePeriod, err := parseDuration("gc.orphan_grace_period", raw.GC.OrphanGracePeriod, false)
 	if err != nil {
 		return Config{}, err
-	}
-
-	maxTextFileSize, err := parseBinarySize("agent.max_text_file_size", raw.Agent.MaxTextFileSize)
-	if err != nil {
-		return Config{}, err
-	}
-	maxBinaryFileSize, err := parseBinarySize("agent.max_binary_file_size", raw.Agent.MaxBinaryFileSize)
-	if err != nil {
-		return Config{}, err
-	}
-	maxSessionTotalSize, err := parseBinarySize("agent.max_session_total_size", raw.Agent.MaxSessionTotalSize)
-	if err != nil {
-		return Config{}, err
-	}
-	if maxTextFileSize > maxSessionTotalSize {
-		return Config{}, fmt.Errorf("agent.max_text_file_size: must not exceed agent.max_session_total_size")
-	}
-	if maxBinaryFileSize > maxSessionTotalSize {
-		return Config{}, fmt.Errorf("agent.max_binary_file_size: must not exceed agent.max_session_total_size")
 	}
 
 	if raw.Control.AdministratorUID < 0 || raw.Control.AdministratorUID >= math.MaxUint32 {
@@ -107,12 +84,6 @@ func (raw rawConfig) validate() (Config, error) {
 			SocketPath:       raw.Control.SocketPath,
 			SocketMode:       fs.FileMode(raw.Control.SocketMode),
 			AdministratorUID: uint32(raw.Control.AdministratorUID),
-		},
-		Agent: Agent{
-			MaxTextFileSize:     maxTextFileSize,
-			MaxBinaryFileSize:   maxBinaryFileSize,
-			MaxSessionTotalSize: maxSessionTotalSize,
-			MaxUploadDuration:   maxUploadDuration,
 		},
 		GC: GC{
 			OrphanGracePeriod: orphanGracePeriod,
@@ -161,33 +132,4 @@ func parseDuration(field, value string, allowZero bool) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: must be %s", field, requirement)
 	}
 	return duration, nil
-}
-
-func parseBinarySize(field, value string) (uint64, error) {
-	trimmed := strings.TrimSpace(value)
-	units := []struct {
-		suffix     string
-		multiplier uint64
-	}{
-		{suffix: "GiB", multiplier: 1024 * 1024 * 1024},
-		{suffix: "MiB", multiplier: 1024 * 1024},
-		{suffix: "KiB", multiplier: 1024},
-	}
-
-	for _, unit := range units {
-		if !strings.HasSuffix(trimmed, unit.suffix) {
-			continue
-		}
-		numberText := strings.TrimSpace(strings.TrimSuffix(trimmed, unit.suffix))
-		number, err := strconv.ParseUint(numberText, 10, 64)
-		if err != nil || number == 0 {
-			return 0, fmt.Errorf("%s: must be a positive integer followed by KiB, MiB, or GiB", field)
-		}
-		if number > math.MaxUint64/unit.multiplier {
-			return 0, fmt.Errorf("%s: size %q overflows uint64", field, value)
-		}
-		return number * unit.multiplier, nil
-	}
-
-	return 0, fmt.Errorf("%s: must use KiB, MiB, or GiB", field)
 }

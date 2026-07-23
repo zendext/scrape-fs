@@ -44,18 +44,6 @@ func TestDecodeDefaults(t *testing.T) {
 	if got.Control.AdministratorUID != 0 {
 		t.Errorf("AdministratorUID = %d", got.Control.AdministratorUID)
 	}
-	if got.Agent.MaxTextFileSize != 4*1024*1024 {
-		t.Errorf("MaxTextFileSize = %d", got.Agent.MaxTextFileSize)
-	}
-	if got.Agent.MaxBinaryFileSize != 32*1024*1024 {
-		t.Errorf("MaxBinaryFileSize = %d", got.Agent.MaxBinaryFileSize)
-	}
-	if got.Agent.MaxSessionTotalSize != 256*1024*1024 {
-		t.Errorf("MaxSessionTotalSize = %d", got.Agent.MaxSessionTotalSize)
-	}
-	if got.Agent.MaxUploadDuration != 120*time.Second {
-		t.Errorf("MaxUploadDuration = %v", got.Agent.MaxUploadDuration)
-	}
 	if got.GC.OrphanGracePeriod != 24*time.Hour {
 		t.Errorf("OrphanGracePeriod = %v", got.GC.OrphanGracePeriod)
 	}
@@ -80,12 +68,6 @@ socket_path = "/srv/scrapefs-run/control.sock"
 socket_mode = 0o660
 administrator_uid = 1000
 
-[agent]
-max_text_file_size = "8 MiB"
-max_binary_file_size = "64MiB"
-max_session_total_size = "1GiB"
-max_upload_duration = "90s"
-
 [gc]
 orphan_grace_period = "48h"
 `
@@ -107,17 +89,35 @@ orphan_grace_period = "48h"
 	if got.Control.AdministratorUID != 1000 {
 		t.Errorf("AdministratorUID = %d", got.Control.AdministratorUID)
 	}
-	if got.Agent.MaxTextFileSize != 8*1024*1024 {
-		t.Errorf("MaxTextFileSize = %d", got.Agent.MaxTextFileSize)
-	}
-	if got.Agent.MaxSessionTotalSize != 1024*1024*1024 {
-		t.Errorf("MaxSessionTotalSize = %d", got.Agent.MaxSessionTotalSize)
-	}
-	if got.Agent.MaxUploadDuration != 90*time.Second {
-		t.Errorf("MaxUploadDuration = %v", got.Agent.MaxUploadDuration)
-	}
 	if got.GC.OrphanGracePeriod != 48*time.Hour {
 		t.Errorf("OrphanGracePeriod = %v", got.GC.OrphanGracePeriod)
+	}
+}
+
+func TestDecodeRejectsLegacyAgentTableWithMigrationMessage(t *testing.T) {
+	t.Parallel()
+
+	inputs := []string{
+		"[agent]\n",
+		`
+[agent]
+max_text_file_size = "4MiB"
+max_binary_file_size = "32MiB"
+max_session_total_size = "256MiB"
+max_upload_duration = "120s"
+`,
+	}
+
+	for _, input := range inputs {
+		_, err := Decode(strings.NewReader(input))
+		if err == nil {
+			t.Fatal("Decode legacy [agent] table succeeded, want error")
+		}
+		for _, want := range []string{"legacy [agent] table", "remove", "external Agent"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want substring %q", err, want)
+			}
+		}
 	}
 }
 
@@ -185,47 +185,9 @@ func TestDecodeRejectsInvalidConfiguration(t *testing.T) {
 			want:  "fuse.entry_timeout",
 		},
 		{
-			name:  "zero upload duration",
-			input: "[agent]\nmax_upload_duration = \"0s\"\n",
-			want:  "agent.max_upload_duration",
-		},
-		{
 			name:  "zero grace period",
 			input: "[gc]\norphan_grace_period = \"0s\"\n",
 			want:  "gc.orphan_grace_period",
-		},
-		{
-			name:  "zero size",
-			input: "[agent]\nmax_text_file_size = \"0MiB\"\n",
-			want:  "agent.max_text_file_size",
-		},
-		{
-			name:  "unsupported size unit",
-			input: "[agent]\nmax_text_file_size = \"4MB\"\n",
-			want:  "agent.max_text_file_size",
-		},
-		{
-			name: "text quota exceeds session quota",
-			input: `
-[agent]
-max_text_file_size = "16MiB"
-max_session_total_size = "8MiB"
-`,
-			want: "agent.max_text_file_size",
-		},
-		{
-			name: "binary quota exceeds session quota",
-			input: `
-[agent]
-max_binary_file_size = "16MiB"
-max_session_total_size = "8MiB"
-`,
-			want: "agent.max_binary_file_size",
-		},
-		{
-			name:  "size overflow",
-			input: "[agent]\nmax_text_file_size = \"" + "18446744073709551615GiB" + "\"\n",
-			want:  "agent.max_text_file_size",
 		},
 		{
 			name:  "relative path",
@@ -310,19 +272,6 @@ func TestLoadReportsMissingFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Errorf("error = %q, want path %q", err, path)
-	}
-}
-
-func TestDecodeRejectsSizeAboveUint64(t *testing.T) {
-	t.Parallel()
-
-	input := "[agent]\nmax_text_file_size = \"" + strings.Repeat("9", 30) + "GiB\"\n"
-	_, err := Decode(strings.NewReader(input))
-	if err == nil {
-		t.Fatal("Decode oversized value succeeded, want error")
-	}
-	if !strings.Contains(err.Error(), "agent.max_text_file_size") {
-		t.Errorf("error = %q", err)
 	}
 }
 

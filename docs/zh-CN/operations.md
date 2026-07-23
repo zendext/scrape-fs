@@ -202,17 +202,7 @@ orphan_grace_period = "24h"
 
 外部 Agent 不通过 daemon 配置。模型、metadata provider、凭据、媒体工具和 Skill 配置均由外部 Agent 自己管理。
 
-当前已实现的早期配置解析器仍兼容以下 legacy 字段：
-
-```toml
-[agent]
-max_text_file_size = "4MiB"
-max_binary_file_size = "32MiB"
-max_session_total_size = "256MiB"
-max_upload_duration = "120s"
-```
-
-这些字段不配置外部 Agent，也不属于目标 v1 Agent Skill 工作流。后续实现任务必须在删除或改为通用 Overlay 限制之间作出兼容性决定；在该任务完成前，当前解析和校验行为保持不变。
+legacy `[agent]` 表不属于 v1 daemon 配置，解析时必须作为未知配置拒绝。升级旧配置文件时，必须删除整个 `[agent]` 表。原 upload 和 session 限制不得解释为 Overlay quota；外部 Agent 的限制必须在 `scrapefsd` 之外配置。
 
 固定行为：
 
@@ -227,11 +217,10 @@ max_upload_duration = "120s"
 
 - UID 使用 `0` 至 `4294967294` 范围内的非负 TOML integer；`4294967295` 是 Linux ACL encoding 的保留值，文档示例使用十进制；
 - file mode 使用 TOML 八进制整数，例如 `0o660`，且只能包含 `0o001` 至 `0o777` 的权限位；`control.socket_mode` 必须包含 owner 和 group 读写位（`0o660`）；
-- duration 使用 Go duration 风格的字符串，例如 `"2s"`、`"120s"` 和 `"24h"`；
-- size 使用带二进制单位的字符串，第一版支持 `KiB`、`MiB` 和 `GiB`；
+- duration 使用 Go duration 风格的字符串，例如 `"2s"` 和 `"24h"`；
 - 路径使用字符串。
 
-解析必须拒绝未知字段、超出范围的 UID、无效 mode 和非正 size quota。对 legacy `[agent]` 字段，单文件 quota 不得大于 `max_session_total_size`，`max_upload_duration` 必须为正数。FUSE TTL 必须非负；`orphan_grace_period` 必须为正数。`negative_timeout` 可以为 `0s`。
+解析必须拒绝未知字段、超出范围的 UID 和无效 mode。FUSE TTL 必须非负；`orphan_grace_period` 必须为正数。`negative_timeout` 可以为 `0s`。
 
 ### 8.4 路径约束
 

@@ -205,17 +205,7 @@ orphan_grace_period = "24h"
 
 The external Agent is not configured through the daemon. Its model, metadata providers, credentials, media tools, and skill configuration are managed externally.
 
-The currently implemented early configuration parser still accepts these legacy fields:
-
-```toml
-[agent]
-max_text_file_size = "4MiB"
-max_binary_file_size = "32MiB"
-max_session_total_size = "256MiB"
-max_upload_duration = "120s"
-```
-
-These fields do not configure the external Agent and are not part of the target v1 Agent-skill workflow. A follow-up implementation task will decide whether to remove them or repurpose them as general Overlay limits; current parsing and validation remain unchanged until then.
+The legacy `[agent]` table is not part of the v1 daemon configuration and is rejected as unknown configuration. When upgrading an older configuration file, remove the entire `[agent]` table. Its former upload and session limits are not interpreted as Overlay quotas; configure any external Agent limits outside `scrapefsd`.
 
 Fixed behavior:
 
@@ -230,11 +220,10 @@ These are not configuration fields.
 
 - UIDs are non-negative TOML integers from `0` through `4294967294`; `4294967295` is reserved by Linux ACL encoding, and documentation examples use decimal;
 - file modes are TOML octal integers such as `0o660` and contain only permission bits from `0o001` through `0o777`; `control.socket_mode` must include owner and group read/write bits (`0o660`);
-- durations use Go-duration-style strings such as `"2s"`, `"120s"`, and `"24h"`;
-- sizes use binary-unit strings; the first version supports `KiB`, `MiB`, and `GiB`;
+- durations use Go-duration-style strings such as `"2s"` and `"24h"`;
 - paths are strings.
 
-Parsing rejects unknown fields, out-of-range UIDs, invalid modes, and non-positive size quotas. For the legacy `[agent]` fields, a per-file quota does not exceed `max_session_total_size` and `max_upload_duration` is positive. FUSE TTLs are non-negative; `orphan_grace_period` is positive. `negative_timeout` may be `0s`.
+Parsing rejects unknown fields, out-of-range UIDs, and invalid modes. FUSE TTLs are non-negative; `orphan_grace_period` is positive. `negative_timeout` may be `0s`.
 
 ### 8.4 Path Constraints
 
