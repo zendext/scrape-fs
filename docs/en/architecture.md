@@ -55,7 +55,7 @@ The control protocol uses the configured Unix socket. Default:
 /run/scrapefs/scrapefs.sock
 ```
 
-The first version may use HTTP over Unix socket, JSON-RPC, or another small local protocol.
+The implemented Projection Batch control protocol uses one strict JSON request and one JSON response per Unix-socket connection. The daemon obtains caller UID/GID from `SO_PEERCRED`; client-supplied identity is not trusted. The CLI can override the default endpoint with `--socket`.
 
 ## 3. SQLite
 
@@ -84,7 +84,7 @@ SQLite's own locking and transaction semantics protect database consistency. The
 
 Persistent internal identities use SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` values and Go `int64`, so deleted node IDs are not reused. Persisted timestamps use UTC Unix nanoseconds in SQLite `INTEGER` columns.
 
-The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. `scrapes` is a released legacy storage name. A later Projection Batch migration may extend it for applied-batch provenance without rewriting a released migration.
+The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. `scrapes` is a released legacy storage name. Schema migration 3 extends it for applied-batch provenance without rewriting the released migration and adds `projection_batch_entries` for ordered source identity and target history.
 
 The schema uses declarative local integrity only: `STRICT` tables, primary keys, `NOT NULL`, row-local `CHECK` constraints, foreign keys, and unique indexes. SQLite triggers do not implement namespace business rules, lifecycle policy, namespace-version policy, or operation-log policy.
 

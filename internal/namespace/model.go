@@ -160,3 +160,61 @@ type Node struct {
 	CreatedAt        int64
 	UpdatedAt        int64
 }
+
+type ProjectionBatchStatus string
+
+const (
+	ProjectionBatchApplied ProjectionBatchStatus = "applied"
+	ProjectionBatchUndone  ProjectionBatchStatus = "undone"
+)
+
+type ProjectionBatch struct {
+	ID             int64
+	LibraryID      int64
+	LibraryName    string
+	LibraryRootID  int64
+	ProfileName    string
+	ProfileVersion int64
+	Digest         string
+	Status         ProjectionBatchStatus
+	AppliedByUID   uint32
+	AppliedByGID   uint32
+	AppliedAt      int64
+	UndoneByUID    *uint32
+	UndoneByGID    *uint32
+	UndoneAt       *int64
+}
+
+type ProjectionBatchEntry struct {
+	Position         int64
+	Source           ProjectionSource
+	Target           string
+	ProjectionNodeID *int64
+}
+
+type ProjectionBatchOperation struct {
+	ID               int64
+	Name             string
+	Actor            Actor
+	NamespaceVersion int64
+	Details          OperationDetails
+	CreatedAt        int64
+}
+
+type CreateProjectionBatch struct {
+	LibraryID      int64
+	ProfileName    string
+	ProfileVersion int64
+	Digest         string
+	AppliedByUID   uint32
+	AppliedByGID   uint32
+	AppliedAt      int64
+}
+
+type CreateProjectionBatchEntry struct {
+	BatchID          int64
+	Position         int64
+	Source           ProjectionSource
+	Target           string
+	ProjectionNodeID int64
+}

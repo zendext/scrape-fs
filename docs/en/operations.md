@@ -142,7 +142,7 @@ Daemon:
 scrapefsd
 ```
 
-Every automation-facing command supports machine-readable JSON output. `projection batch validate` and `projection batch apply` read UTF-8 JSON through `--file <path>` and read stdin through `--file -`. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically.
+Every implemented Projection Batch command writes machine-readable JSON. `projection batch validate` and `projection batch apply` read UTF-8 JSON through `--file <path>` and read stdin through `--file -`. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically. The CLI connects to `/run/scrapefs/scrapefs.sock` by default and accepts global `--socket <path>` for a configured override.
 
 ## 8. First-Version Configuration
 

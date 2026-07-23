@@ -198,9 +198,9 @@ applied
 undone
 ```
 
-The foundational namespace migration already released the names `scrapes`, `nodes.origin_scrape_id`, and `operation_log.scrape_id`. The first version may extend those legacy storage names for batch provenance instead of rewriting a released migration. They are internal storage names and are not part of the CLI or JSON schema.
+The foundational namespace migration already released the names `scrapes`, `nodes.origin_scrape_id`, and `operation_log.scrape_id`. Schema migration 3 extends those legacy storage names for batch provenance instead of rewriting the released migration. They are internal storage names and are not part of the CLI or JSON schema.
 
-A batch does not store external Agent prompts, conversations, metadata responses, or unapplied JSON. ProjectionFiles store source identity, and the operation log stores batch path snapshots.
+A batch does not store external Agent prompts, conversations, metadata responses, or unapplied JSON. `projection_batch_entries` stores ordered source identity and target history so `show` remains complete after undo, while the operation log stores apply and undo path snapshots.
 
 ## 7. Show, List, and Undo
 
