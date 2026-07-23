@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -172,13 +173,13 @@ func TestServeRejectsUnauthorizedRequestBeforeDispatch(t *testing.T) {
 			},
 		)
 	}()
-	waitForSocket(t, socketPath)
 	defer func() {
 		cancel()
 		if err := <-serverDone; err != nil {
 			t.Errorf("serveWithOptions: %v", err)
 		}
 	}()
+	waitForSocket(t, socketPath)
 
 	_, err := NewClient(socketPath).List(context.Background())
 	var remote *RemoteError
@@ -238,22 +239,28 @@ func TestServeAllowsControlGroupRequest(t *testing.T) {
 	}
 }
 
-func TestServeSetsSocketOwnerGroupAndMode(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "control.sock")
+func TestServeSetsSocketMetadataAndRoleAccessACLs(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatalf("Chmod parent: %v", err)
+	}
+	socketPath := filepath.Join(parent, "control.sock")
+	administratorUID := differentUint32(uint32(os.Geteuid()))
+	controlGroupID := uint32(os.Getegid())
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
 	go func() {
 		serverDone <- serveWithOptions(
 			ctx,
 			socketPath,
-			0o640,
+			0o660,
 			staticBatchService{},
 			serverOptions{
 				limits: defaultServerLimits(),
 				security: serverSecurity{
 					daemonUID:        uint32(os.Geteuid()),
-					administratorUID: uint32(os.Geteuid()),
-					controlGroupID:   uint32(os.Getegid()),
+					administratorUID: administratorUID,
+					controlGroupID:   controlGroupID,
 				},
 				readPeerIdentity: readPeerIdentity,
 			},
@@ -275,17 +282,163 @@ func TestServeSetsSocketOwnerGroupAndMode(t *testing.T) {
 	if !ok {
 		t.Fatalf("socket stat type = %T, want *syscall.Stat_t", info.Sys())
 	}
-	if stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) {
+	if stat.Uid != uint32(os.Geteuid()) || stat.Gid != controlGroupID {
 		t.Errorf(
 			"socket ownership = %d:%d, want %d:%d",
 			stat.Uid,
 			stat.Gid,
 			os.Geteuid(),
-			os.Getegid(),
+			controlGroupID,
 		)
 	}
-	if info.Mode().Perm() != fs.FileMode(0o640) {
-		t.Errorf("socket mode = %#o, want 0640", info.Mode().Perm())
+	if info.Mode().Perm() != fs.FileMode(0o660) {
+		t.Errorf("socket mode = %#o, want 0660", info.Mode().Perm())
+	}
+
+	socketACL, err := readAccessACL(socketPath)
+	if err != nil {
+		t.Fatalf("read socket ACL: %v", err)
+	}
+	requireACLEntry(t, socketACL, aclUser, administratorUID, aclRead|aclWrite)
+
+	parentACL, err := readAccessACL(parent)
+	if err != nil {
+		t.Fatalf("read parent ACL: %v", err)
+	}
+	requireACLEntry(t, parentACL, aclUser, administratorUID, aclExecute)
+	requireACLEntry(t, parentACL, aclGroup, controlGroupID, aclExecute)
+
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("Stat parent: %v", err)
+	}
+	if parentInfo.Mode().Perm()&0o001 != 0 {
+		t.Errorf("parent mode = %#o, unexpectedly grants other traversal", parentInfo.Mode().Perm())
+	}
+}
+
+func TestConfiguredAdministratorConnectsThroughACL(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root or a root-mapped user namespace")
+	}
+
+	const administratorUID uint32 = 1
+	const controlGroupID uint32 = 2
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatalf("Chmod parent: %v", err)
+	}
+	socketPath := filepath.Join(parent, "control.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- serveWithOptions(
+			ctx,
+			socketPath,
+			0o660,
+			staticBatchService{},
+			serverOptions{
+				limits: defaultServerLimits(),
+				security: serverSecurity{
+					daemonUID:        uint32(os.Geteuid()),
+					administratorUID: administratorUID,
+					controlGroupID:   controlGroupID,
+				},
+				readPeerIdentity: readPeerIdentity,
+			},
+		)
+	}()
+	defer func() {
+		cancel()
+		if err := <-serverDone; err != nil {
+			t.Errorf("serveWithOptions: %v", err)
+		}
+	}()
+	waitForSocket(t, socketPath)
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable: %v", err)
+	}
+	executableData, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatalf("ReadFile executable: %v", err)
+	}
+	clientDir := t.TempDir()
+	if err := os.Chmod(clientDir, 0o755); err != nil {
+		t.Fatalf("Chmod client directory: %v", err)
+	}
+	clientExecutable := filepath.Join(clientDir, "control-acl-client")
+	if err := os.WriteFile(clientExecutable, executableData, 0o755); err != nil {
+		t.Fatalf("WriteFile client executable: %v", err)
+	}
+
+	command := exec.Command(
+		clientExecutable,
+		"-test.run=^TestConfiguredAdministratorACLClient$",
+	)
+	command.Env = append(os.Environ(), "SCRAPEFS_CONTROL_ACL_TEST_SOCKET="+socketPath)
+	command.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    administratorUID,
+			Gid:    administratorUID,
+			Groups: []uint32{administratorUID},
+		},
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("administrator client: %v\n%s", err, output)
+	}
+}
+
+func TestConfiguredAdministratorACLClient(t *testing.T) {
+	socketPath := os.Getenv("SCRAPEFS_CONTROL_ACL_TEST_SOCKET")
+	if socketPath == "" {
+		t.Skip("helper process")
+	}
+	if _, err := NewClient(socketPath).List(context.Background()); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+}
+
+func TestServeSkipsParentACLWhenModeAlreadyAllowsTraversal(t *testing.T) {
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatalf("Chmod parent: %v", err)
+	}
+	socketPath := filepath.Join(parent, "control.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- serveWithOptions(
+			ctx,
+			socketPath,
+			0o660,
+			staticBatchService{},
+			serverOptions{
+				limits: defaultServerLimits(),
+				security: serverSecurity{
+					daemonUID:        uint32(os.Geteuid()),
+					administratorUID: differentUint32(uint32(os.Geteuid())),
+					controlGroupID:   uint32(os.Getegid()),
+				},
+				readPeerIdentity: readPeerIdentity,
+			},
+		)
+	}()
+	waitForSocket(t, socketPath)
+	defer func() {
+		cancel()
+		if err := <-serverDone; err != nil {
+			t.Errorf("serveWithOptions: %v", err)
+		}
+	}()
+
+	parentACL, err := readAccessACL(parent)
+	if err != nil {
+		t.Fatalf("read parent ACL: %v", err)
+	}
+	if len(parentACL) != 0 {
+		t.Errorf("parent ACL = %#v, want no ACL when mode already allows traversal", parentACL)
 	}
 }
 
@@ -351,6 +504,29 @@ func TestPrepareSocketPathRejectsUnsafeOrUnexpectedExistingPaths(t *testing.T) {
 		}
 	})
 
+	t.Run("non-sticky writable ancestor", func(t *testing.T) {
+		root := t.TempDir()
+		ancestor := filepath.Join(root, "unsafe")
+		if err := os.Mkdir(ancestor, 0o770); err != nil {
+			t.Fatalf("Mkdir ancestor: %v", err)
+		}
+		if err := os.Chmod(ancestor, 0o770); err != nil {
+			t.Fatalf("Chmod ancestor: %v", err)
+		}
+		parent := filepath.Join(ancestor, "run")
+		if err := os.Mkdir(parent, 0o700); err != nil {
+			t.Fatalf("Mkdir parent: %v", err)
+		}
+
+		prepared, err := prepareSocketPath(filepath.Join(parent, "control.sock"), security)
+		if prepared != nil {
+			prepared.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), "writable ancestor") {
+			t.Fatalf("prepareSocketPath error = %v, want writable-ancestor error", err)
+		}
+	})
+
 	t.Run("unexpected stale socket group", func(t *testing.T) {
 		socketPath := filepath.Join(t.TempDir(), "control.sock")
 		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
@@ -398,6 +574,69 @@ func TestPrepareSocketPathRejectsUnsafeOrUnexpectedExistingPaths(t *testing.T) {
 	})
 }
 
+func TestPreparedSocketPathAnchorsBindVerificationAndCleanup(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "run")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatalf("Mkdir parent: %v", err)
+	}
+	socketPath := filepath.Join(parent, "control.sock")
+	prepared, err := prepareSocketPath(socketPath, serverSecurity{
+		daemonUID:      uint32(os.Geteuid()),
+		controlGroupID: uint32(os.Getegid()),
+	})
+	if err != nil {
+		t.Fatalf("prepareSocketPath: %v", err)
+	}
+	defer prepared.Close()
+
+	validatedParent := parent + ".validated"
+	if err := os.Rename(parent, validatedParent); err != nil {
+		t.Fatalf("Rename validated parent: %v", err)
+	}
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatalf("Mkdir replacement parent: %v", err)
+	}
+
+	listener, err := prepared.listen()
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	anchoredPath := filepath.Join(validatedParent, "control.sock")
+	if _, err := os.Lstat(anchoredPath); err != nil {
+		listener.Close()
+		t.Fatalf("anchored socket was not created in retained parent: %v", err)
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		listener.Close()
+		t.Fatalf("configured replacement path stat error = %v, want not exist", err)
+	}
+
+	replacement, err := net.ListenUnix(
+		"unix",
+		&net.UnixAddr{Name: socketPath, Net: "unix"},
+	)
+	if err != nil {
+		listener.Close()
+		t.Fatalf("ListenUnix replacement: %v", err)
+	}
+	defer replacement.Close()
+	if err := prepared.verifyConfiguredSocket(); err == nil {
+		listener.Close()
+		t.Fatal("verifyConfiguredSocket succeeded after parent replacement")
+	}
+
+	if err := listener.Close(); err != nil {
+		t.Fatalf("Close anchored listener: %v", err)
+	}
+	if _, err := os.Lstat(anchoredPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("anchored socket stat error = %v, want not exist", err)
+	}
+	if info, err := os.Lstat(socketPath); err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("replacement socket was removed or changed: info=%v err=%v", info, err)
+	}
+}
+
 func TestResolveGroupIDRejectsInvalidLookupResults(t *testing.T) {
 	t.Parallel()
 
@@ -421,6 +660,12 @@ func TestResolveGroupIDRejectsInvalidLookupResults(t *testing.T) {
 			name: "overflow gid",
 			lookup: func(string) (string, error) {
 				return strconv.FormatUint(uint64(^uint32(0))+1, 10), nil
+			},
+		},
+		{
+			name: "ACL undefined gid",
+			lookup: func(string) (string, error) {
+				return strconv.FormatUint(uint64(^uint32(0)), 10), nil
 			},
 		},
 	}
@@ -514,4 +759,30 @@ func differentUint32(value uint32) uint32 {
 		return value - 1
 	}
 	return value + 1
+}
+
+func requireACLEntry(
+	t *testing.T,
+	entries []aclEntry,
+	tag uint16,
+	id uint32,
+	permissions uint16,
+) {
+	t.Helper()
+
+	for _, entry := range entries {
+		if entry.Tag == tag && entry.ID == id {
+			if entry.Permissions&permissions != permissions {
+				t.Errorf(
+					"ACL entry tag=%d id=%d permissions=%#o, want at least %#o",
+					tag,
+					id,
+					entry.Permissions,
+					permissions,
+				)
+			}
+			return
+		}
+	}
+	t.Errorf("ACL entry tag=%d id=%d not found in %#v", tag, id, entries)
 }

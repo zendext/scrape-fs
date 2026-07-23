@@ -280,14 +280,18 @@ func serveWithOptions(
 	}
 	defer prepared.Close()
 
-	address := &net.UnixAddr{Name: socketPath, Net: "unix"}
-	listener, err := net.ListenUnix("unix", address)
+	listener, err := prepared.listen()
 	if err != nil {
-		return fmt.Errorf("listen on ScrapeFS control socket %q: %w", socketPath, err)
+		return err
 	}
-	listener.SetUnlinkOnClose(true)
 	defer listener.Close()
 	if err := prepared.setMetadata(mode); err != nil {
+		return err
+	}
+	if err := prepared.grantRoleAccess(mode, options.security); err != nil {
+		return err
+	}
+	if err := prepared.verifyConfiguredSocket(); err != nil {
 		return err
 	}
 

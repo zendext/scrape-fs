@@ -24,7 +24,9 @@ The daemon resolves the fixed `scrapefs-control` group when the control server s
 
 The daemon obtains the caller's effective UID/GID through `SO_PEERCRED` and supplementary groups through `SO_PEERGROUPS`. Client-supplied identity is ignored. Root and `control.administrator_uid` may use administrator and control-user commands. Other callers must have the `scrapefs-control` GID as an effective or supplementary group for Projection, Projection Batch, status, and doctor commands. Unauthorized requests return the stable `PermissionDenied` error before the business service is invoked.
 
-The socket is owned by the daemon effective UID and the `scrapefs-control` GID. Its parent directory must be daemon-owned, must not be writable by group or other, and must be opened without following symbolic links. A stale path is removed only when it is a socket with the expected UID/GID; other file types, symbolic links, and unexpected ownership fail closed.
+The socket is owned by the daemon effective UID and the `scrapefs-control` GID. `control.socket_mode` must grant read and write permission to both owner and group; the default remains `0660`. When ordinary mode bits do not already provide access, a configured non-root administrator that is not the daemon UID receives a named user ACL with read/write permission on the socket, and the daemon-owned parent receives named traverse ACL entries for that administrator and `scrapefs-control`. A parent initially using `0700` therefore does not block authorized callers. Existing unrelated parent ACL entries and their effective permissions are retained. A filesystem that cannot persist a required POSIX access ACL fails startup rather than silently making an authorized role unreachable.
+
+The parent and every ancestor are opened without following symbolic links. Each ancestor must be root- or daemon-owned; non-sticky group/other-writable ancestors are rejected. The final parent must be daemon-owned and not group/other writable. A stale path is removed only when it is a socket with the expected UID/GID. Bind and automatic unlink use the retained parent descriptor through `/proc/self/fd`, so procfs must be mounted at `/proc`. Startup verifies that the configured pathname still resolves to the bound socket before accepting requests.
 
 Members of `scrapefs-control` are trusted source-path selectors. The daemon service account should have read access only to intended media directories so control users cannot use it to read unrelated sensitive files. To set the socket group without root privileges, the daemon service account must itself have permission to use the `scrapefs-control` GID.
 
@@ -219,8 +221,8 @@ These are not configuration fields.
 
 ### 8.3 Value Representation
 
-- UIDs are non-negative TOML integers in the `uint32` range; documentation examples use decimal;
-- file modes are TOML octal integers such as `0o660` and contain only permission bits from `0o001` through `0o777`;
+- UIDs are non-negative TOML integers from `0` through `4294967294`; `4294967295` is reserved by Linux ACL encoding, and documentation examples use decimal;
+- file modes are TOML octal integers such as `0o660` and contain only permission bits from `0o001` through `0o777`; `control.socket_mode` must include owner and group read/write bits (`0o660`);
 - durations use Go-duration-style strings such as `"2s"`, `"120s"`, and `"24h"`;
 - sizes use binary-unit strings; the first version supports `KiB`, `MiB`, and `GiB`;
 - paths are strings.
