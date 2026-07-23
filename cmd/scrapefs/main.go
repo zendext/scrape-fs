@@ -240,6 +240,8 @@ func errorCode(err error) string {
 		return coded.ErrorCode()
 	}
 	switch {
+	case errors.Is(err, control.ErrPermissionDenied):
+		return "PermissionDenied"
 	case errors.Is(err, projectionbatch.ErrInvalidBatch):
 		return "InvalidBatch"
 	case errors.Is(err, projectionbatch.ErrDigestMismatch):

@@ -53,7 +53,7 @@ NFO、海报等 artifact 在 Batch applied 后通过普通 FUSE 文件操作创�
 /run/scrapefs/scrapefs.sock
 ```
 
-已实现的 Projection Batch 控制协议在每个 Unix socket 连接中使用一条严格 JSON request 和一条 JSON response。daemon 通过 `SO_PEERCRED` 获取调用者 UID/GID，不信任 client 提交的身份。CLI 可以使用 `--socket` 覆盖默认 endpoint。
+已实现的 Projection Batch 控制协议在每个 Unix socket 连接中使用一条严格 JSON request 和一条 JSON response。daemon 通过 `SO_PEERCRED` 获取调用者的有效 UID/GID，通过 `SO_PEERGROUPS` 获取 supplementary groups，不信任 client 提交的身份。root 和配置的管理员 UID 同时满足管理员与控制用户策略；其他调用者执行控制用户命令时，其有效或 supplementary group 必须包含固定的 `scrapefs-control` GID。CLI 可以使用 `--socket` 覆盖默认 endpoint。
 
 控制服务最多接受 32 个 active connection。request 上限为 16 MiB，必须在 5 秒内接收完成；response 必须在 30 秒内写完。可重试的 accept 资源错误不会导致 daemon 退出。
 

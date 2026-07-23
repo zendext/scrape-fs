@@ -18,9 +18,13 @@ group: scrapefs-control
 mode: 0660
 ```
 
-daemon 必须通过 Unix peer credentials 获取调用者身份。
+控制服务启动时，daemon 必须解析固定的 `scrapefs-control` group。group 不存在或 GID 不是有效数值时，不得创建 socket。
 
-`scrapefs-control` 成员是可信源路径选择者。daemon 服务账号应只拥有预期媒体目录的读取权限，避免控制用户借 daemon 读取其他敏感文件。
+daemon 通过 `SO_PEERCRED` 获取调用者的有效 UID/GID，通过 `SO_PEERGROUPS` 获取 supplementary groups，并忽略 client 提交的身份。root 和 `control.administrator_uid` 可以执行管理员与控制用户命令；其他调用者执行 Projection、Projection Batch、status 和 doctor 命令时，其有效或 supplementary group 必须包含 `scrapefs-control` GID。未授权请求必须在调用业务服务前返回稳定的 `PermissionDenied` 错误。
+
+socket owner 使用 daemon effective UID，group 使用 `scrapefs-control` GID。socket 父目录必须由 daemon 所有、不得允许 group 或 other 写入，并且必须在不跟随 symlink 的情况下打开。只有类型为 socket 且 UID/GID 符合预期的 stale path 才能删除；其他文件类型、symlink 或异常 ownership 必须 fail closed。
+
+`scrapefs-control` 成员是可信源路径选择者。daemon 服务账号应只拥有预期媒体目录的读取权限，避免控制用户借 daemon 读取其他敏感文件。daemon 非 root 运行时，服务账号自身必须有权使用 `scrapefs-control` GID，才能设置 socket group。
 
 外部 Agent Skill 以调用它的用户身份运行。它没有 daemon-side session token 或专用权限，只能使用该用户已有的宿主文件系统、控制 CLI 和 FUSE 权限。远程或不可信 Agent 的进程隔离、凭据和网络访问由启动它的用户负责，不属于 ScrapeFS 权限模型。
 

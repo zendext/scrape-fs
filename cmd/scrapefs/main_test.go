@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zendext/scrape-fs/internal/control"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
 )
@@ -195,6 +196,14 @@ func TestRunProjectionBatchCommandsWriteMachineReadableErrors(t *testing.T) {
 	}
 	if response.Schema != projectionbatch.ErrorSchema || response.Code != "AlreadyUndone" {
 		t.Errorf("error response = %#v", response)
+	}
+}
+
+func TestErrorCodeReturnsPermissionDenied(t *testing.T) {
+	t.Parallel()
+
+	if got := errorCode(control.ErrPermissionDenied); got != "PermissionDenied" {
+		t.Errorf("errorCode = %q, want PermissionDenied", got)
 	}
 }
 

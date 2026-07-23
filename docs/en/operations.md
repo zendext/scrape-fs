@@ -20,9 +20,13 @@ group: scrapefs-control
 mode: 0660
 ```
 
-The daemon obtains caller identity through Unix peer credentials.
+The daemon resolves the fixed `scrapefs-control` group when the control server starts. A missing group or invalid numeric GID prevents the socket from being created.
 
-Members of `scrapefs-control` are trusted source-path selectors. The daemon service account should have read access only to intended media directories so control users cannot use it to read unrelated sensitive files.
+The daemon obtains the caller's effective UID/GID through `SO_PEERCRED` and supplementary groups through `SO_PEERGROUPS`. Client-supplied identity is ignored. Root and `control.administrator_uid` may use administrator and control-user commands. Other callers must have the `scrapefs-control` GID as an effective or supplementary group for Projection, Projection Batch, status, and doctor commands. Unauthorized requests return the stable `PermissionDenied` error before the business service is invoked.
+
+The socket is owned by the daemon effective UID and the `scrapefs-control` GID. Its parent directory must be daemon-owned, must not be writable by group or other, and must be opened without following symbolic links. A stale path is removed only when it is a socket with the expected UID/GID; other file types, symbolic links, and unexpected ownership fail closed.
+
+Members of `scrapefs-control` are trusted source-path selectors. The daemon service account should have read access only to intended media directories so control users cannot use it to read unrelated sensitive files. To set the socket group without root privileges, the daemon service account must itself have permission to use the `scrapefs-control` GID.
 
 An external Agent skill runs with the identity of the user that invokes it. It has no daemon-side session token or dedicated permission and can use only that user's existing host-filesystem, control CLI, and FUSE access. The invoking user owns process isolation, credentials, and network access for a remote or untrusted Agent; those concerns are outside the ScrapeFS authorization model.
 
