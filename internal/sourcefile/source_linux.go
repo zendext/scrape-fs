@@ -17,6 +17,12 @@ const requiredResolveFlags = unix.RESOLVE_BENEATH |
 // ErrOpenat2Unavailable indicates that secure source opening cannot be provided.
 var ErrOpenat2Unavailable = errors.New("secure source opening requires openat2")
 
+// ErrUnsafePath indicates that the source path cannot be opened safely.
+var ErrUnsafePath = errors.New("unsafe source path")
+
+// ErrNotRegular indicates that the source is not a regular file.
+var ErrNotRegular = errors.New("source is not a regular file")
+
 // Identity contains the fields used to detect a changed source file.
 type Identity struct {
 	DeviceID int64
@@ -95,7 +101,7 @@ func openWithOpenat2(path string, openat2 openat2Func) (*File, error) {
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, errors.Join(
-			fmt.Errorf("source path %q must refer to a regular file", normalized),
+			fmt.Errorf("%w: %q", ErrNotRegular, normalized),
 			unix.Close(fd),
 		)
 	}
@@ -137,14 +143,18 @@ func openWithOpenat2(path string, openat2 openat2Func) (*File, error) {
 
 func normalizePath(path string) (string, string, error) {
 	if !filepath.IsAbs(path) {
-		return "", "", fmt.Errorf("source path %q must be absolute", path)
+		return "", "", fmt.Errorf("%w: path %q must be absolute", ErrUnsafePath, path)
 	}
 	if strings.IndexByte(path, 0) >= 0 {
-		return "", "", fmt.Errorf("source path contains NUL")
+		return "", "", fmt.Errorf("%w: path contains NUL", ErrUnsafePath)
 	}
 	for _, component := range strings.Split(path, string(filepath.Separator)) {
 		if component == ".." {
-			return "", "", fmt.Errorf("source path %q must not contain '..'", path)
+			return "", "", fmt.Errorf(
+				"%w: path %q must not contain '..'",
+				ErrUnsafePath,
+				path,
+			)
 		}
 	}
 
@@ -157,6 +167,12 @@ func normalizePath(path string) (string, string, error) {
 }
 
 func openError(path string, err error) error {
+	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EXDEV) {
+		return fmt.Errorf("%w: open %q: %v", ErrUnsafePath, path, err)
+	}
+	if errors.Is(err, unix.ENXIO) {
+		return fmt.Errorf("%w: %q: %w", ErrNotRegular, path, err)
+	}
 	if errors.Is(err, unix.ENOSYS) ||
 		errors.Is(err, unix.EINVAL) ||
 		errors.Is(err, unix.EPERM) {

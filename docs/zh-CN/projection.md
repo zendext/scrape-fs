@@ -29,6 +29,8 @@ scrapefs projection add \
 
 通用校验必须在命名空间修改前拒绝绝对路径和词法上未规范化的路径，随后再执行 Profile 特定的命名与路径安全检查。
 
+内置 `jellyfin@1` 和 `plex@1` Profile 均拒绝 Unicode 控制字符。`jellyfin@1` 还拒绝 Jellyfin 保留的 `<`、`>`、`:`、`"`、`\`、`|`、`?` 和 `*` 字符；`/` 已由通用组件校验拒绝。播放器命名建议不属于硬路径安全错误。
+
 `projection add` 在一个 SQLite 事务中：
 
 1. 校验源文件。

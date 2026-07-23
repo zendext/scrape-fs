@@ -3,6 +3,7 @@ package sourcefile
 import (
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -105,6 +106,9 @@ func TestOpenRejectsUnsafePaths(t *testing.T) {
 			if err == nil {
 				t.Fatal("Open succeeded")
 			}
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Errorf("Open error = %v, want ErrUnsafePath", err)
+			}
 			if !strings.Contains(err.Error(), test.errorDetail) {
 				t.Errorf("Open error = %q, want detail %q", err, test.errorDetail)
 			}
@@ -144,6 +148,9 @@ func TestOpenRejectsSymlinks(t *testing.T) {
 			if err == nil {
 				t.Fatal("Open succeeded")
 			}
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Errorf("Open error = %v, want ErrUnsafePath", err)
+			}
 		})
 	}
 }
@@ -172,6 +179,9 @@ func TestOpenRejectsMagicLinks(t *testing.T) {
 	if err == nil {
 		t.Fatal("Open succeeded")
 	}
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Errorf("Open error = %v, want ErrUnsafePath", err)
+	}
 }
 
 func TestOpenRejectsNonRegularFiles(t *testing.T) {
@@ -179,9 +189,20 @@ func TestOpenRejectsNonRegularFiles(t *testing.T) {
 	if err := unix.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("Mkfifo: %v", err)
 	}
+	socket := filepath.Join(t.TempDir(), "source.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("Listen Unix socket: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("Close Unix socket: %v", err)
+		}
+	})
 	tests := map[string]string{
-		"directory": t.TempDir(),
-		"FIFO":      fifo,
+		"directory":          t.TempDir(),
+		"FIFO":               fifo,
+		"Unix domain socket": socket,
 	}
 	if _, err := os.Stat("/dev/null"); err == nil {
 		tests["character device"] = "/dev/null"
@@ -195,6 +216,9 @@ func TestOpenRejectsNonRegularFiles(t *testing.T) {
 			}
 			if err == nil {
 				t.Fatal("Open succeeded")
+			}
+			if !errors.Is(err, ErrNotRegular) {
+				t.Errorf("Open error = %v, want ErrNotRegular", err)
 			}
 			if !strings.Contains(err.Error(), "regular file") {
 				t.Errorf("Open error = %q, want regular file detail", err)
