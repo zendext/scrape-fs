@@ -18,6 +18,8 @@ const (
 	liveDirectory    = "live"
 )
 
+var syncDirectoryFD = unix.Fsync
+
 func prepareRoot(path string) (_ *os.File, err error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("object-store path must be absolute")
@@ -48,17 +50,23 @@ func prepareRoot(path string) (_ *os.File, err error) {
 		if openErr != nil {
 			return nil, fmt.Errorf("prepare object-store directory component %q: %w", component, openErr)
 		}
+
+		if created {
+			if err := setCreatedOwnerAndMode(nextFD, directoryMode); err != nil {
+				unix.Close(nextFD)
+				return nil, fmt.Errorf("secure object-store directory component %q: %w", component, err)
+			}
+			if err := syncCreatedDirectory(currentFD, nextFD); err != nil {
+				unix.Close(nextFD)
+				return nil, fmt.Errorf("persist object-store directory component %q: %w", component, err)
+			}
+		}
 		if closeErr := unix.Close(currentFD); closeErr != nil {
 			unix.Close(nextFD)
 			return nil, fmt.Errorf("close object-store parent directory: %w", closeErr)
 		}
 		currentFD = nextFD
 
-		if created {
-			if err := setCreatedOwnerAndMode(currentFD, directoryMode); err != nil {
-				return nil, fmt.Errorf("secure object-store directory component %q: %w", component, err)
-			}
-		}
 		if index == len(components)-1 {
 			if err := validatePrivateDirectory(currentFD, "object-store root"); err != nil {
 				return nil, err
@@ -88,6 +96,10 @@ func openPrivateSubdirectory(parent *os.File, name string) (*os.File, error) {
 		if err := setCreatedOwnerAndMode(fd, directoryMode); err != nil {
 			directory.Close()
 			return nil, fmt.Errorf("secure object-store %s directory: %w", name, err)
+		}
+		if err := syncCreatedDirectory(int(parent.Fd()), fd); err != nil {
+			directory.Close()
+			return nil, fmt.Errorf("persist object-store %s directory: %w", name, err)
 		}
 	}
 	if err := validatePrivateDirectory(fd, "object-store "+name+" directory"); err != nil {
@@ -262,6 +274,16 @@ func setCreatedOwnerAndMode(fd int, mode os.FileMode) error {
 	}
 	if err := unix.Fchmod(fd, uint32(mode.Perm())); err != nil {
 		return fmt.Errorf("set mode: %w", err)
+	}
+	return nil
+}
+
+func syncCreatedDirectory(parentFD, directoryFD int) error {
+	if err := syncDirectoryFD(directoryFD); err != nil {
+		return fmt.Errorf("fsync created directory: %w", err)
+	}
+	if err := syncDirectoryFD(parentFD); err != nil {
+		return fmt.Errorf("fsync parent directory: %w", err)
 	}
 	return nil
 }

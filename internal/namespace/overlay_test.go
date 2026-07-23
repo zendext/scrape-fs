@@ -150,8 +150,59 @@ func TestTransactionCreateNodeRejectsStagingOverlayObject(t *testing.T) {
 			return err
 		},
 	)
-	if !errors.Is(err, ErrInvalidObject) {
-		t.Fatalf("CreateNode error = %v, want ErrInvalidObject", err)
+	if !errors.Is(err, ErrInvalidNode) {
+		t.Fatalf("CreateNode error = %v, want ErrInvalidNode", err)
+	}
+	assertVersionAndLogCount(t, opened, 1, 1)
+}
+
+func TestTransactionCreateNodeRejectsLiveOverlayObject(t *testing.T) {
+	opened := openTestDatabase(t)
+	repository := NewRepository(opened)
+	ctx := context.Background()
+
+	libraryRootID := createTestLibraryRoot(t, repository)
+	objectID := insertStagingObject(t, opened, 10)
+	if err := opened.UseConnection(ctx, func(connection *databasepkg.Connection) error {
+		transaction, err := connection.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err := transaction.ExecContext(ctx, `
+			UPDATE objects
+			SET state = 'LIVE', live_at_ns = 20, updated_at_ns = 20
+			WHERE id = ?
+		`, objectID); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}); err != nil {
+		t.Fatalf("promote object: %v", err)
+	}
+
+	_, err := repository.Update(
+		ctx,
+		testOperation("overlay.create"),
+		func(transaction *Transaction) error {
+			_, err := transaction.CreateNode(ctx, CreateNode{
+				ParentID: libraryRootID,
+				Name:     "poster.jpg",
+				Kind:     OverlayFile,
+				ObjectID: &objectID,
+				Creator:  Actor{Kind: ActorSystem},
+				Attributes: Attributes{
+					Mode: 0o600,
+				},
+			})
+			return err
+		},
+	)
+	if !errors.Is(err, ErrInvalidNode) {
+		t.Fatalf("CreateNode error = %v, want ErrInvalidNode", err)
+	}
+	if found, lookupErr := repository.Lookup(ctx, libraryRootID, "poster.jpg"); !errors.Is(lookupErr, ErrNotFound) {
+		t.Fatalf("Lookup error = %v, want ErrNotFound; node=%#v", lookupErr, found)
 	}
 	assertVersionAndLogCount(t, opened, 1, 1)
 }

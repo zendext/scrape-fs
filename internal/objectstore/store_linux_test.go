@@ -28,6 +28,59 @@ func TestOpenPreparesPrivateObjectStoreLayout(t *testing.T) {
 	}
 }
 
+func TestOpenSyncsCreatedObjectStoreDirectories(t *testing.T) {
+	root := t.TempDir()
+	opened := openTestDatabase(t, root)
+	originalSync := syncDirectoryFD
+	t.Cleanup(func() {
+		syncDirectoryFD = originalSync
+	})
+	var syncCalls int
+	syncDirectoryFD = func(fd int) error {
+		syncCalls++
+		return originalSync(fd)
+	}
+
+	store, err := Open(filepath.Join(root, "objects"), opened)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if syncCalls < 6 {
+		t.Fatalf("directory sync calls = %d, want at least 6", syncCalls)
+	}
+}
+
+func TestOpenClosesCreatedDirectoryAfterSyncFailure(t *testing.T) {
+	root := t.TempDir()
+	opened := openTestDatabase(t, root)
+	originalSync := syncDirectoryFD
+	t.Cleanup(func() {
+		syncDirectoryFD = originalSync
+	})
+	capturedFD := -1
+	syncDirectoryFD = func(fd int) error {
+		capturedFD = fd
+		return unix.EIO
+	}
+
+	if store, err := Open(filepath.Join(root, "objects"), opened); !errors.Is(err, unix.EIO) {
+		if store != nil {
+			store.Close()
+		}
+		t.Fatalf("Open error = %v, want EIO", err)
+	}
+	if capturedFD < 0 {
+		t.Fatal("directory sync was not attempted")
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(capturedFD, &stat); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("Fstat synced directory error = %v, want EBADF", err)
+	}
+}
+
 func TestOpenRejectsUnsafeObjectStoreLayout(t *testing.T) {
 	t.Run("relative path", func(t *testing.T) {
 		opened := openTestDatabase(t, t.TempDir())

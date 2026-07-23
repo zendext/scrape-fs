@@ -574,10 +574,18 @@ func (transaction *Transaction) CreateNode(
 		return Node{}, err
 	}
 	if request.Kind == OverlayFile {
-		if err := transaction.validateLiveObject(ctx, *request.ObjectID); err != nil {
-			return Node{}, err
-		}
+		return Node{}, fmt.Errorf(
+			"%w: OverlayFile must be created through CreateOverlay",
+			ErrInvalidNode,
+		)
 	}
+	return transaction.createNode(ctx, request)
+}
+
+func (transaction *Transaction) createNode(
+	ctx context.Context,
+	request CreateNode,
+) (Node, error) {
 	if err := transaction.validateParent(ctx, request); err != nil {
 		return Node{}, err
 	}
@@ -715,33 +723,7 @@ func (transaction *Transaction) CreateOverlay(
 			objectID,
 		)
 	}
-	return transaction.CreateNode(ctx, nodeRequest)
-}
-
-func (transaction *Transaction) validateLiveObject(
-	ctx context.Context,
-	objectID int64,
-) error {
-	var state string
-	if err := transaction.transaction.QueryRowContext(
-		ctx,
-		"SELECT state FROM objects WHERE id = ?",
-		objectID,
-	).Scan(&state); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: object %d does not exist", ErrInvalidObject, objectID)
-		}
-		return fmt.Errorf("read backing object %d: %w", objectID, err)
-	}
-	if state != "LIVE" {
-		return fmt.Errorf(
-			"%w: object %d state is %s, want LIVE",
-			ErrInvalidObject,
-			objectID,
-			state,
-		)
-	}
-	return nil
+	return transaction.createNode(ctx, nodeRequest)
 }
 
 func (transaction *Transaction) CreateProjectionBatch(
