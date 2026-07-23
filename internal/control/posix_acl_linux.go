@@ -330,10 +330,19 @@ func aclGuaranteesUserAccess(
 func aclGuaranteesGroupAccess(
 	entries []aclEntry,
 	mode fs.FileMode,
+	ownerUID uint32,
 	ownerGID uint32,
 	gid uint32,
 	required uint16,
 ) bool {
+	if _, ok := aclRestrictiveNamedUser(
+		entries,
+		required,
+		ownerUID,
+		aclUndefinedID,
+	); ok {
+		return false
+	}
 	if len(entries) == 0 {
 		groupAllows := uint16(mode.Perm()>>3)&required == required
 		if ownerGID == gid {
@@ -358,6 +367,26 @@ func aclGuaranteesGroupAccess(
 	}
 	return aclOtherPermissions(entries)&required == required &&
 		aclAllGroupClassEntriesAllow(entries, required)
+}
+
+func aclRestrictiveNamedUser(
+	entries []aclEntry,
+	required uint16,
+	ownerUID uint32,
+	repairedUID uint32,
+) (uint32, bool) {
+	for _, entry := range entries {
+		if entry.Tag != aclUser ||
+			entry.ID == 0 ||
+			entry.ID == ownerUID ||
+			entry.ID == repairedUID {
+			continue
+		}
+		if aclMaskPermissions(entries, entry.Permissions)&required != required {
+			return entry.ID, true
+		}
+	}
+	return 0, false
 }
 
 func aclMaskPermissions(entries []aclEntry, permissions uint16) uint16 {

@@ -82,7 +82,7 @@
 - Overlay backing objects use daemon ownership and `0600` and do not follow virtual chmod/chown.
 - ProjectionFile is always read-only.
 - The daemon acquires `/run/scrapefs/scrapefsd.lock` on the host filesystem before opening SQLite.
-- The configured administrator and members of `scrapefs-control` can traverse the complete control-socket path and connect before peer-credential authorization; ACL masks cannot hide missing owning-group access, restrictive intermediate ancestors are rejected, and the daemon preserves socket mode `0660` rather than adding world access.
+- The configured administrator and members of `scrapefs-control` can traverse the complete control-socket path and connect before peer-credential authorization; ACL masks cannot hide missing owning-group access, restrictive named-user entries or intermediate ancestors are rejected, and the daemon preserves socket mode `0660` rather than adding world access.
 - Control-socket bind and unlink remain anchored to the validated parent-directory descriptor, and replaced path ancestors cannot redirect the daemon to another socket inode.
 - Replacing a configured database ancestor after path validation cannot redirect SQLite, and rejecting a newer schema version does not change its journal mode.
 - Readiness is sent only after database, index, mount, and socket are available.

@@ -74,6 +74,7 @@ func TestACLGuaranteesGroupAccessUsesGroupObjectInsteadOfModeMask(t *testing.T) 
 	if aclGuaranteesGroupAccess(
 		entries,
 		fs.FileMode(0o710),
+		1000,
 		controlGroupID,
 		controlGroupID,
 		aclExecute,
@@ -89,10 +90,60 @@ func TestACLGuaranteesGroupAccessUsesGroupObjectInsteadOfModeMask(t *testing.T) 
 	if !aclGuaranteesGroupAccess(
 		entries,
 		fs.FileMode(0o710),
+		1000,
 		controlGroupID,
 		controlGroupID,
 		aclExecute,
 	) {
 		t.Fatal("named control-group access was not recognized")
+	}
+}
+
+func TestACLGuaranteesGroupAccessRejectsRestrictiveNamedUser(t *testing.T) {
+	t.Parallel()
+
+	const controlGroupID uint32 = 3000
+	entries := []aclEntry{
+		{Tag: aclUserObject, Permissions: aclRead | aclWrite, ID: aclUndefinedID},
+		{Tag: aclUser, Permissions: 0, ID: 2000},
+		{Tag: aclGroupObject, Permissions: aclRead | aclWrite, ID: aclUndefinedID},
+		{Tag: aclGroup, Permissions: aclRead | aclWrite, ID: controlGroupID},
+		{Tag: aclMask, Permissions: aclRead | aclWrite, ID: aclUndefinedID},
+		{Tag: aclOther, Permissions: 0, ID: aclUndefinedID},
+	}
+	if aclGuaranteesGroupAccess(
+		entries,
+		fs.FileMode(0o660),
+		1000,
+		controlGroupID,
+		controlGroupID,
+		aclRead|aclWrite,
+	) {
+		t.Fatal("group access succeeded despite a restrictive named-user entry")
+	}
+}
+
+func TestACLGuaranteesGroupAccessIgnoresOwnerNamedUser(t *testing.T) {
+	t.Parallel()
+
+	const ownerUID uint32 = 2000
+	const controlGroupID uint32 = 3000
+	entries := []aclEntry{
+		{Tag: aclUserObject, Permissions: aclRead | aclWrite, ID: aclUndefinedID},
+		{Tag: aclUser, Permissions: 0, ID: ownerUID},
+		{Tag: aclGroupObject, Permissions: aclRead | aclWrite, ID: aclUndefinedID},
+		{Tag: aclGroup, Permissions: aclRead | aclWrite, ID: controlGroupID},
+		{Tag: aclMask, Permissions: aclRead | aclWrite, ID: aclUndefinedID},
+		{Tag: aclOther, Permissions: 0, ID: aclUndefinedID},
+	}
+	if !aclGuaranteesGroupAccess(
+		entries,
+		fs.FileMode(0o660),
+		ownerUID,
+		controlGroupID,
+		controlGroupID,
+		aclRead|aclWrite,
+	) {
+		t.Fatal("owner-matching named-user entry incorrectly blocked group access")
 	}
 }

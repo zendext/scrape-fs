@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -432,6 +433,31 @@ func TestAuthorizedRolesConnectThroughExtendedACL(t *testing.T) {
 		controlGroupID,
 		[]uint32{controlGroupID},
 	)
+
+	socketACL, err := readAccessACL(socketPath)
+	if err != nil {
+		t.Fatalf("read socket ACL: %v", err)
+	}
+	socketACL = append(socketACL, aclEntry{
+		Tag:         aclUser,
+		Permissions: 0,
+		ID:          controlUserUID,
+	})
+	sort.Slice(socketACL, func(i, j int) bool {
+		if socketACL[i].Tag == socketACL[j].Tag {
+			return socketACL[i].ID < socketACL[j].ID
+		}
+		return socketACL[i].Tag < socketACL[j].Tag
+	})
+	setACLXattr(t, socketPath, aclAccessXattr, socketACL)
+	runDeniedControlACLClient(
+		t,
+		clientExecutable,
+		socketPath,
+		controlUserUID,
+		controlGroupID,
+		[]uint32{controlGroupID},
+	)
 }
 
 func TestAuthorizedRoleACLClient(t *testing.T) {
@@ -441,6 +467,115 @@ func TestAuthorizedRoleACLClient(t *testing.T) {
 	}
 	if _, err := NewClient(socketPath).List(context.Background()); err != nil {
 		t.Fatalf("List: %v", err)
+	}
+}
+
+func TestDeniedControlACLClient(t *testing.T) {
+	socketPath := os.Getenv("SCRAPEFS_CONTROL_ACL_TEST_SOCKET")
+	if socketPath == "" {
+		t.Skip("helper process")
+	}
+	connection, err := net.DialUnix(
+		"unix",
+		nil,
+		&net.UnixAddr{Name: socketPath, Net: "unix"},
+	)
+	if err == nil {
+		connection.Close()
+		t.Fatal("DialUnix succeeded through restrictive named-user ACL")
+	}
+	if !errors.Is(err, unix.EACCES) {
+		t.Fatalf("DialUnix error = %v, want EACCES", err)
+	}
+}
+
+func TestServeRejectsRestrictiveNamedUserACL(t *testing.T) {
+	const restrictiveUID uint32 = 2000
+	controlGroupID := uint32(os.Getegid())
+	tests := []struct {
+		name          string
+		parentACL     []aclEntry
+		parentDefault []aclEntry
+		want          string
+	}{
+		{
+			name: "parent",
+			parentACL: []aclEntry{
+				{Tag: aclUserObject, Permissions: aclRead | aclWrite | aclExecute, ID: aclUndefinedID},
+				{Tag: aclUser, Permissions: 0, ID: restrictiveUID},
+				{Tag: aclGroupObject, Permissions: aclExecute, ID: aclUndefinedID},
+				{Tag: aclGroup, Permissions: aclExecute, ID: controlGroupID},
+				{Tag: aclMask, Permissions: aclExecute, ID: aclUndefinedID},
+				{Tag: aclOther, Permissions: 0, ID: aclUndefinedID},
+			},
+			want: "parent",
+		},
+		{
+			name: "inherited socket",
+			parentACL: []aclEntry{
+				{Tag: aclUserObject, Permissions: aclRead | aclWrite | aclExecute, ID: aclUndefinedID},
+				{Tag: aclGroupObject, Permissions: aclExecute, ID: aclUndefinedID},
+				{Tag: aclGroup, Permissions: aclExecute, ID: controlGroupID},
+				{Tag: aclMask, Permissions: aclExecute, ID: aclUndefinedID},
+				{Tag: aclOther, Permissions: 0, ID: aclUndefinedID},
+			},
+			parentDefault: []aclEntry{
+				{Tag: aclUserObject, Permissions: aclRead | aclWrite | aclExecute, ID: aclUndefinedID},
+				{Tag: aclUser, Permissions: 0, ID: restrictiveUID},
+				{Tag: aclGroupObject, Permissions: aclRead | aclWrite, ID: aclUndefinedID},
+				{Tag: aclGroup, Permissions: aclRead | aclWrite, ID: controlGroupID},
+				{Tag: aclMask, Permissions: aclRead | aclWrite, ID: aclUndefinedID},
+				{Tag: aclOther, Permissions: 0, ID: aclUndefinedID},
+			},
+			want: "socket",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			parent := controlSocketTempDir(t)
+			setACLXattr(t, parent, aclAccessXattr, test.parentACL)
+			if len(test.parentDefault) > 0 {
+				setACLXattr(t, parent, aclDefaultXattr, test.parentDefault)
+			}
+			socketPath := filepath.Join(parent, "control.sock")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			serverDone := make(chan error, 1)
+			ready := make(chan struct{})
+			go func() {
+				serverDone <- serveWithOptions(
+					ctx,
+					socketPath,
+					0o660,
+					staticBatchService{},
+					serverOptions{
+						limits: defaultServerLimits(),
+						security: serverSecurity{
+							daemonUID:        uint32(os.Geteuid()),
+							administratorUID: uint32(os.Geteuid()),
+							controlGroupID:   controlGroupID,
+						},
+						readPeerIdentity: readPeerIdentity,
+						ready:            ready,
+					},
+				)
+			}()
+
+			select {
+			case <-ready:
+				t.Fatal("server became ready with a restrictive named-user ACL")
+			case err := <-serverDone:
+				if err == nil ||
+					!strings.Contains(err.Error(), test.want) ||
+					!strings.Contains(err.Error(), "named user") {
+					t.Fatalf("serveWithOptions error = %v, want %s named-user ACL error", err, test.want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("server neither failed nor became ready")
+			}
+		})
 	}
 }
 
@@ -629,6 +764,35 @@ func TestPrepareSocketPathRejectsUnsafeOrUnexpectedExistingPaths(t *testing.T) {
 			t.Fatalf("prepareSocketPath: %v", err)
 		}
 		prepared.Close()
+	})
+
+	t.Run("ancestor with restrictive named user", func(t *testing.T) {
+		root := controlSocketTempDir(t)
+		if err := os.Chmod(root, 0o755); err != nil {
+			t.Fatalf("Chmod root: %v", err)
+		}
+		ancestor := filepath.Join(root, "private")
+		if err := os.Mkdir(ancestor, 0o700); err != nil {
+			t.Fatalf("Mkdir ancestor: %v", err)
+		}
+		if err := updateAccessACL(ancestor, 0o700, []aclEntry{
+			{Tag: aclUser, Permissions: 0, ID: 2000},
+			{Tag: aclGroup, Permissions: aclExecute, ID: security.controlGroupID},
+		}); err != nil {
+			t.Fatalf("updateAccessACL ancestor: %v", err)
+		}
+		parent := filepath.Join(ancestor, "run")
+		if err := os.Mkdir(parent, 0o700); err != nil {
+			t.Fatalf("Mkdir parent: %v", err)
+		}
+
+		prepared, err := prepareSocketPath(filepath.Join(parent, "control.sock"), security)
+		if prepared != nil {
+			prepared.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), "named user") {
+			t.Fatalf("prepareSocketPath error = %v, want named-user traversal error", err)
+		}
 	})
 
 	t.Run("unexpected stale socket group", func(t *testing.T) {
@@ -926,5 +1090,32 @@ func runControlACLClient(
 	}
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("ACL client %d:%d: %v\n%s", uid, gid, err, output)
+	}
+}
+
+func runDeniedControlACLClient(
+	t *testing.T,
+	executable string,
+	socketPath string,
+	uid uint32,
+	gid uint32,
+	groups []uint32,
+) {
+	t.Helper()
+
+	command := exec.Command(
+		executable,
+		"-test.run=^TestDeniedControlACLClient$",
+	)
+	command.Env = append(os.Environ(), "SCRAPEFS_CONTROL_ACL_TEST_SOCKET="+socketPath)
+	command.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    uid,
+			Gid:    gid,
+			Groups: groups,
+		},
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("denied ACL client %d:%d: %v\n%s", uid, gid, err, output)
 	}
 }

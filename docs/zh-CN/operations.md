@@ -22,7 +22,7 @@ mode: 0660
 
 daemon 通过 `SO_PEERCRED` 获取调用者的有效 UID/GID，通过 `SO_PEERGROUPS` 获取 supplementary groups，并忽略 client 提交的身份。root 和 `control.administrator_uid` 可以执行管理员与控制用户命令；其他调用者执行 Projection、Projection Batch、status 和 doctor 命令时，其有效或 supplementary group 必须包含 `scrapefs-control` GID。未授权请求必须在调用业务服务前返回稳定的 `PermissionDenied` 错误。
 
-socket owner 使用 daemon effective UID，group 使用 `scrapefs-control` GID。`control.socket_mode` 必须同时授予 owner 和 group 读写权限，默认值仍为 `0660`。当普通 mode bit 尚未提供所需访问权限时，配置的非 root 管理员如果不是 daemon UID，必须通过 named user ACL 获得 socket 读写权限；daemon-owned 父目录必须为该管理员和 `scrapefs-control` 添加 named traverse ACL。因此初始 mode 为 `0700` 的父目录不会阻止已授权调用者。已有且无关的父目录 ACL entry 及其有效权限必须保留。文件系统无法持久化所需 POSIX access ACL 时，daemon 必须启动失败，不得静默导致已授权角色不可访问。
+socket owner 使用 daemon effective UID，group 使用 `scrapefs-control` GID。`control.socket_mode` 必须同时授予 owner 和 group 读写权限，默认值仍为 `0660`。当普通 mode bit 尚未提供所需访问权限时，配置的非 root 管理员如果不是 daemon UID，必须通过 named user ACL 获得 socket 读写权限；daemon-owned 父目录必须为该管理员和 `scrapefs-control` 添加 named traverse ACL。因此初始 mode 为 `0700` 的父目录不会阻止已授权调用者。已有且无关的父目录 ACL entry 及其有效权限必须保留。由于匹配的 named-user ACL 优先于所有 group entry，任何无关 named-user entry 缺少控制角色所需权限时，daemon 必须启动失败，不得扩大或删除该 entry；配置管理员自身的 entry 可以修复为文档规定的权限。文件系统无法持久化所需 POSIX access ACL 时，daemon 必须启动失败，不得静默导致已授权角色不可访问。
 
 父目录及每一级祖先必须在不跟随 symlink 的情况下打开。每个祖先必须由 root 或 daemon 所有；未设置 sticky bit 的 group/other 可写祖先必须被拒绝。每个中间祖先都必须在考虑 POSIX ACL mask 后，已经向配置的管理员和 `scrapefs-control` 提供有效 traverse 权限；限制性祖先必须导致启动失败，不能让已授权调用者在 connect 前被阻断。最终父目录必须由 daemon 所有且不得允许 group/other 写入，daemon 在此补齐缺失的角色 ACL。只有类型为 socket 且 UID/GID 符合预期的 stale path 才能删除。bind 和自动 unlink 必须通过 `/proc/self/fd` 使用持续持有的父目录 descriptor，因此 procfs 必须挂载在 `/proc`。开始接受 request 前，daemon 必须完成最终 ACL 和配置 socket inode 校验。
 

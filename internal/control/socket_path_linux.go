@@ -225,9 +225,22 @@ func validateSocketAncestor(fd int, path string, security serverSecurity) error 
 			security.administratorUID,
 		)
 	}
+	if uid, ok := aclRestrictiveNamedUser(
+		entries,
+		aclExecute,
+		stat.Uid,
+		aclUndefinedID,
+	); ok {
+		return fmt.Errorf(
+			"control socket ancestor %q has named user UID %d without traverse permission, overriding control group access",
+			path,
+			uid,
+		)
+	}
 	if !aclGuaranteesGroupAccess(
 		entries,
 		mode,
+		stat.Uid,
 		stat.Gid,
 		security.controlGroupID,
 		aclExecute,
@@ -330,6 +343,7 @@ func (prepared *preparedSocketPath) grantRoleAccess(security serverSecurity) err
 		return err
 	}
 	parentGrants := make([]aclEntry, 0, 2)
+	parentRepairedUID := aclUndefinedID
 	if security.administratorUID != 0 &&
 		security.administratorUID != security.daemonUID &&
 		!aclGuaranteesUserAccess(
@@ -344,10 +358,23 @@ func (prepared *preparedSocketPath) grantRoleAccess(security serverSecurity) err
 			Permissions: aclExecute,
 			ID:          security.administratorUID,
 		})
+		parentRepairedUID = security.administratorUID
+	}
+	if uid, ok := aclRestrictiveNamedUser(
+		parentACL,
+		aclExecute,
+		parentStat.Uid,
+		parentRepairedUID,
+	); ok {
+		return fmt.Errorf(
+			"control socket parent ACL has named user UID %d without traverse permission, overriding control group access",
+			uid,
+		)
 	}
 	if !aclGuaranteesGroupAccess(
 		parentACL,
 		os.FileMode(parentStat.Mode).Perm(),
+		parentStat.Uid,
 		parentStat.Gid,
 		security.controlGroupID,
 		aclExecute,
@@ -373,6 +400,7 @@ func (prepared *preparedSocketPath) grantRoleAccess(security serverSecurity) err
 		return err
 	}
 	socketGrants := make([]aclEntry, 0, 2)
+	socketRepairedUID := aclUndefinedID
 	if security.administratorUID != 0 &&
 		security.administratorUID != security.daemonUID &&
 		!aclGuaranteesUserAccess(
@@ -387,10 +415,23 @@ func (prepared *preparedSocketPath) grantRoleAccess(security serverSecurity) err
 			Permissions: aclRead | aclWrite,
 			ID:          security.administratorUID,
 		})
+		socketRepairedUID = security.administratorUID
+	}
+	if uid, ok := aclRestrictiveNamedUser(
+		socketACL,
+		aclRead|aclWrite,
+		socketStat.Uid,
+		socketRepairedUID,
+	); ok {
+		return fmt.Errorf(
+			"control socket ACL has named user UID %d without read/write permission, overriding control group access",
+			uid,
+		)
 	}
 	if !aclGuaranteesGroupAccess(
 		socketACL,
 		os.FileMode(socketStat.Mode).Perm(),
+		socketStat.Uid,
 		socketStat.Gid,
 		security.controlGroupID,
 		aclRead|aclWrite,
@@ -418,6 +459,82 @@ func (prepared *preparedSocketPath) grantRoleAccess(security serverSecurity) err
 		); err != nil {
 			return err
 		}
+	}
+	if err := verifyRoleAccess(
+		parentPath,
+		os.FileMode(parentStat.Mode).Perm(),
+		parentStat.Uid,
+		parentStat.Gid,
+		security,
+		aclExecute,
+	); err != nil {
+		return fmt.Errorf("verify control socket parent role access: %w", err)
+	}
+	if err := verifyRoleAccess(
+		prepared.socketDescriptorPath(),
+		os.FileMode(socketStat.Mode).Perm(),
+		socketStat.Uid,
+		socketStat.Gid,
+		security,
+		aclRead|aclWrite,
+	); err != nil {
+		return fmt.Errorf("verify control socket role access: %w", err)
+	}
+	return nil
+}
+
+func verifyRoleAccess(
+	path string,
+	mode os.FileMode,
+	ownerUID uint32,
+	ownerGID uint32,
+	security serverSecurity,
+	required uint16,
+) error {
+	entries, err := readAccessACL(path)
+	if err != nil {
+		return err
+	}
+	if security.administratorUID != 0 &&
+		security.administratorUID != security.daemonUID &&
+		!aclGuaranteesUserAccess(
+			entries,
+			mode,
+			ownerUID,
+			security.administratorUID,
+			required,
+		) {
+		return fmt.Errorf(
+			"configured administrator UID %d lacks permissions %#o",
+			security.administratorUID,
+			required,
+		)
+	}
+	if uid, ok := aclRestrictiveNamedUser(
+		entries,
+		required,
+		ownerUID,
+		aclUndefinedID,
+	); ok {
+		return fmt.Errorf(
+			"named user UID %d lacks permissions %#o and overrides control group access",
+			uid,
+			required,
+		)
+	}
+	if !aclGuaranteesGroupAccess(
+		entries,
+		mode,
+		ownerUID,
+		ownerGID,
+		security.controlGroupID,
+		required,
+	) {
+		return fmt.Errorf(
+			"control group GID %d lacks permissions %#o",
+			security.controlGroupID,
+			required,
+		)
 	}
 	return nil
 }
