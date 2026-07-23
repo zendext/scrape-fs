@@ -522,11 +522,9 @@ func TestServiceUndoPreservesOverlayReportsItAndRejectsRepeat(t *testing.T) {
 			NodeKinds: []namespace.NodeKind{namespace.OverlayFile},
 		},
 	}, func(transaction *namespace.Transaction) error {
-		_, err := transaction.CreateNode(context.Background(), namespace.CreateNode{
+		_, err := transaction.CreateOverlay(context.Background(), objectID, namespace.CreateOverlay{
 			ParentID: parent.ID,
 			Name:     "poster.jpg",
-			Kind:     namespace.OverlayFile,
-			ObjectID: &objectID,
 			Creator:  namespace.Actor{Kind: namespace.ActorSystem},
 			Attributes: namespace.Attributes{
 				Mode: libraryRecord.OverlayMode,
@@ -778,7 +776,8 @@ func createObject(t *testing.T, opened *database.DB) int64 {
 		defer transaction.Rollback()
 		result, err := transaction.ExecContext(
 			context.Background(),
-			"INSERT INTO objects DEFAULT VALUES",
+			`INSERT INTO objects (state, created_at_ns, live_at_ns, updated_at_ns)
+			 VALUES ('STAGING', 1, NULL, 1)`,
 		)
 		if err != nil {
 			return err

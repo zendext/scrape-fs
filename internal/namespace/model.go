@@ -9,6 +9,7 @@ var (
 	ErrConflict         = errors.New("namespace conflict")
 	ErrInvalidLibrary   = errors.New("invalid library")
 	ErrLibraryNotFound  = errors.New("library not found")
+	ErrInvalidObject    = errors.New("invalid backing object")
 	ErrProfileNotFound  = errors.New("profile not found")
 	ErrInvalidNode      = errors.New("invalid namespace node")
 	ErrInvalidOperation = errors.New("invalid namespace operation")
@@ -141,6 +142,13 @@ type CreateNode struct {
 	Creator          Actor
 	ManagedDirectory bool
 	Attributes       Attributes
+}
+
+type CreateOverlay struct {
+	ParentID   int64
+	Name       string
+	Creator    Actor
+	Attributes Attributes
 }
 
 type Node struct {

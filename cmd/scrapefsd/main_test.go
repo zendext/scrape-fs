@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/zendext/scrape-fs/internal/config"
+	"github.com/zendext/scrape-fs/internal/control"
 	"github.com/zendext/scrape-fs/internal/database"
 )
 
@@ -278,6 +279,118 @@ func TestRunReportsDatabaseInitializationErrorBeforeOtherRuntimeState(t *testing
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s stat error = %v, want not exist", name, err)
 		}
+	}
+}
+
+func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
+	root := t.TempDir()
+	configuration := config.Config{
+		Storage: config.Storage{
+			OverlayStorePath: filepath.Join(root, "objects"),
+		},
+		Control: config.Control{
+			SocketPath: filepath.Join(root, "control.sock"),
+			SocketMode: 0o660,
+		},
+	}
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer opened.Close()
+
+	stop := errors.New("stop control server")
+	serveControl := func(
+		_ context.Context,
+		_ string,
+		_ os.FileMode,
+		_ uint32,
+		service control.BatchService,
+		libraryService control.LibraryService,
+	) error {
+		if service == nil {
+			t.Fatal("control service is nil")
+		}
+		if libraryService == nil {
+			t.Fatal("Library control service is nil")
+		}
+		for _, path := range []string{
+			configuration.Storage.OverlayStorePath,
+			filepath.Join(configuration.Storage.OverlayStorePath, "staging"),
+			filepath.Join(configuration.Storage.OverlayStorePath, "live"),
+		} {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("Stat(%q): %v", path, err)
+			}
+			if !info.IsDir() || info.Mode().Perm() != 0o700 {
+				t.Errorf("%s mode = %v, want directory 0700", path, info.Mode())
+			}
+		}
+		return stop
+	}
+
+	if err := serveRuntime(
+		context.Background(),
+		configuration,
+		opened,
+		serveControl,
+	); !errors.Is(err, stop) {
+		t.Fatalf("serveRuntime error = %v, want control stop", err)
+	}
+}
+
+func TestServeRuntimeRejectsUnsafeObjectStoreBeforeControl(t *testing.T) {
+	root := t.TempDir()
+	storePath := filepath.Join(root, "objects")
+	if err := os.Mkdir(storePath, 0o700); err != nil {
+		t.Fatalf("Mkdir object store: %v", err)
+	}
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("Mkdir target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(storePath, "staging")); err != nil {
+		t.Fatalf("Symlink staging: %v", err)
+	}
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer opened.Close()
+
+	called := false
+	err = serveRuntime(
+		context.Background(),
+		config.Config{
+			Storage: config.Storage{OverlayStorePath: storePath},
+		},
+		opened,
+		func(
+			context.Context,
+			string,
+			os.FileMode,
+			uint32,
+			control.BatchService,
+			control.LibraryService,
+		) error {
+			called = true
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "object store") {
+		t.Fatalf("serveRuntime error = %v, want object-store error", err)
+	}
+	if called {
+		t.Fatal("control server started after object-store initialization failure")
 	}
 }
 
