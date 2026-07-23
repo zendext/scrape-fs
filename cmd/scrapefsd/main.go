@@ -75,6 +75,7 @@ type filesystemMounter func(
 	context.Context,
 	config.FUSE,
 	*namespace.Repository,
+	*objectstore.Store,
 ) (mountedFilesystem, error)
 type controlServer func(
 	context.Context,
@@ -105,7 +106,7 @@ func serveRuntime(
 	}()
 
 	repository := namespace.NewRepository(database)
-	mounted, err := mount(ctx, configuration.FUSE, repository)
+	mounted, err := mount(ctx, configuration.FUSE, repository, store)
 	if err != nil {
 		return err
 	}
@@ -124,8 +125,9 @@ func mountFilesystem(
 	ctx context.Context,
 	configuration config.FUSE,
 	repository *namespace.Repository,
+	store *objectstore.Store,
 ) (mountedFilesystem, error) {
-	return fusefs.Mount(ctx, configuration, repository)
+	return fusefs.Mount(ctx, configuration, repository, store)
 }
 
 func runWithLoader(args []string, stdout, stderr io.Writer, load configLoader) int {

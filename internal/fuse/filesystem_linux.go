@@ -11,6 +11,7 @@ import (
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"golang.org/x/sys/unix"
 )
 
 type namespaceReader interface {
@@ -22,15 +23,27 @@ type namespaceReader interface {
 	Children(context.Context, int64) ([]namespace.Node, error)
 }
 
-type node struct {
-	gofs.Inode
-	reader namespaceReader
-	record namespace.Node
+type objectMetadataReader interface {
+	StatObject(context.Context, int64) (unix.Stat_t, error)
 }
 
-func newRoot(ctx context.Context, reader namespaceReader) (*node, error) {
+type node struct {
+	gofs.Inode
+	reader  namespaceReader
+	objects objectMetadataReader
+	record  namespace.Node
+}
+
+func newRoot(
+	ctx context.Context,
+	reader namespaceReader,
+	objects objectMetadataReader,
+) (*node, error) {
 	if reader == nil {
 		return nil, errors.New("namespace reader is required")
+	}
+	if objects == nil {
+		return nil, errors.New("object metadata reader is required")
 	}
 	root, err := reader.GlobalRoot(ctx)
 	if err != nil {
@@ -39,7 +52,7 @@ func newRoot(ctx context.Context, reader namespaceReader) (*node, error) {
 	if root.ID != 1 || root.Kind != namespace.GlobalRoot || root.ParentID != nil {
 		return nil, fmt.Errorf("%w: invalid GlobalRoot", namespace.ErrInvalidRoot)
 	}
-	return &node{reader: reader, record: root}, nil
+	return &node{reader: reader, objects: objects, record: root}, nil
 }
 
 func filesystemOptions(configuration config.FUSE) gofs.Options {
@@ -90,11 +103,15 @@ func (current *node) Lookup(
 	if err := validateChild(current.record, child, name); err != nil {
 		return nil, syscall.EIO
 	}
-	if err := fillAttr(child, &out.Attr); err != nil {
+	if err := fillAttr(ctx, child, current.objects, &out.Attr); err != nil {
 		return nil, syscall.EIO
 	}
 
-	operations := &node{reader: current.reader, record: child}
+	operations := &node{
+		reader:  current.reader,
+		objects: current.objects,
+		record:  child,
+	}
 	inode := current.NewInode(ctx, operations, stableAttr(child))
 	return inode, 0
 }
@@ -111,7 +128,7 @@ func (current *node) Getattr(
 	if record.ID != current.record.ID || record.Kind != current.record.Kind {
 		return syscall.EIO
 	}
-	if err := fillAttr(record, &out.Attr); err != nil {
+	if err := fillAttr(ctx, record, current.objects, &out.Attr); err != nil {
 		return syscall.EIO
 	}
 	return 0
@@ -257,7 +274,12 @@ func stableAttr(record namespace.Node) gofs.StableAttr {
 	}
 }
 
-func fillAttr(record namespace.Node, attr *gofuse.Attr) error {
+func fillAttr(
+	ctx context.Context,
+	record namespace.Node,
+	objects objectMetadataReader,
+	attr *gofuse.Attr,
+) error {
 	mode := fileType(record.Kind)
 	if mode == 0 || record.ID <= 0 {
 		return namespace.ErrInvalidNode
@@ -287,12 +309,30 @@ func fillAttr(record namespace.Node, attr *gofuse.Attr) error {
 		if record.ObjectID == nil || *record.ObjectID <= 0 {
 			return namespace.ErrInvalidNode
 		}
+		if objects == nil {
+			return namespace.ErrInvalidObject
+		}
+		stat, err := objects.StatObject(ctx, *record.ObjectID)
+		if err != nil {
+			return err
+		}
+		if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Size < 0 {
+			return namespace.ErrInvalidObject
+		}
+		attr.Size = uint64(stat.Size)
+		atime = timespecNanoseconds(stat.Atim)
+		mtime = timespecNanoseconds(stat.Mtim)
+		ctime = max(timespecNanoseconds(stat.Ctim), record.VirtualCtimeNS)
 	}
 
 	attr.Atime, attr.Atimensec = splitNanoseconds(atime)
 	attr.Mtime, attr.Mtimensec = splitNanoseconds(mtime)
 	attr.Ctime, attr.Ctimensec = splitNanoseconds(ctime)
 	return nil
+}
+
+func timespecNanoseconds(value unix.Timespec) int64 {
+	return value.Sec*int64(time.Second) + value.Nsec
 }
 
 func splitNanoseconds(value int64) (uint64, uint32) {

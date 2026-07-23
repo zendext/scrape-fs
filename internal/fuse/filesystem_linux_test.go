@@ -12,6 +12,7 @@ import (
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"golang.org/x/sys/unix"
 )
 
 func TestRootLookupAndReaddirExposeOnlyActiveLibraries(t *testing.T) {
@@ -26,7 +27,11 @@ func TestRootLookupAndReaddirExposeOnlyActiveLibraries(t *testing.T) {
 			3: testNode(3, 1, "plex", namespace.LibraryRoot),
 		},
 	}
-	root, err := newRoot(context.Background(), reader)
+	root, err := newRoot(
+		context.Background(),
+		reader,
+		&fakeObjectMetadataReader{},
+	)
 	if err != nil {
 		t.Fatalf("newRoot: %v", err)
 	}
@@ -76,6 +81,18 @@ func TestDirectoryLookupGetattrAndReaddirUsePersistedNodes(t *testing.T) {
 	overlay := testNode(12, 10, "poster.jpg", namespace.OverlayFile)
 	objectID := int64(9)
 	overlay.ObjectID = &objectID
+	overlay.VirtualCtimeNS = 8_000_000_009
+	objects := &fakeObjectMetadataReader{
+		stats: map[int64]unix.Stat_t{
+			objectID: {
+				Mode: unix.S_IFREG,
+				Size: 64,
+				Atim: unix.Timespec{Sec: 5, Nsec: 6},
+				Mtim: unix.Timespec{Sec: 6, Nsec: 7},
+				Ctim: unix.Timespec{Sec: 7, Nsec: 8},
+			},
+		},
+	}
 
 	reader := &fakeNamespaceReader{
 		nodes: map[int64]namespace.Node{
@@ -91,7 +108,7 @@ func TestDirectoryLookupGetattrAndReaddirUsePersistedNodes(t *testing.T) {
 			fakeChildKey(directory.ID, overlay.Name):    overlay,
 		},
 	}
-	current := &node{reader: reader, record: directory}
+	current := &node{reader: reader, objects: objects, record: directory}
 	initializeNodeFS(current)
 
 	var directoryAttr gofuse.AttrOut
@@ -138,8 +155,33 @@ func TestDirectoryLookupGetattrAndReaddirUsePersistedNodes(t *testing.T) {
 	if overlayChild.StableAttr().Ino != uint64(overlay.ID) ||
 		overlayEntry.Ino != uint64(overlay.ID) ||
 		overlayEntry.Mode != syscall.S_IFREG|0o775 ||
-		overlayEntry.Size != 0 {
+		overlayEntry.Size != 64 ||
+		overlayEntry.Atime != 5 || overlayEntry.Atimensec != 6 ||
+		overlayEntry.Mtime != 6 || overlayEntry.Mtimensec != 7 ||
+		overlayEntry.Ctime != 8 || overlayEntry.Ctimensec != 9 {
 		t.Errorf("overlay attrs = %#v", overlayEntry.Attr)
+	}
+
+	objects.stats[objectID] = unix.Stat_t{
+		Mode: unix.S_IFREG,
+		Size: 96,
+		Atim: unix.Timespec{Sec: 10, Nsec: 11},
+		Mtim: unix.Timespec{Sec: 12, Nsec: 13},
+		Ctim: unix.Timespec{Sec: 14, Nsec: 15},
+	}
+	var overlayAttr gofuse.AttrOut
+	if errno := overlayChild.Operations().(*node).Getattr(
+		context.Background(),
+		nil,
+		&overlayAttr,
+	); errno != 0 {
+		t.Fatalf("Overlay Getattr errno = %v", errno)
+	}
+	if overlayAttr.Size != 96 ||
+		overlayAttr.Atime != 10 || overlayAttr.Atimensec != 11 ||
+		overlayAttr.Mtime != 12 || overlayAttr.Mtimensec != 13 ||
+		overlayAttr.Ctime != 14 || overlayAttr.Ctimensec != 15 {
+		t.Errorf("refreshed overlay attrs = %#v", overlayAttr.Attr)
 	}
 
 	stream, errno := current.Readdir(context.Background())
@@ -215,6 +257,36 @@ func TestGetattrRefreshesNodeByStableID(t *testing.T) {
 		attr.Mtime != 6 || attr.Mtimensec != 7 ||
 		attr.Ctime != 10 || attr.Ctimensec != 11 {
 		t.Errorf("refreshed attrs = %#v", attr.Attr)
+	}
+}
+
+func TestOverlayLookupFailsClosedWithoutObjectStoreMetadata(t *testing.T) {
+	directory := testNode(10, 2, "Movies", namespace.Directory)
+	overlay := testNode(12, 10, "poster.jpg", namespace.OverlayFile)
+	objectID := int64(9)
+	overlay.ObjectID = &objectID
+
+	current := &node{
+		reader: &fakeNamespaceReader{
+			child: map[string]namespace.Node{
+				fakeChildKey(directory.ID, overlay.Name): overlay,
+			},
+		},
+		record: directory,
+	}
+	initializeNodeFS(current)
+
+	child, errno := current.Lookup(
+		context.Background(),
+		overlay.Name,
+		&gofuse.EntryOut{},
+	)
+	if child != nil || errno != syscall.EIO {
+		t.Fatalf(
+			"Overlay Lookup = child %#v errno %v, want nil/EIO without object metadata",
+			child,
+			errno,
+		)
 	}
 }
 
@@ -366,6 +438,25 @@ type fakeNamespaceReader struct {
 	child        map[string]namespace.Node
 	children     map[int64][]namespace.Node
 	libraryError error
+}
+
+type fakeObjectMetadataReader struct {
+	stats map[int64]unix.Stat_t
+	err   error
+}
+
+func (reader *fakeObjectMetadataReader) StatObject(
+	_ context.Context,
+	objectID int64,
+) (unix.Stat_t, error) {
+	if reader.err != nil {
+		return unix.Stat_t{}, reader.err
+	}
+	stat, ok := reader.stats[objectID]
+	if !ok {
+		return unix.Stat_t{}, unix.EIO
+	}
+	return stat, nil
 }
 
 func (reader *fakeNamespaceReader) GlobalRoot(context.Context) (namespace.Node, error) {

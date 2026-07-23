@@ -40,7 +40,12 @@ func TestMountReadOnlyTraversalIntegration(t *testing.T) {
 	firstRepository := namespace.NewRepository(first)
 	projection := createIntegrationNamespace(t, firstRepository)
 
-	firstMount, err := Mount(context.Background(), configuration, firstRepository)
+	firstMount, err := Mount(
+		context.Background(),
+		configuration,
+		firstRepository,
+		&fakeObjectMetadataReader{},
+	)
 	if err != nil {
 		first.Close()
 		t.Fatalf("first Mount: %v", err)
@@ -85,6 +90,7 @@ func TestMountReadOnlyTraversalIntegration(t *testing.T) {
 		context.Background(),
 		configuration,
 		namespace.NewRepository(second),
+		&fakeObjectMetadataReader{},
 	)
 	if err != nil {
 		t.Fatalf("second Mount: %v", err)
@@ -128,7 +134,11 @@ func TestAnchoredMountIgnoresPreMountPathReplacementIntegration(t *testing.T) {
 	})
 
 	repository := namespace.NewRepository(opened)
-	rootNode, err := newRoot(context.Background(), repository)
+	rootNode, err := newRoot(
+		context.Background(),
+		repository,
+		&fakeObjectMetadataReader{},
+	)
 	if err != nil {
 		t.Fatalf("newRoot: %v", err)
 	}

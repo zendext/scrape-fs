@@ -37,11 +37,12 @@ func Mount(
 	ctx context.Context,
 	configuration config.FUSE,
 	repository *namespace.Repository,
+	objects objectMetadataReader,
 ) (_ *Mounted, err error) {
 	if repository == nil {
 		return nil, errors.New("namespace repository is required")
 	}
-	root, err := newRoot(ctx, repository)
+	root, err := newRoot(ctx, repository, objects)
 	if err != nil {
 		return nil, err
 	}

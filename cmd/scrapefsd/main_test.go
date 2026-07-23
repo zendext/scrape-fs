@@ -13,6 +13,7 @@ import (
 	"github.com/zendext/scrape-fs/internal/control"
 	"github.com/zendext/scrape-fs/internal/database"
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"github.com/zendext/scrape-fs/internal/objectstore"
 )
 
 func TestRunHelp(t *testing.T) {
@@ -311,9 +312,13 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 		_ context.Context,
 		_ config.FUSE,
 		repository *namespace.Repository,
+		store *objectstore.Store,
 	) (mountedFilesystem, error) {
 		if repository == nil {
 			t.Fatal("namespace repository is nil")
+		}
+		if store == nil {
+			t.Fatal("object store is nil")
 		}
 		for _, path := range []string{
 			configuration.Storage.OverlayStorePath,
@@ -402,6 +407,7 @@ func TestServeRuntimeRejectsUnsafeObjectStoreBeforeControl(t *testing.T) {
 			context.Context,
 			config.FUSE,
 			*namespace.Repository,
+			*objectstore.Store,
 		) (mountedFilesystem, error) {
 			mountCalled = true
 			return recordingMount{}, nil
