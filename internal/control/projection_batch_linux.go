@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/projection"
@@ -18,9 +19,14 @@ import (
 )
 
 const (
-	DefaultSocketPath = "/run/scrapefs/scrapefs.sock"
-	requestSchema     = "scrapefs.control-request/v1"
-	responseSchema    = "scrapefs.control-response/v1"
+	DefaultSocketPath             = "/run/scrapefs/scrapefs.sock"
+	requestSchema                 = "scrapefs.control-request/v1"
+	responseSchema                = "scrapefs.control-response/v1"
+	defaultMaxConnections         = 32
+	defaultMaxRequestBytes  int64 = 16 << 20
+	defaultReadTimeout            = 5 * time.Second
+	defaultWriteTimeout           = 30 * time.Second
+	defaultAcceptRetryDelay       = 100 * time.Millisecond
 )
 
 type BatchService interface {
@@ -60,6 +66,14 @@ type response struct {
 	Schema string          `json:"schema"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  *RemoteError    `json:"error,omitempty"`
+}
+
+type serverLimits struct {
+	maxConnections   int
+	maxRequestBytes  int64
+	readTimeout      time.Duration
+	writeTimeout     time.Duration
+	acceptRetryDelay time.Duration
 }
 
 func NewClient(socketPath string) *Client {
@@ -194,8 +208,27 @@ func Serve(
 	mode fs.FileMode,
 	service BatchService,
 ) error {
+	return serveWithLimits(ctx, socketPath, mode, service, serverLimits{
+		maxConnections:   defaultMaxConnections,
+		maxRequestBytes:  defaultMaxRequestBytes,
+		readTimeout:      defaultReadTimeout,
+		writeTimeout:     defaultWriteTimeout,
+		acceptRetryDelay: defaultAcceptRetryDelay,
+	})
+}
+
+func serveWithLimits(
+	ctx context.Context,
+	socketPath string,
+	mode fs.FileMode,
+	service BatchService,
+	limits serverLimits,
+) error {
 	if service == nil {
 		return fmt.Errorf("Projection Batch control service must not be nil")
+	}
+	if err := validateServerLimits(limits); err != nil {
+		return err
 	}
 	if err := prepareSocketPath(socketPath); err != nil {
 		return err
@@ -224,20 +257,62 @@ func Serve(
 
 	var handlers sync.WaitGroup
 	defer handlers.Wait()
+	slots := make(chan struct{}, limits.maxConnections)
 	for {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return nil
+		}
 		connection, err := listener.AcceptUnix()
 		if err != nil {
+			<-slots
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
+			}
+			if retryableAcceptError(err) {
+				timer := time.NewTimer(limits.acceptRetryDelay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return nil
+				case <-timer.C:
+					continue
+				}
 			}
 			return fmt.Errorf("accept ScrapeFS control connection: %w", err)
 		}
 		handlers.Add(1)
 		go func() {
 			defer handlers.Done()
-			handleConnection(ctx, connection, service)
+			defer func() {
+				<-slots
+			}()
+			handleConnection(ctx, connection, service, limits)
 		}()
 	}
+}
+
+func validateServerLimits(limits serverLimits) error {
+	if limits.maxConnections <= 0 ||
+		limits.maxRequestBytes <= 0 ||
+		limits.readTimeout <= 0 ||
+		limits.writeTimeout <= 0 ||
+		limits.acceptRetryDelay <= 0 {
+		return fmt.Errorf("invalid control server resource limits")
+	}
+	return nil
+}
+
+func retryableAcceptError(err error) bool {
+	if errors.Is(err, unix.EMFILE) ||
+		errors.Is(err, unix.ENFILE) ||
+		errors.Is(err, unix.ENOBUFS) ||
+		errors.Is(err, unix.ENOMEM) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) && networkError.Temporary()
 }
 
 func prepareSocketPath(socketPath string) error {
@@ -264,6 +339,7 @@ func handleConnection(
 	ctx context.Context,
 	connection *net.UnixConn,
 	service BatchService,
+	limits serverLimits,
 ) {
 	defer connection.Close()
 	finished := make(chan struct{})
@@ -275,18 +351,42 @@ func handleConnection(
 		}
 	}()
 	defer close(finished)
+	respond := func(result any, err error) {
+		if deadlineErr := connection.SetWriteDeadline(
+			time.Now().Add(limits.writeTimeout),
+		); deadlineErr != nil {
+			return
+		}
+		writeResponse(connection, result, err)
+	}
 
 	credentials, err := peerCredentials(connection)
 	if err != nil {
-		writeResponse(connection, nil, err)
+		respond(nil, err)
 		return
 	}
 
 	var request request
-	decoder := json.NewDecoder(connection)
+	if err := connection.SetReadDeadline(time.Now().Add(limits.readTimeout)); err != nil {
+		respond(nil, fmt.Errorf("set control request deadline: %w", err))
+		return
+	}
+	limited := &io.LimitedReader{
+		R: connection,
+		N: limits.maxRequestBytes + 1,
+	}
+	decoder := json.NewDecoder(limited)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
-		writeResponse(connection, nil, fmt.Errorf("decode control request: %w", err))
+		if limited.N == 0 {
+			err = fmt.Errorf(
+				"control request exceeds %d bytes",
+				limits.maxRequestBytes,
+			)
+		} else {
+			err = fmt.Errorf("decode control request: %w", err)
+		}
+		respond(nil, err)
 		return
 	}
 	var trailing any
@@ -294,12 +394,22 @@ func handleConnection(
 		if err == nil {
 			err = fmt.Errorf("control request contains more than one JSON value")
 		}
-		writeResponse(connection, nil, err)
+		respond(nil, err)
+		return
+	}
+	if limited.N == 0 {
+		respond(nil, fmt.Errorf(
+			"control request exceeds %d bytes",
+			limits.maxRequestBytes,
+		))
+		return
+	}
+	if err := connection.SetReadDeadline(time.Time{}); err != nil {
+		respond(nil, fmt.Errorf("clear control request deadline: %w", err))
 		return
 	}
 	if request.Schema != requestSchema {
-		writeResponse(
-			connection,
+		respond(
 			nil,
 			fmt.Errorf("invalid control request schema %q", request.Schema),
 		)
@@ -336,7 +446,7 @@ func handleConnection(
 	default:
 		err = fmt.Errorf("unsupported control command %q", request.Command)
 	}
-	writeResponse(connection, result, err)
+	respond(result, err)
 }
 
 func peerCredentials(connection *net.UnixConn) (*unix.Ucred, error) {

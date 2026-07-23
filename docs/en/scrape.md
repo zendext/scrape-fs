@@ -212,6 +212,8 @@ scrapefs projection batch undo batch-42
 
 `show` displays provenance, created Projections, and operation-log snapshots for an applied or undone batch only. It exposes no pending plan.
 
+Batch history remains available to `list` and `show` after its Library is retired. Undo requires an available LibraryRoot and rejects a retired Library without changing batch state.
+
 Undo uses one SQLite transaction to:
 
 1. remove ProjectionFiles whose legacy `origin_scrape_id` references the batch;

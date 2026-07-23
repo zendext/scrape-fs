@@ -2,8 +2,10 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,6 +163,127 @@ func TestProjectionBatchClientReturnsMachineReadableRemoteError(t *testing.T) {
 	if remote.Code != "InvalidBatch" || !strings.Contains(remote.Error(), "schema") {
 		t.Errorf("RemoteError = %#v", remote)
 	}
+}
+
+func TestServeBoundsIdleAndOversizedConnections(t *testing.T) {
+	root := t.TempDir()
+	socketPath := filepath.Join(root, "control.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- serveWithLimits(
+			ctx,
+			socketPath,
+			0o600,
+			staticBatchService{},
+			serverLimits{
+				maxConnections:   2,
+				readTimeout:      50 * time.Millisecond,
+				writeTimeout:     time.Second,
+				maxRequestBytes:  256,
+				acceptRetryDelay: time.Millisecond,
+			},
+		)
+	}()
+	waitForSocket(t, socketPath)
+	defer func() {
+		cancel()
+		if err := <-serverDone; err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	}()
+
+	var idle []net.Conn
+	for range 6 {
+		connection, err := net.Dial("unix", socketPath)
+		if err != nil {
+			t.Fatalf("Dial idle connection: %v", err)
+		}
+		idle = append(idle, connection)
+	}
+	defer func() {
+		for _, connection := range idle {
+			connection.Close()
+		}
+	}()
+	time.Sleep(150 * time.Millisecond)
+
+	listed, err := NewClient(socketPath).List(context.Background())
+	if err != nil {
+		t.Fatalf("List after idle connections: %v", err)
+	}
+	if listed.Schema != projectionbatch.ListSchema {
+		t.Errorf("List schema = %q, want %q", listed.Schema, projectionbatch.ListSchema)
+	}
+	select {
+	case err := <-serverDone:
+		t.Fatalf("server exited after idle connections: %v", err)
+	default:
+	}
+
+	connection, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Dial oversized request: %v", err)
+	}
+	if _, err := connection.Write([]byte(strings.Repeat(" ", 300))); err != nil {
+		t.Fatalf("write oversized request: %v", err)
+	}
+	if unixConnection, ok := connection.(*net.UnixConn); ok {
+		if err := unixConnection.CloseWrite(); err != nil {
+			t.Fatalf("CloseWrite oversized request: %v", err)
+		}
+	}
+	var response response
+	if err := json.NewDecoder(connection).Decode(&response); err != nil {
+		t.Fatalf("decode oversized response: %v", err)
+	}
+	connection.Close()
+	if response.Error == nil {
+		t.Fatal("oversized request returned no error")
+	}
+
+	if _, err := NewClient(socketPath).List(context.Background()); err != nil {
+		t.Fatalf("List after oversized request: %v", err)
+	}
+}
+
+type staticBatchService struct{}
+
+func (staticBatchService) Validate(
+	context.Context,
+	[]byte,
+) (projectionbatch.ValidationResult, error) {
+	return projectionbatch.ValidationResult{Schema: projectionbatch.ValidationSchema}, nil
+}
+
+func (staticBatchService) Apply(
+	context.Context,
+	projectionbatch.ApplyRequest,
+) (projectionbatch.ApplyResult, error) {
+	return projectionbatch.ApplyResult{Schema: projectionbatch.ResultSchema}, nil
+}
+
+func (staticBatchService) List(
+	context.Context,
+) (projectionbatch.ListResult, error) {
+	return projectionbatch.ListResult{
+		Schema:  projectionbatch.ListSchema,
+		Batches: []projectionbatch.BatchSummary{},
+	}, nil
+}
+
+func (staticBatchService) Show(
+	context.Context,
+	string,
+) (projectionbatch.DetailResult, error) {
+	return projectionbatch.DetailResult{Schema: projectionbatch.DetailSchema}, nil
+}
+
+func (staticBatchService) Undo(
+	context.Context,
+	projectionbatch.UndoRequest,
+) (projectionbatch.UndoResult, error) {
+	return projectionbatch.UndoResult{Schema: projectionbatch.UndoSchema}, nil
 }
 
 func waitForSocket(t *testing.T, path string) {

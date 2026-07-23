@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,6 +302,133 @@ func TestServiceApplyCreatesBatchAtomicallyAndPersistsAcrossRestart(t *testing.T
 		reopened.Entries[0].Source != detail.Entries[0].Source ||
 		len(reopened.Operations) != len(detail.Operations) {
 		t.Errorf("reopened detail = %#v, want %#v", reopened, detail)
+	}
+}
+
+func TestServiceListAndShowRetainHistoryAfterLibraryRetirement(t *testing.T) {
+	opened := openBatchTestDatabase(t)
+	repository := namespace.NewRepository(opened)
+	createBatchTestLibrary(t, repository)
+	firstSource, secondSource := createBatchSources(t)
+	data := batchJSON(t, firstSource, secondSource)
+	parsed := mustParse(t, data)
+	service := NewService(repository)
+	applied, err := service.Apply(context.Background(), ApplyRequest{
+		Data:           data,
+		ExpectedDigest: parsed.Digest,
+		Actor:          namespace.Actor{Kind: namespace.ActorSystem},
+		Caller:         Caller{UID: 1, GID: 2},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if err := opened.UseConnection(context.Background(), func(connection *database.Connection) error {
+		transaction, err := connection.BeginTx(context.Background(), nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err := transaction.ExecContext(context.Background(), `
+			UPDATE libraries
+			SET status = 'RETIRED', root_node_id = NULL, retired_at = 1
+			WHERE name = 'media'
+		`); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}); err != nil {
+		t.Fatalf("retire Library: %v", err)
+	}
+
+	listed, err := service.List(context.Background())
+	if err != nil {
+		t.Fatalf("List after Library retirement: %v", err)
+	}
+	if len(listed.Batches) != 1 || listed.Batches[0].BatchID != applied.BatchID {
+		t.Errorf("List = %#v", listed)
+	}
+	shown, err := service.Show(context.Background(), applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show after Library retirement: %v", err)
+	}
+	if len(shown.Entries) != 2 || shown.Entries[0].Source.Path != firstSource {
+		t.Errorf("Show = %#v", shown)
+	}
+	_, err = service.Undo(context.Background(), UndoRequest{
+		BatchID: applied.BatchID,
+		Actor:   namespace.Actor{Kind: namespace.ActorSystem},
+		Caller:  Caller{UID: 1, GID: 2},
+	})
+	if !errors.Is(err, namespace.ErrLibraryNotFound) {
+		t.Fatalf("Undo retired Library error = %v, want ErrLibraryNotFound", err)
+	}
+}
+
+func TestServiceShowReturnsOneAtomicBatchSnapshotDuringUndo(t *testing.T) {
+	opened := openBatchTestDatabase(t)
+	repository := namespace.NewRepository(opened)
+	createBatchTestLibrary(t, repository)
+	source, _ := createBatchSources(t)
+	service := NewService(repository)
+
+	for index := range 50 {
+		target := fmt.Sprintf("Movies/Dune-%02d.mkv", index)
+		data := singleEntryBatchJSON(t, source, target)
+		parsed := mustParse(t, data)
+		applied, err := service.Apply(context.Background(), ApplyRequest{
+			Data:           data,
+			ExpectedDigest: parsed.Digest,
+			Actor:          namespace.Actor{Kind: namespace.ActorSystem},
+			Caller:         Caller{UID: 1, GID: 2},
+		})
+		if err != nil {
+			t.Fatalf("Apply %d: %v", index, err)
+		}
+
+		start := make(chan struct{})
+		showResult := make(chan DetailResult, 1)
+		showError := make(chan error, 1)
+		undoError := make(chan error, 1)
+		go func() {
+			<-start
+			result, err := service.Show(context.Background(), applied.BatchID)
+			showResult <- result
+			showError <- err
+		}()
+		go func() {
+			<-start
+			_, err := service.Undo(context.Background(), UndoRequest{
+				BatchID: applied.BatchID,
+				Actor:   namespace.Actor{Kind: namespace.ActorSystem},
+				Caller:  Caller{UID: 1, GID: 2},
+			})
+			undoError <- err
+		}()
+		close(start)
+
+		result := <-showResult
+		if err := <-showError; err != nil {
+			t.Fatalf("Show %d: %v", index, err)
+		}
+		if err := <-undoError; err != nil {
+			t.Fatalf("Undo %d: %v", index, err)
+		}
+		switch result.Batch.Status {
+		case "applied":
+			if len(result.Entries) != 1 ||
+				result.Entries[0].ProjectionNodeID == nil ||
+				len(result.Operations) != 1 {
+				t.Fatalf("mixed applied snapshot %d: %#v", index, result)
+			}
+		case "undone":
+			if len(result.Entries) != 1 ||
+				result.Entries[0].ProjectionNodeID != nil ||
+				len(result.Operations) != 2 {
+				t.Fatalf("mixed undone snapshot %d: %#v", index, result)
+			}
+		default:
+			t.Fatalf("Show status %q", result.Batch.Status)
+		}
 	}
 }
 

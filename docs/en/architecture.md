@@ -57,6 +57,8 @@ The control protocol uses the configured Unix socket. Default:
 
 The implemented Projection Batch control protocol uses one strict JSON request and one JSON response per Unix-socket connection. The daemon obtains caller UID/GID from `SO_PEERCRED`; client-supplied identity is not trusted. The CLI can override the default endpoint with `--socket`.
 
+The control server accepts at most 32 active connections. A request is limited to 16 MiB and must be received within 5 seconds; a response must be written within 30 seconds. Retryable accept resource errors do not terminate the daemon.
+
 ## 3. SQLite
 
 The daemon MUST enable at least:

@@ -299,18 +299,10 @@ func (service *Service) Show(
 	if err != nil {
 		return DetailResult{}, err
 	}
-	batch, err := service.repository.ProjectionBatch(ctx, id)
+	batch, entries, operations, err := service.repository.ProjectionBatchDetail(ctx, id)
 	if errors.Is(err, namespace.ErrNotFound) {
 		return DetailResult{}, fmt.Errorf("%w: %s", ErrBatchNotFound, batchID)
 	}
-	if err != nil {
-		return DetailResult{}, err
-	}
-	entries, err := service.repository.ProjectionBatchEntries(ctx, id)
-	if err != nil {
-		return DetailResult{}, err
-	}
-	operations, err := service.repository.ProjectionBatchOperations(ctx, id)
 	if err != nil {
 		return DetailResult{}, err
 	}
@@ -393,6 +385,13 @@ func (service *Service) Undo(
 		}
 		if current.Status == namespace.ProjectionBatchUndone {
 			return fmt.Errorf("%w: %s", ErrAlreadyUndone, request.BatchID)
+		}
+		if !current.LibraryRootAvailable {
+			return fmt.Errorf(
+				"%w: Library %q is not active",
+				namespace.ErrLibraryNotFound,
+				current.LibraryName,
+			)
 		}
 		if err := transaction.AssociateOperationWithProjectionBatch(ctx, id); err != nil {
 			return err

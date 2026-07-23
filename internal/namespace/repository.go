@@ -169,23 +169,9 @@ func (repository *Repository) ProjectionBatchEntries(
 ) ([]ProjectionBatchEntry, error) {
 	var entries []ProjectionBatchEntry
 	err := repository.useConnection(ctx, func(connection *database.Connection) error {
-		var cursorPosition int64 = -1
-		for {
-			entry, err := queryProjectionBatchEntry(
-				ctx,
-				connection,
-				batchID,
-				cursorPosition,
-			)
-			if errors.Is(err, ErrNotFound) {
-				return nil
-			}
-			if err != nil {
-				return fmt.Errorf("list Projection Batch entries: %w", err)
-			}
-			entries = append(entries, entry)
-			cursorPosition = entry.Position
-		}
+		var err error
+		entries, err = projectionBatchEntries(ctx, connection, batchID)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -199,28 +185,49 @@ func (repository *Repository) ProjectionBatchOperations(
 ) ([]ProjectionBatchOperation, error) {
 	var operations []ProjectionBatchOperation
 	err := repository.useConnection(ctx, func(connection *database.Connection) error {
-		var cursorID int64
-		for {
-			operation, err := queryProjectionBatchOperation(
-				ctx,
-				connection,
-				batchID,
-				cursorID,
-			)
-			if errors.Is(err, ErrNotFound) {
-				return nil
-			}
-			if err != nil {
-				return fmt.Errorf("list Projection Batch operations: %w", err)
-			}
-			operations = append(operations, operation)
-			cursorID = operation.ID
-		}
+		var err error
+		operations, err = projectionBatchOperations(ctx, connection, batchID)
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return operations, nil
+}
+
+func (repository *Repository) ProjectionBatchDetail(
+	ctx context.Context,
+	batchID int64,
+) (ProjectionBatch, []ProjectionBatchEntry, []ProjectionBatchOperation, error) {
+	if batchID <= 0 {
+		return ProjectionBatch{}, nil, nil, ErrNotFound
+	}
+
+	var batch ProjectionBatch
+	var entries []ProjectionBatchEntry
+	var operations []ProjectionBatchOperation
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var err error
+		batch, err = queryProjectionBatch(
+			ctx,
+			connection,
+			"scrapes.id = ? AND scrapes.status IN ('applied', 'undone')",
+			batchID,
+		)
+		if err != nil {
+			return err
+		}
+		entries, err = projectionBatchEntries(ctx, connection, batchID)
+		if err != nil {
+			return err
+		}
+		operations, err = projectionBatchOperations(ctx, connection, batchID)
+		return err
+	})
+	if err != nil {
+		return ProjectionBatch{}, nil, nil, err
+	}
+	return batch, entries, operations, nil
 }
 
 func (repository *Repository) Lookup(
@@ -1442,6 +1449,7 @@ func queryProjectionBatch(
 	var batch ProjectionBatch
 	var appliedByUID int64
 	var appliedByGID int64
+	var libraryRootID sql.NullInt64
 	var undoneByUID sql.NullInt64
 	var undoneByGID sql.NullInt64
 	var undoneAt sql.NullInt64
@@ -1449,7 +1457,7 @@ func queryProjectionBatch(
 		&batch.ID,
 		&batch.LibraryID,
 		&batch.LibraryName,
-		&batch.LibraryRootID,
+		&libraryRootID,
 		&batch.ProfileName,
 		&batch.ProfileVersion,
 		&batch.Digest,
@@ -1468,6 +1476,10 @@ func queryProjectionBatch(
 	}
 	batch.AppliedByUID = uint32(appliedByUID)
 	batch.AppliedByGID = uint32(appliedByGID)
+	if libraryRootID.Valid {
+		batch.LibraryRootID = libraryRootID.Int64
+		batch.LibraryRootAvailable = true
+	}
 	batch.UndoneByUID = nullableUint32(undoneByUID)
 	batch.UndoneByGID = nullableUint32(undoneByGID)
 	batch.UndoneAt = nullableInt64(undoneAt)
@@ -1475,6 +1487,31 @@ func queryProjectionBatch(
 		return ProjectionBatch{}, err
 	}
 	return batch, nil
+}
+
+func projectionBatchEntries(
+	ctx context.Context,
+	query nodeQuery,
+	batchID int64,
+) ([]ProjectionBatchEntry, error) {
+	var entries []ProjectionBatchEntry
+	var cursorPosition int64 = -1
+	for {
+		entry, err := queryProjectionBatchEntry(
+			ctx,
+			query,
+			batchID,
+			cursorPosition,
+		)
+		if errors.Is(err, ErrNotFound) {
+			return entries, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list Projection Batch entries: %w", err)
+		}
+		entries = append(entries, entry)
+		cursorPosition = entry.Position
+	}
 }
 
 func queryProjectionBatchEntry(
@@ -1604,17 +1641,56 @@ func queryProjectionBatchOperation(
 	return operation, nil
 }
 
+func projectionBatchOperations(
+	ctx context.Context,
+	query nodeQuery,
+	batchID int64,
+) ([]ProjectionBatchOperation, error) {
+	var operations []ProjectionBatchOperation
+	var cursorID int64
+	for {
+		operation, err := queryProjectionBatchOperation(
+			ctx,
+			query,
+			batchID,
+			cursorID,
+		)
+		if errors.Is(err, ErrNotFound) {
+			return operations, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list Projection Batch operations: %w", err)
+		}
+		operations = append(operations, operation)
+		cursorID = operation.ID
+	}
+}
+
 func validatePersistedProjectionBatch(batch ProjectionBatch) error {
 	if batch.ID <= 0 ||
 		batch.LibraryID <= 0 ||
 		batch.LibraryName == "" ||
-		batch.LibraryRootID <= 0 ||
 		batch.ProfileName == "" ||
 		batch.ProfileVersion <= 0 ||
 		!validDigest(batch.Digest) ||
 		batch.AppliedAt <= 0 {
 		return fmt.Errorf(
 			"%w: Projection Batch %d has invalid provenance",
+			ErrInvalidOperation,
+			batch.ID,
+		)
+	}
+	if batch.LibraryRootAvailable {
+		if batch.LibraryRootID <= 0 {
+			return fmt.Errorf(
+				"%w: Projection Batch %d has an invalid LibraryRoot",
+				ErrInvalidOperation,
+				batch.ID,
+			)
+		}
+	} else if batch.LibraryRootID != 0 {
+		return fmt.Errorf(
+			"%w: Projection Batch %d has unavailable LibraryRoot state",
 			ErrInvalidOperation,
 			batch.ID,
 		)
