@@ -140,7 +140,7 @@ daemon：
 scrapefsd
 ```
 
-所有供自动化调用的命令必须支持机器可读 JSON 输出。`projection batch validate` 和 `projection batch apply` 使用 `--file <path>` 读取 UTF-8 JSON，并使用 `--file -` 从 stdin 读取。非 TTY 或显式机器可读模式不得提示输入或自动 apply。
+所有已实现的 Projection Batch 命令都输出机器可读 JSON。`projection batch validate` 和 `projection batch apply` 使用 `--file <path>` 读取 UTF-8 JSON，并使用 `--file -` 从 stdin 读取。非 TTY 或显式机器可读模式不得提示输入或自动 apply。CLI 默认连接 `/run/scrapefs/scrapefs.sock`，可使用全局 `--socket <path>` 覆盖为配置的路径。
 
 ## 8. 第一版配置
 

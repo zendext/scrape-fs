@@ -109,6 +109,127 @@ func (repository *Repository) Libraries(ctx context.Context) ([]Library, error) 
 	return libraries, nil
 }
 
+func (repository *Repository) ProjectionBatches(
+	ctx context.Context,
+) ([]ProjectionBatch, error) {
+	var batches []ProjectionBatch
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var cursorID int64
+		for {
+			batch, err := queryProjectionBatch(ctx, connection, `
+				scrapes.status IN ('applied', 'undone')
+				AND scrapes.id > ?
+				ORDER BY scrapes.id
+				LIMIT 1
+			`, cursorID)
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("list Projection Batches: %w", err)
+			}
+			batches = append(batches, batch)
+			cursorID = batch.ID
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return batches, nil
+}
+
+func (repository *Repository) ProjectionBatch(
+	ctx context.Context,
+	id int64,
+) (ProjectionBatch, error) {
+	if id <= 0 {
+		return ProjectionBatch{}, ErrNotFound
+	}
+
+	var batch ProjectionBatch
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var err error
+		batch, err = queryProjectionBatch(
+			ctx,
+			connection,
+			"scrapes.id = ? AND scrapes.status IN ('applied', 'undone')",
+			id,
+		)
+		return err
+	})
+	if err != nil {
+		return ProjectionBatch{}, err
+	}
+	return batch, nil
+}
+
+func (repository *Repository) ProjectionBatchEntries(
+	ctx context.Context,
+	batchID int64,
+) ([]ProjectionBatchEntry, error) {
+	var entries []ProjectionBatchEntry
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var err error
+		entries, err = projectionBatchEntries(ctx, connection, batchID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (repository *Repository) ProjectionBatchOperations(
+	ctx context.Context,
+	batchID int64,
+) ([]ProjectionBatchOperation, error) {
+	var operations []ProjectionBatchOperation
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var err error
+		operations, err = projectionBatchOperations(ctx, connection, batchID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return operations, nil
+}
+
+func (repository *Repository) ProjectionBatchDetail(
+	ctx context.Context,
+	batchID int64,
+) (ProjectionBatch, []ProjectionBatchEntry, []ProjectionBatchOperation, error) {
+	if batchID <= 0 {
+		return ProjectionBatch{}, nil, nil, ErrNotFound
+	}
+
+	var batch ProjectionBatch
+	var entries []ProjectionBatchEntry
+	var operations []ProjectionBatchOperation
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var err error
+		batch, err = queryProjectionBatch(
+			ctx,
+			connection,
+			"scrapes.id = ? AND scrapes.status IN ('applied', 'undone')",
+			batchID,
+		)
+		if err != nil {
+			return err
+		}
+		entries, err = projectionBatchEntries(ctx, connection, batchID)
+		if err != nil {
+			return err
+		}
+		operations, err = projectionBatchOperations(ctx, connection, batchID)
+		return err
+	})
+	if err != nil {
+		return ProjectionBatch{}, nil, nil, err
+	}
+	return batch, entries, operations, nil
+}
+
 func (repository *Repository) Lookup(
 	ctx context.Context,
 	libraryRootID int64,
@@ -129,6 +250,61 @@ func (repository *Repository) Lookup(
 		return Node{}, err
 	}
 	return current, nil
+}
+
+func (repository *Repository) ValidateProjectionTargets(
+	ctx context.Context,
+	libraryName string,
+	relativePaths []string,
+) (Library, int64, error) {
+	if err := validateName(libraryName); err != nil {
+		return Library{}, 0, fmt.Errorf("%w: invalid name: %v", ErrInvalidLibrary, err)
+	}
+	if len(relativePaths) == 0 {
+		return Library{}, 0, fmt.Errorf("%w: targets must not be empty", ErrInvalidPath)
+	}
+	components := make([][]string, len(relativePaths))
+	for index, relativePath := range relativePaths {
+		validated, err := ValidateRelativePath(relativePath)
+		if err != nil {
+			return Library{}, 0, err
+		}
+		components[index] = validated
+	}
+
+	var library Library
+	var version int64
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var err error
+		library, err = queryLibrary(
+			ctx,
+			connection,
+			"libraries.status = 'ACTIVE' AND libraries.name = ?",
+			libraryName,
+		)
+		if errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("%w: %q", ErrLibraryNotFound, libraryName)
+		}
+		if err != nil {
+			return fmt.Errorf("get Library %q: %w", libraryName, err)
+		}
+		for _, targetComponents := range components {
+			if err := checkTargetAvailable(
+				ctx,
+				connection,
+				library.RootNodeID,
+				targetComponents,
+			); err != nil {
+				return err
+			}
+		}
+		version, err = namespaceVersion(ctx, connection)
+		return err
+	})
+	if err != nil {
+		return Library{}, 0, err
+	}
+	return library, version, nil
 }
 
 // Update holds exclusive database access for the callback. The callback must
@@ -221,6 +397,17 @@ func (repository *Repository) update(
 		return 0, rollback(fmt.Errorf("increment namespace version: %w", err))
 	}
 
+	scrapeID := operation.ScrapeID
+	if namespaceTransaction.operationScrapeID != nil {
+		if scrapeID != nil && *scrapeID != *namespaceTransaction.operationScrapeID {
+			return 0, rollback(fmt.Errorf(
+				"%w: conflicting Projection Batch operation references",
+				ErrInvalidOperation,
+			))
+		}
+		scrapeID = namespaceTransaction.operationScrapeID
+	}
+
 	if _, err := transaction.ExecContext(ctx, `
 		INSERT INTO operation_log (
 			operation,
@@ -235,7 +422,7 @@ func (repository *Repository) update(
 		operation.Name,
 		operation.Actor.Kind,
 		operation.Actor.ID,
-		operation.ScrapeID,
+		scrapeID,
 		version,
 		string(detailsJSON),
 		repository.now().UTC().UnixNano(),
@@ -250,9 +437,10 @@ func (repository *Repository) update(
 }
 
 type Transaction struct {
-	transaction *database.Transaction
-	now         func() time.Time
-	changed     bool
+	transaction       *database.Transaction
+	now               func() time.Time
+	changed           bool
+	operationScrapeID *int64
 }
 
 func (transaction *Transaction) GlobalRoot(ctx context.Context) (Node, error) {
@@ -273,6 +461,30 @@ func (transaction *Transaction) Lookup(
 		return Node{}, err
 	}
 	return lookupComponents(ctx, transaction.transaction, libraryRootID, components)
+}
+
+func (transaction *Transaction) CheckTargetAvailable(
+	ctx context.Context,
+	libraryRootID int64,
+	relativePath string,
+) error {
+	components, err := ValidateRelativePath(relativePath)
+	if err != nil {
+		return err
+	}
+	return checkTargetAvailable(ctx, transaction.transaction, libraryRootID, components)
+}
+
+func (transaction *Transaction) ProjectionBatch(
+	ctx context.Context,
+	id int64,
+) (ProjectionBatch, error) {
+	return queryProjectionBatch(
+		ctx,
+		transaction.transaction,
+		"scrapes.id = ? AND scrapes.status IN ('applied', 'undone')",
+		id,
+	)
 }
 
 func (transaction *Transaction) CreateLibrary(
@@ -454,6 +666,271 @@ func (transaction *Transaction) CreateNode(
 	}
 	transaction.changed = true
 	return node, nil
+}
+
+func (transaction *Transaction) CreateProjectionBatch(
+	ctx context.Context,
+	request CreateProjectionBatch,
+) (ProjectionBatch, error) {
+	if err := validateCreateProjectionBatch(request); err != nil {
+		return ProjectionBatch{}, err
+	}
+
+	result, err := transaction.transaction.ExecContext(ctx, `
+		INSERT INTO scrapes (
+			library_id,
+			profile_name,
+			profile_version,
+			digest,
+			status,
+			applied_by_uid,
+			applied_by_gid,
+			applied_at,
+			undone_by_uid,
+			undone_by_gid,
+			undone_at
+		) VALUES (?, ?, ?, ?, 'applied', ?, ?, ?, NULL, NULL, NULL)
+	`,
+		request.LibraryID,
+		request.ProfileName,
+		request.ProfileVersion,
+		request.Digest,
+		request.AppliedByUID,
+		request.AppliedByGID,
+		request.AppliedAt,
+	)
+	if err != nil {
+		return ProjectionBatch{}, fmt.Errorf("create Projection Batch: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return ProjectionBatch{}, fmt.Errorf("read created Projection Batch ID: %w", err)
+	}
+	batch, err := queryProjectionBatch(
+		ctx,
+		transaction.transaction,
+		"scrapes.id = ?",
+		id,
+	)
+	if err != nil {
+		return ProjectionBatch{}, fmt.Errorf("read created Projection Batch: %w", err)
+	}
+	return batch, nil
+}
+
+func (transaction *Transaction) CreateProjectionBatchEntry(
+	ctx context.Context,
+	request CreateProjectionBatchEntry,
+) error {
+	if err := validateCreateProjectionBatchEntry(request); err != nil {
+		return err
+	}
+	node, err := queryNode(
+		ctx,
+		transaction.transaction,
+		"id = ?",
+		request.ProjectionNodeID,
+	)
+	if err != nil {
+		return fmt.Errorf("read Projection Batch node: %w", err)
+	}
+	if node.Kind != ProjectionFile ||
+		node.OriginScrapeID == nil ||
+		*node.OriginScrapeID != request.BatchID ||
+		node.Source == nil ||
+		*node.Source != request.Source {
+		return fmt.Errorf(
+			"%w: Projection Batch entry does not match node %d",
+			ErrInvalidNode,
+			request.ProjectionNodeID,
+		)
+	}
+
+	if _, err := transaction.transaction.ExecContext(ctx, `
+		INSERT INTO projection_batch_entries (
+			scrape_id,
+			position,
+			source_path,
+			source_device_id,
+			source_inode,
+			cached_size,
+			cached_atime_ns,
+			cached_mtime_ns,
+			cached_source_ctime_ns,
+			verified_at_ns,
+			target,
+			projection_node_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		request.BatchID,
+		request.Position,
+		request.Source.Path,
+		request.Source.DeviceID,
+		request.Source.Inode,
+		request.Source.Size,
+		request.Source.AtimeNS,
+		request.Source.MtimeNS,
+		request.Source.SourceCtimeNS,
+		request.Source.VerifiedAtNS,
+		request.Target,
+		request.ProjectionNodeID,
+	); err != nil {
+		return fmt.Errorf("create Projection Batch entry: %w", err)
+	}
+	return nil
+}
+
+func (transaction *Transaction) AssociateOperationWithProjectionBatch(
+	ctx context.Context,
+	batchID int64,
+) error {
+	if batchID <= 0 {
+		return fmt.Errorf("%w: invalid Projection Batch ID", ErrInvalidOperation)
+	}
+	if _, err := transaction.ProjectionBatch(ctx, batchID); err != nil {
+		return fmt.Errorf("read Projection Batch operation reference: %w", err)
+	}
+	id := batchID
+	transaction.operationScrapeID = &id
+	return nil
+}
+
+func (transaction *Transaction) RemoveProjectionBatchProjections(
+	ctx context.Context,
+	batchID int64,
+) ([]int64, error) {
+	var parentIDs []int64
+	var cursorID int64
+	for {
+		node, err := queryNode(ctx, transaction.transaction, `
+			origin_scrape_id = ?
+			AND kind = 'PROJECTION_FILE'
+			AND id > ?
+			ORDER BY id
+			LIMIT 1
+		`, batchID, cursorID)
+		if errors.Is(err, ErrNotFound) {
+			return parentIDs, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list Projection Batch nodes: %w", err)
+		}
+		cursorID = node.ID
+		if node.ParentID == nil {
+			return nil, fmt.Errorf("%w: ProjectionFile has no parent", ErrInvalidNode)
+		}
+
+		result, err := transaction.transaction.ExecContext(ctx, `
+			DELETE FROM nodes
+			WHERE id = ?
+			  AND kind = 'PROJECTION_FILE'
+			  AND origin_scrape_id = ?
+		`, node.ID, batchID)
+		if err != nil {
+			return nil, classifyMutationError("remove Projection Batch node", err)
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("read removed Projection count: %w", err)
+		}
+		if deleted != 1 {
+			return nil, fmt.Errorf(
+				"%w: Projection Batch node %d disappeared during transaction",
+				ErrInvalidNode,
+				node.ID,
+			)
+		}
+		now := transaction.now().UTC().UnixNano()
+		if err := transaction.touchDirectory(ctx, *node.ParentID, now); err != nil {
+			return nil, err
+		}
+		transaction.changed = true
+		parentIDs = append(parentIDs, *node.ParentID)
+	}
+}
+
+func (transaction *Transaction) MarkProjectionBatchUndone(
+	ctx context.Context,
+	batchID int64,
+	uid uint32,
+	gid uint32,
+	undoneAt int64,
+) error {
+	result, err := transaction.transaction.ExecContext(ctx, `
+		UPDATE scrapes
+		SET
+			status = 'undone',
+			undone_by_uid = ?,
+			undone_by_gid = ?,
+			undone_at = ?
+		WHERE id = ?
+		  AND status = 'applied'
+	`, uid, gid, undoneAt, batchID)
+	if err != nil {
+		return fmt.Errorf("mark Projection Batch undone: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read undone Projection Batch count: %w", err)
+	}
+	if updated != 1 {
+		return ErrNotFound
+	}
+	transaction.changed = true
+	return nil
+}
+
+func (transaction *Transaction) RetainedOverlayPaths(
+	ctx context.Context,
+	libraryRootID int64,
+	targets []string,
+) ([]string, error) {
+	parentPaths := make([]string, 0, len(targets))
+	for _, target := range targets {
+		components, err := ValidateRelativePath(target)
+		if err != nil {
+			return nil, err
+		}
+		parentPaths = append(parentPaths, strings.Join(components[:len(components)-1], "/"))
+	}
+
+	var paths []string
+	var cursorID int64
+	for {
+		node, err := queryNode(ctx, transaction.transaction, `
+			kind = 'OVERLAY_FILE'
+			AND id > ?
+			ORDER BY id
+			LIMIT 1
+		`, cursorID)
+		if errors.Is(err, ErrNotFound) {
+			return paths, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list retained OverlayFiles: %w", err)
+		}
+		cursorID = node.ID
+
+		relativePath, err := nodePathToRoot(
+			ctx,
+			transaction.transaction,
+			node.ID,
+			libraryRootID,
+		)
+		if errors.Is(err, ErrInvalidRoot) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, parentPath := range parentPaths {
+			if parentPath == "" ||
+				strings.HasPrefix(relativePath, parentPath+"/") {
+				paths = append(paths, relativePath)
+				break
+			}
+		}
+	}
 }
 
 func (transaction *Transaction) validateParent(
@@ -769,6 +1246,70 @@ func validateCreateNode(request CreateNode) error {
 	return nil
 }
 
+func validateCreateProjectionBatch(request CreateProjectionBatch) error {
+	if request.LibraryID <= 0 {
+		return fmt.Errorf("%w: invalid Projection Batch Library ID", ErrInvalidOperation)
+	}
+	if strings.TrimSpace(request.ProfileName) == "" || request.ProfileVersion <= 0 {
+		return fmt.Errorf("%w: invalid Projection Batch Profile", ErrInvalidOperation)
+	}
+	if !validDigest(request.Digest) {
+		return fmt.Errorf("%w: invalid Projection Batch digest", ErrInvalidOperation)
+	}
+	if request.AppliedAt <= 0 {
+		return fmt.Errorf("%w: invalid Projection Batch apply time", ErrInvalidOperation)
+	}
+	return nil
+}
+
+func validateCreateProjectionBatchEntry(request CreateProjectionBatchEntry) error {
+	if request.BatchID <= 0 ||
+		request.Position < 0 ||
+		request.ProjectionNodeID <= 0 {
+		return fmt.Errorf("%w: invalid Projection Batch entry identity", ErrInvalidNode)
+	}
+	return validateProjectionBatchEntryData(
+		request.BatchID,
+		request.Position,
+		request.Source,
+		request.Target,
+	)
+}
+
+func validateProjectionBatchEntryData(
+	batchID int64,
+	position int64,
+	source ProjectionSource,
+	target string,
+) error {
+	if batchID <= 0 || position < 0 {
+		return fmt.Errorf("%w: invalid Projection Batch entry identity", ErrInvalidNode)
+	}
+	if _, err := ValidateRelativePath(target); err != nil {
+		return fmt.Errorf("%w: invalid Projection Batch target: %v", ErrInvalidNode, err)
+	}
+	if !strings.HasPrefix(source.Path, "/") ||
+		source.DeviceID < 0 ||
+		source.Inode < 0 ||
+		source.Size < 0 {
+		return fmt.Errorf("%w: invalid Projection Batch source", ErrInvalidNode)
+	}
+	return nil
+}
+
+func validDigest(value string) bool {
+	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, character := range value[len("sha256:"):] {
+		if (character < '0' || character > '9') &&
+			(character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func validateCreateLibrary(request CreateLibrary) error {
 	if err := validateName(request.Name); err != nil {
 		return fmt.Errorf("%w: invalid name: %v", ErrInvalidLibrary, err)
@@ -875,6 +1416,311 @@ func namespaceVersion(ctx context.Context, query nodeQuery) (int64, error) {
 		return 0, fmt.Errorf("read namespace version: %w", err)
 	}
 	return version, nil
+}
+
+func queryProjectionBatch(
+	ctx context.Context,
+	query nodeQuery,
+	predicate string,
+	arguments ...any,
+) (ProjectionBatch, error) {
+	row := query.QueryRowContext(ctx, `
+		SELECT
+			scrapes.id,
+			scrapes.library_id,
+			libraries.name,
+			libraries.root_node_id,
+			scrapes.profile_name,
+			scrapes.profile_version,
+			scrapes.digest,
+			scrapes.status,
+			scrapes.applied_by_uid,
+			scrapes.applied_by_gid,
+			scrapes.applied_at,
+			scrapes.undone_by_uid,
+			scrapes.undone_by_gid,
+			scrapes.undone_at
+		FROM scrapes
+		JOIN libraries ON libraries.id = scrapes.library_id
+		WHERE `+predicate,
+		arguments...,
+	)
+
+	var batch ProjectionBatch
+	var appliedByUID int64
+	var appliedByGID int64
+	var libraryRootID sql.NullInt64
+	var undoneByUID sql.NullInt64
+	var undoneByGID sql.NullInt64
+	var undoneAt sql.NullInt64
+	if err := row.Scan(
+		&batch.ID,
+		&batch.LibraryID,
+		&batch.LibraryName,
+		&libraryRootID,
+		&batch.ProfileName,
+		&batch.ProfileVersion,
+		&batch.Digest,
+		&batch.Status,
+		&appliedByUID,
+		&appliedByGID,
+		&batch.AppliedAt,
+		&undoneByUID,
+		&undoneByGID,
+		&undoneAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ProjectionBatch{}, ErrNotFound
+		}
+		return ProjectionBatch{}, err
+	}
+	batch.AppliedByUID = uint32(appliedByUID)
+	batch.AppliedByGID = uint32(appliedByGID)
+	if libraryRootID.Valid {
+		batch.LibraryRootID = libraryRootID.Int64
+		batch.LibraryRootAvailable = true
+	}
+	batch.UndoneByUID = nullableUint32(undoneByUID)
+	batch.UndoneByGID = nullableUint32(undoneByGID)
+	batch.UndoneAt = nullableInt64(undoneAt)
+	if err := validatePersistedProjectionBatch(batch); err != nil {
+		return ProjectionBatch{}, err
+	}
+	return batch, nil
+}
+
+func projectionBatchEntries(
+	ctx context.Context,
+	query nodeQuery,
+	batchID int64,
+) ([]ProjectionBatchEntry, error) {
+	var entries []ProjectionBatchEntry
+	var cursorPosition int64 = -1
+	for {
+		entry, err := queryProjectionBatchEntry(
+			ctx,
+			query,
+			batchID,
+			cursorPosition,
+		)
+		if errors.Is(err, ErrNotFound) {
+			return entries, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list Projection Batch entries: %w", err)
+		}
+		entries = append(entries, entry)
+		cursorPosition = entry.Position
+	}
+}
+
+func queryProjectionBatchEntry(
+	ctx context.Context,
+	query nodeQuery,
+	batchID int64,
+	afterPosition int64,
+) (ProjectionBatchEntry, error) {
+	row := query.QueryRowContext(ctx, `
+		SELECT
+			position,
+			source_path,
+			source_device_id,
+			source_inode,
+			cached_size,
+			cached_atime_ns,
+			cached_mtime_ns,
+			cached_source_ctime_ns,
+			verified_at_ns,
+			target,
+			projection_node_id
+		FROM projection_batch_entries
+		WHERE scrape_id = ?
+		  AND position > ?
+		ORDER BY position
+		LIMIT 1
+	`, batchID, afterPosition)
+
+	var entry ProjectionBatchEntry
+	var projectionNodeID sql.NullInt64
+	if err := row.Scan(
+		&entry.Position,
+		&entry.Source.Path,
+		&entry.Source.DeviceID,
+		&entry.Source.Inode,
+		&entry.Source.Size,
+		&entry.Source.AtimeNS,
+		&entry.Source.MtimeNS,
+		&entry.Source.SourceCtimeNS,
+		&entry.Source.VerifiedAtNS,
+		&entry.Target,
+		&projectionNodeID,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ProjectionBatchEntry{}, ErrNotFound
+		}
+		return ProjectionBatchEntry{}, err
+	}
+	entry.ProjectionNodeID = nullableInt64(projectionNodeID)
+	if entry.ProjectionNodeID != nil && *entry.ProjectionNodeID <= 0 {
+		return ProjectionBatchEntry{}, fmt.Errorf(
+			"%w: invalid persisted Projection node ID",
+			ErrInvalidNode,
+		)
+	}
+	if err := validateProjectionBatchEntryData(
+		batchID,
+		entry.Position,
+		entry.Source,
+		entry.Target,
+	); err != nil {
+		return ProjectionBatchEntry{}, fmt.Errorf(
+			"%w: persisted Projection Batch entry: %v",
+			ErrInvalidNode,
+			err,
+		)
+	}
+	return entry, nil
+}
+
+func queryProjectionBatchOperation(
+	ctx context.Context,
+	query nodeQuery,
+	batchID int64,
+	afterID int64,
+) (ProjectionBatchOperation, error) {
+	row := query.QueryRowContext(ctx, `
+		SELECT
+			id,
+			operation,
+			actor_kind,
+			actor_id,
+			namespace_version,
+			details_json,
+			created_at
+		FROM operation_log
+		WHERE scrape_id = ?
+		  AND id > ?
+		ORDER BY id
+		LIMIT 1
+	`, batchID, afterID)
+
+	var operation ProjectionBatchOperation
+	var actorID sql.NullInt64
+	var detailsJSON string
+	if err := row.Scan(
+		&operation.ID,
+		&operation.Name,
+		&operation.Actor.Kind,
+		&actorID,
+		&operation.NamespaceVersion,
+		&detailsJSON,
+		&operation.CreatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ProjectionBatchOperation{}, ErrNotFound
+		}
+		return ProjectionBatchOperation{}, err
+	}
+	operation.Actor.ID = nullableInt64(actorID)
+	if err := json.Unmarshal([]byte(detailsJSON), &operation.Details); err != nil {
+		return ProjectionBatchOperation{}, fmt.Errorf(
+			"%w: decode Projection Batch operation details: %v",
+			ErrInvalidOperation,
+			err,
+		)
+	}
+	batchReference := batchID
+	if err := validateOperation(Operation{
+		Name:     operation.Name,
+		Actor:    operation.Actor,
+		ScrapeID: &batchReference,
+		Details:  operation.Details,
+	}, func(*Transaction) error { return nil }); err != nil {
+		return ProjectionBatchOperation{}, err
+	}
+	return operation, nil
+}
+
+func projectionBatchOperations(
+	ctx context.Context,
+	query nodeQuery,
+	batchID int64,
+) ([]ProjectionBatchOperation, error) {
+	var operations []ProjectionBatchOperation
+	var cursorID int64
+	for {
+		operation, err := queryProjectionBatchOperation(
+			ctx,
+			query,
+			batchID,
+			cursorID,
+		)
+		if errors.Is(err, ErrNotFound) {
+			return operations, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list Projection Batch operations: %w", err)
+		}
+		operations = append(operations, operation)
+		cursorID = operation.ID
+	}
+}
+
+func validatePersistedProjectionBatch(batch ProjectionBatch) error {
+	if batch.ID <= 0 ||
+		batch.LibraryID <= 0 ||
+		batch.LibraryName == "" ||
+		batch.ProfileName == "" ||
+		batch.ProfileVersion <= 0 ||
+		!validDigest(batch.Digest) ||
+		batch.AppliedAt <= 0 {
+		return fmt.Errorf(
+			"%w: Projection Batch %d has invalid provenance",
+			ErrInvalidOperation,
+			batch.ID,
+		)
+	}
+	if batch.LibraryRootAvailable {
+		if batch.LibraryRootID <= 0 {
+			return fmt.Errorf(
+				"%w: Projection Batch %d has an invalid LibraryRoot",
+				ErrInvalidOperation,
+				batch.ID,
+			)
+		}
+	} else if batch.LibraryRootID != 0 {
+		return fmt.Errorf(
+			"%w: Projection Batch %d has unavailable LibraryRoot state",
+			ErrInvalidOperation,
+			batch.ID,
+		)
+	}
+	switch batch.Status {
+	case ProjectionBatchApplied:
+		if batch.UndoneByUID != nil || batch.UndoneByGID != nil || batch.UndoneAt != nil {
+			return fmt.Errorf(
+				"%w: applied Projection Batch %d has undo provenance",
+				ErrInvalidOperation,
+				batch.ID,
+			)
+		}
+	case ProjectionBatchUndone:
+		if batch.UndoneByUID == nil || batch.UndoneByGID == nil || batch.UndoneAt == nil {
+			return fmt.Errorf(
+				"%w: undone Projection Batch %d lacks undo provenance",
+				ErrInvalidOperation,
+				batch.ID,
+			)
+		}
+	default:
+		return fmt.Errorf(
+			"%w: Projection Batch %d has status %q",
+			ErrInvalidOperation,
+			batch.ID,
+			batch.Status,
+		)
+	}
+	return nil
 }
 
 func queryLibrary(
@@ -1065,6 +1911,92 @@ func lookupComponents(
 	return current, nil
 }
 
+func checkTargetAvailable(
+	ctx context.Context,
+	query nodeQuery,
+	libraryRootID int64,
+	components []string,
+) error {
+	current, err := queryNode(ctx, query, "id = ?", libraryRootID)
+	if err != nil {
+		return fmt.Errorf("read library root: %w", err)
+	}
+	if current.Kind != LibraryRoot {
+		return fmt.Errorf(
+			"%w: node %d is %s",
+			ErrInvalidRoot,
+			libraryRootID,
+			current.Kind,
+		)
+	}
+
+	for index, component := range components {
+		child, err := queryNode(
+			ctx,
+			query,
+			"parent_id = ? AND name = ?",
+			current.ID,
+			component,
+		)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("check target component %q: %w", component, err)
+		}
+		if index == len(components)-1 {
+			return fmt.Errorf("%w: target already exists", ErrConflict)
+		}
+		if child.Kind != Directory {
+			return fmt.Errorf(
+				"%w: target parent %q is %s",
+				ErrConflict,
+				component,
+				child.Kind,
+			)
+		}
+		current = child
+	}
+	return nil
+}
+
+func nodePathToRoot(
+	ctx context.Context,
+	query nodeQuery,
+	nodeID int64,
+	rootNodeID int64,
+) (string, error) {
+	var components []string
+	seen := map[int64]struct{}{}
+	currentID := nodeID
+	for currentID != rootNodeID {
+		if _, duplicate := seen[currentID]; duplicate {
+			return "", fmt.Errorf("%w: node ancestry contains a cycle", ErrInvalidRoot)
+		}
+		seen[currentID] = struct{}{}
+
+		node, err := queryNode(ctx, query, "id = ?", currentID)
+		if err != nil {
+			return "", fmt.Errorf("read node path: %w", err)
+		}
+		components = append(components, node.Name)
+		if node.ParentID == nil {
+			return "", fmt.Errorf(
+				"%w: node %d is outside LibraryRoot %d",
+				ErrInvalidRoot,
+				nodeID,
+				rootNodeID,
+			)
+		}
+		currentID = *node.ParentID
+	}
+
+	for left, right := 0, len(components)-1; left < right; left, right = left+1, right-1 {
+		components[left], components[right] = components[right], components[left]
+	}
+	return strings.Join(components, "/"), nil
+}
+
 func queryNode(
 	ctx context.Context,
 	query nodeQuery,
@@ -1183,5 +2115,13 @@ func nullableInt64(value sql.NullInt64) *int64 {
 		return nil
 	}
 	result := value.Int64
+	return &result
+}
+
+func nullableUint32(value sql.NullInt64) *uint32 {
+	if !value.Valid {
+		return nil
+	}
+	result := uint32(value.Int64)
 	return &result
 }

@@ -6,7 +6,7 @@ ScrapeFS is an external-agent-assisted media organization and virtual directory 
 
 It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
 
-> Status: early implementation. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite, and provides the transactional persistent namespace core plus Library and direct Projection services. The control socket and FUSE behavior are not implemented yet.
+> Status: early implementation. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite, provides Library and direct Projection services, and serves Projection Batch operations through the Unix control socket. FUSE behavior is not implemented yet.
 
 ## Core Model
 
@@ -62,7 +62,7 @@ Removing or renaming the Projection does not modify the source file.
 When media identification is needed, an external Agent skill reads the source directory, probes media, queries metadata, and generates an explicit batch:
 
 ```bash
-scrapefs projection batch validate --file /tmp/dune.batch.json
+scrapefs projection batch validate --file /tmp/dune.batch.json --json
 scrapefs projection batch apply \
   --file /tmp/dune.batch.json \
   --expected-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

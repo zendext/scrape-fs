@@ -198,9 +198,9 @@ applied
 undone
 ```
 
-基础 namespace migration 已发布 `scrapes`、`nodes.origin_scrape_id` 和 `operation_log.scrape_id` 名称。第一版可以扩展这些 legacy storage 名称保存 Batch provenance，避免重写已发布 migration。它们是内部存储名称，不属于 CLI 或 JSON Schema。
+基础 namespace migration 已发布 `scrapes`、`nodes.origin_scrape_id` 和 `operation_log.scrape_id` 名称。schema migration 3 扩展这些 legacy storage 名称保存 Batch provenance，避免重写已发布 migration。它们是内部存储名称，不属于 CLI 或 JSON Schema。
 
-Batch 不保存外部 Agent 的 prompt、对话、metadata response 或未应用 JSON。ProjectionFile 自身保存 source identity，operation log 保存批次路径快照。
+Batch 不保存外部 Agent 的 prompt、对话、metadata response 或未应用 JSON。`projection_batch_entries` 保存有序的 source identity 和 target 历史，使 `show` 在 undo 后仍能完整展示；operation log 保存 apply 和 undo 的路径快照。
 
 ## 7. Show、List 和 Undo
 
@@ -211,6 +211,8 @@ scrapefs projection batch undo batch-42
 ```
 
 `show` 只展示已 applied 或 undone Batch 的 provenance、创建的 Projection 和 operation-log 快照，不提供待处理 Plan。
+
+Library retired 后，Batch 历史仍可通过 `list` 和 `show` 读取。undo 要求 LibraryRoot 仍可用；Library 已 retired 时拒绝 undo，且不修改 Batch 状态。
 
 undo 在单个 SQLite 事务中：
 

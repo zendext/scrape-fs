@@ -124,6 +124,147 @@ func TestRepositoryUpdateRollsBackNodesVersionAndLog(t *testing.T) {
 	}
 }
 
+func TestRepositoryPersistsProjectionBatchHistoryAndOperationReference(t *testing.T) {
+	opened := openTestDatabase(t)
+	repository := NewRepository(opened)
+	repository.now = func() time.Time {
+		return time.Unix(1_700_000_000, 123)
+	}
+	ctx := context.Background()
+
+	var library Library
+	if _, err := repository.Update(
+		ctx,
+		testOperation("library.create"),
+		func(transaction *Transaction) error {
+			var err error
+			library, err = transaction.CreateLibrary(ctx, CreateLibrary{
+				Name:           "media",
+				ProfileName:    "jellyfin",
+				ProfileVersion: 1,
+				Creator:        Actor{Kind: ActorSystem},
+				UID:            1000,
+				GID:            1001,
+				RootMode:       0o775,
+				DirectoryMode:  0o775,
+				ProjectionMode: 0o444,
+				OverlayMode:    0o664,
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("Create Library: %v", err)
+	}
+
+	source := ProjectionSource{
+		Path:          "/srv/media/Dune.mkv",
+		DeviceID:      1,
+		Inode:         2,
+		Size:          3,
+		AtimeNS:       4,
+		MtimeNS:       5,
+		SourceCtimeNS: 6,
+		VerifiedAtNS:  7,
+	}
+	var batch ProjectionBatch
+	version, err := repository.Update(ctx, Operation{
+		Name:  "projection.batch.apply",
+		Actor: Actor{Kind: ActorSystem},
+		Details: OperationDetails{
+			Paths:     []string{"media:/Movies/Dune.mkv"},
+			NodeKinds: []NodeKind{ProjectionFile},
+		},
+	}, func(transaction *Transaction) error {
+		var err error
+		batch, err = transaction.CreateProjectionBatch(ctx, CreateProjectionBatch{
+			LibraryID:      library.ID,
+			ProfileName:    library.ProfileName,
+			ProfileVersion: library.ProfileVersion,
+			Digest:         "sha256:" + strings.Repeat("a", 64),
+			AppliedByUID:   1000,
+			AppliedByGID:   1001,
+			AppliedAt:      repository.now().UTC().UnixNano(),
+		})
+		if err != nil {
+			return err
+		}
+		if err := transaction.AssociateOperationWithProjectionBatch(ctx, batch.ID); err != nil {
+			return err
+		}
+		parent, err := transaction.EnsureManagedDirectories(
+			ctx,
+			library.RootNodeID,
+			[]string{"Movies"},
+			Attributes{
+				Mode: library.DirectoryMode,
+				UID:  library.UID,
+				GID:  library.GID,
+			},
+			Actor{Kind: ActorSystem},
+		)
+		if err != nil {
+			return err
+		}
+		node, err := transaction.CreateNode(ctx, CreateNode{
+			ParentID:       parent.ID,
+			Name:           "Dune.mkv",
+			Kind:           ProjectionFile,
+			Source:         &source,
+			OriginScrapeID: &batch.ID,
+			Creator:        Actor{Kind: ActorSystem},
+			Attributes: Attributes{
+				Mode: library.ProjectionMode,
+				UID:  library.UID,
+				GID:  library.GID,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		return transaction.CreateProjectionBatchEntry(ctx, CreateProjectionBatchEntry{
+			BatchID:          batch.ID,
+			Position:         0,
+			Source:           source,
+			Target:           "Movies/Dune.mkv",
+			ProjectionNodeID: node.ID,
+		})
+	})
+	if err != nil {
+		t.Fatalf("apply Projection Batch: %v", err)
+	}
+	if version != 2 {
+		t.Errorf("version = %d, want 2", version)
+	}
+
+	batches, err := repository.ProjectionBatches(ctx)
+	if err != nil {
+		t.Fatalf("ProjectionBatches: %v", err)
+	}
+	if len(batches) != 1 || batches[0] != batch {
+		t.Errorf("batches = %#v, want %#v", batches, batch)
+	}
+	entries, err := repository.ProjectionBatchEntries(ctx, batch.ID)
+	if err != nil {
+		t.Fatalf("ProjectionBatchEntries: %v", err)
+	}
+	if len(entries) != 1 ||
+		entries[0].Position != 0 ||
+		entries[0].Source != source ||
+		entries[0].Target != "Movies/Dune.mkv" ||
+		entries[0].ProjectionNodeID == nil {
+		t.Errorf("entries = %#v", entries)
+	}
+	operations, err := repository.ProjectionBatchOperations(ctx, batch.ID)
+	if err != nil {
+		t.Fatalf("ProjectionBatchOperations: %v", err)
+	}
+	if len(operations) != 1 ||
+		operations[0].Name != "projection.batch.apply" ||
+		operations[0].NamespaceVersion != 2 {
+		t.Errorf("operations = %#v", operations)
+	}
+}
+
 func TestTransactionCreateLibraryPersistsMatchingRoot(t *testing.T) {
 	database := openTestDatabase(t)
 	repository := NewRepository(database)

@@ -53,7 +53,9 @@ NFO、海报等 artifact 在 Batch applied 后通过普通 FUSE 文件操作创�
 /run/scrapefs/scrapefs.sock
 ```
 
-第一版可以采用 HTTP over Unix socket、JSON-RPC 或其他简单本地协议。
+已实现的 Projection Batch 控制协议在每个 Unix socket 连接中使用一条严格 JSON request 和一条 JSON response。daemon 通过 `SO_PEERCRED` 获取调用者 UID/GID，不信任 client 提交的身份。CLI 可以使用 `--socket` 覆盖默认 endpoint。
+
+控制服务最多接受 32 个 active connection。request 上限为 16 MiB，必须在 5 秒内接收完成；response 必须在 30 秒内写完。可重试的 accept 资源错误不会导致 daemon 退出。
 
 ## 3. SQLite
 
@@ -82,7 +84,7 @@ SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 dae
 
 持久化内部 ID 使用 SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`，Go 中表示为 `int64`，因此已删除节点的 ID 不会复用。持久化时间使用 SQLite `INTEGER` 保存 UTC Unix 纳秒。
 
-基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。`scrapes` 是已发布的 legacy storage 名称；后续 Projection Batch migration 可以扩展它保存 applied Batch provenance，而不修改已发布 migration。
+基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。`scrapes` 是已发布的 legacy storage 名称；schema migration 3 在不修改已发布 migration 的前提下扩展它保存 applied Batch provenance，并新增 `projection_batch_entries` 保存有序的 source identity 和 target 历史。
 
 schema 只使用声明式局部完整性约束：`STRICT` 表、主键、`NOT NULL`、行内 `CHECK`、外键和唯一索引。SQLite trigger 不实现命名空间业务规则、生命周期策略、namespace version 策略或 operation log 策略。
 

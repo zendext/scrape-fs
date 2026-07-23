@@ -6,7 +6,7 @@ ScrapeFS 是一个面向 Linux 的外部 Agent 辅助媒体整理与虚拟目录
 
 它将一个或多个本地文件系统中的媒体文件投影为适合播放器识别的媒体库，同时不移动、不重命名、不修改源文件。
 
-> 当前状态：处于早期实现阶段。daemon 已支持加载并校验配置、获取宿主文件系统运行时锁、初始化 SQLite，以及提供事务化的持久命名空间核心、Library 服务和 direct Projection 服务；控制 socket 和 FUSE 行为尚未实现。
+> 当前状态：处于早期实现阶段。daemon 已支持加载并校验配置、获取宿主文件系统运行时锁、初始化 SQLite，提供 Library 和 direct Projection 服务，并通过 Unix 控制 socket 提供 Projection Batch 操作；FUSE 行为尚未实现。
 
 ## 核心模型
 
@@ -62,7 +62,7 @@ scrapefs projection add \
 需要识别媒体时，外部 Agent Skill 读取源目录、执行媒体探测和 metadata 查询，然后生成显式 Batch：
 
 ```bash
-scrapefs projection batch validate --file /tmp/dune.batch.json
+scrapefs projection batch validate --file /tmp/dune.batch.json --json
 scrapefs projection batch apply \
   --file /tmp/dune.batch.json \
   --expected-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

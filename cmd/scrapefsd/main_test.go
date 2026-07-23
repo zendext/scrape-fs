@@ -281,6 +281,74 @@ func TestRunReportsDatabaseInitializationErrorBeforeOtherRuntimeState(t *testing
 	}
 }
 
+func TestRunServesControlUntilContextCancellationAndClosesDatabase(t *testing.T) {
+	tempDir := t.TempDir()
+	configuration := config.Config{
+		Storage: config.Storage{
+			DatabasePath:     filepath.Join(tempDir, "state", "scrapefs.db"),
+			OverlayStorePath: filepath.Join(tempDir, "objects"),
+		},
+		FUSE: config.FUSE{Mountpoint: filepath.Join(tempDir, "mount")},
+		Control: config.Control{
+			SocketPath: filepath.Join(tempDir, "control.sock"),
+			SocketMode: 0o660,
+		},
+	}
+	loader := func(string) (config.Config, error) {
+		return configuration, nil
+	}
+	opened := &recordingDatabase{}
+	openDatabase := func(path string) (databaseCloser, error) {
+		if path != configuration.Storage.DatabasePath {
+			t.Errorf("database path = %q, want %q", path, configuration.Storage.DatabasePath)
+		}
+		return opened, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	serveStarted := make(chan struct{})
+	serve := func(
+		serveContext context.Context,
+		got config.Config,
+		database databaseCloser,
+	) error {
+		if got != configuration {
+			t.Errorf("serve config = %#v, want %#v", got, configuration)
+		}
+		if database != opened {
+			t.Errorf("serve database = %T, want recordingDatabase", database)
+		}
+		close(serveStarted)
+		<-serveContext.Done()
+		return nil
+	}
+	go func() {
+		<-serveStarted
+		cancel()
+	}()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithServerDependencies(
+		ctx,
+		nil,
+		&stdout,
+		&stderr,
+		loader,
+		openDatabase,
+		serve,
+	)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if !opened.closed {
+		t.Fatal("database was not closed after control server stopped")
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Errorf("stdout=%q stderr=%q, want empty", stdout.String(), stderr.String())
+	}
+}
+
 func TestRunInvalidConfigCreatesNoRuntimeState(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.toml")
@@ -318,6 +386,15 @@ socket_path = "` + filepath.Join(tempDir, "control.sock") + `"
 	if len(after) != len(before) {
 		t.Fatalf("directory entries changed: before=%v after=%v", entryNames(before), entryNames(after))
 	}
+}
+
+type recordingDatabase struct {
+	closed bool
+}
+
+func (database *recordingDatabase) Close() error {
+	database.closed = true
+	return nil
 }
 
 func entryNames(entries []os.DirEntry) []string {

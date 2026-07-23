@@ -42,7 +42,7 @@ func (service *Service) Create(
 	ctx context.Context,
 	request CreateRequest,
 ) (namespace.Node, error) {
-	candidate, err := service.prepare(ctx, request)
+	candidate, err := service.Prepare(ctx, request)
 	if err != nil {
 		return namespace.Node{}, err
 	}
@@ -52,20 +52,20 @@ func (service *Service) Create(
 		Name:  "projection.create",
 		Actor: request.Actor,
 		Details: namespace.OperationDetails{
-			Paths:     []string{candidate.target},
+			Paths:     []string{candidate.Target},
 			NodeKinds: []namespace.NodeKind{namespace.ProjectionFile},
 		},
 	}, func(transaction *namespace.Transaction) error {
-		parentID := candidate.library.RootNodeID
-		if len(candidate.components) > 1 {
+		parentID := candidate.Library.RootNodeID
+		if len(candidate.Components) > 1 {
 			parent, err := transaction.EnsureManagedDirectories(
 				ctx,
 				parentID,
-				candidate.components[:len(candidate.components)-1],
+				candidate.Components[:len(candidate.Components)-1],
 				namespace.Attributes{
-					Mode: candidate.library.DirectoryMode,
-					UID:  candidate.library.UID,
-					GID:  candidate.library.GID,
+					Mode: candidate.Library.DirectoryMode,
+					UID:  candidate.Library.UID,
+					GID:  candidate.Library.GID,
 				},
 				request.Actor,
 			)
@@ -78,66 +78,79 @@ func (service *Service) Create(
 		var err error
 		created, err = transaction.CreateNode(
 			ctx,
-			candidate.createNode(parentID, request.Actor),
+			candidate.CreateNode(parentID, request.Actor, nil),
 		)
 		return err
 	})
 	if err != nil {
 		return namespace.Node{}, fmt.Errorf(
 			"create Projection %q: %w",
-			candidate.target,
+			candidate.Target,
 			err,
 		)
 	}
 	return created, nil
 }
 
-type projectionCandidate struct {
-	library    namespace.Library
-	components []string
-	source     namespace.ProjectionSource
-	target     string
+type Candidate struct {
+	Library    namespace.Library
+	Components []string
+	Source     namespace.ProjectionSource
+	Target     string
 }
 
-func (service *Service) prepare(
+func (service *Service) Prepare(
 	ctx context.Context,
 	request CreateRequest,
-) (projectionCandidate, error) {
-	libraryName, relativePath, components, err := parseTarget(request.Target)
+) (Candidate, error) {
+	libraryName, relativePath, err := parseTarget(request.Target)
 	if err != nil {
-		return projectionCandidate{}, err
+		return Candidate{}, err
 	}
 
 	library, err := service.repository.Library(ctx, libraryName)
 	if err != nil {
-		return projectionCandidate{}, err
+		return Candidate{}, err
+	}
+	return service.PrepareForLibrary(ctx, library, request.SourcePath, relativePath)
+}
+
+func (service *Service) PrepareForLibrary(
+	ctx context.Context,
+	library namespace.Library,
+	sourcePath string,
+	relativePath string,
+) (Candidate, error) {
+	components, err := namespace.ValidateRelativePath(relativePath)
+	if err != nil {
+		return Candidate{}, err
 	}
 	if err := validateProfilePath(
 		library.ProfileName,
 		library.ProfileVersion,
 		components,
 	); err != nil {
-		return projectionCandidate{}, err
+		return Candidate{}, err
 	}
 
-	opened, err := sourcefile.Open(request.SourcePath)
+	opened, err := sourcefile.Open(sourcePath)
 	if err != nil {
-		return projectionCandidate{}, classifySourceError(err)
+		return Candidate{}, classifySourceError(err)
 	}
 	metadata := opened.Metadata
 	if err := opened.Close(); err != nil {
-		return projectionCandidate{}, fmt.Errorf(
+		return Candidate{}, fmt.Errorf(
 			"close Projection source %q: %w",
 			metadata.Path,
 			err,
 		)
 	}
 
-	return projectionCandidate{
-		library:    library,
-		components: components,
-		target:     library.Name + ":/" + relativePath,
-		source: namespace.ProjectionSource{
+	return Candidate{
+		Library:    library,
+		Components: components,
+		Target:     library.Name + ":/" + relativePath,
+		Source: namespace.ProjectionSource{
 			Path:          metadata.Path,
 			DeviceID:      metadata.DeviceID,
 			Inode:         metadata.Inode,
@@ -150,28 +163,30 @@ func (service *Service) prepare(
 	}, nil
 }
 
-func (candidate projectionCandidate) createNode(
+func (candidate Candidate) CreateNode(
 	parentID int64,
 	creator namespace.Actor,
+	originScrapeID *int64,
 ) namespace.CreateNode {
 	return namespace.CreateNode{
-		ParentID: parentID,
-		Name:     candidate.components[len(candidate.components)-1],
-		Kind:     namespace.ProjectionFile,
-		Source:   &candidate.source,
-		Creator:  creator,
+		ParentID:       parentID,
+		Name:           candidate.Components[len(candidate.Components)-1],
+		Kind:           namespace.ProjectionFile,
+		Source:         &candidate.Source,
+		OriginScrapeID: originScrapeID,
+		Creator:        creator,
 		Attributes: namespace.Attributes{
-			Mode: candidate.library.ProjectionMode,
-			UID:  candidate.library.UID,
-			GID:  candidate.library.GID,
+			Mode: candidate.Library.ProjectionMode,
+			UID:  candidate.Library.UID,
+			GID:  candidate.Library.GID,
 		},
 	}
 }
 
-func parseTarget(value string) (string, string, []string, error) {
+func parseTarget(value string) (string, string, error) {
 	libraryName, relativePath, found := strings.Cut(value, ":/")
 	if !found || libraryName == "" || relativePath == "" {
-		return "", "", nil, fmt.Errorf(
+		return "", "", fmt.Errorf(
 			"%w: target must use <library-name>:/<relative-path>",
 			ErrInvalidPath,
 		)
@@ -179,17 +194,16 @@ func parseTarget(value string) (string, string, []string, error) {
 
 	libraryComponents, err := namespace.ValidateRelativePath(libraryName)
 	if err != nil || len(libraryComponents) != 1 {
-		return "", "", nil, fmt.Errorf(
+		return "", "", fmt.Errorf(
 			"%w: invalid target Library name %q",
 			ErrInvalidPath,
 			libraryName,
 		)
 	}
-	components, err := namespace.ValidateRelativePath(relativePath)
-	if err != nil {
-		return "", "", nil, err
+	if _, err := namespace.ValidateRelativePath(relativePath); err != nil {
+		return "", "", err
 	}
-	return libraryName, relativePath, components, nil
+	return libraryName, relativePath, nil
 }
 
 func validateProfilePath(
