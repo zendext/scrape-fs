@@ -6,7 +6,7 @@ ScrapeFS 是一个面向 Linux 的外部 Agent 辅助媒体整理与虚拟目录
 
 它将一个或多个本地文件系统中的媒体文件投影为适合播放器识别的媒体库，同时不移动、不重命名、不修改源文件。
 
-> 当前状态：处于早期实现阶段。daemon 已支持加载并校验配置、获取宿主文件系统运行时锁、初始化 SQLite 和 Overlay object store，并通过 Unix 控制 socket 提供经过授权的 Library 和 Projection Batch 操作。direct Projection 服务已经存在，但尚未通过控制 CLI 暴露；FUSE 行为尚未实现。
+> 当前状态：处于早期实现阶段。daemon 已支持加载并校验配置、获取宿主文件系统运行时锁、初始化 SQLite 和 Overlay object store、挂载持久化 namespace 并提供只读遍历，并通过 Unix 控制 socket 提供经过授权的 Library 和 Projection Batch 操作。direct Projection 服务已经存在，但尚未通过控制 CLI 暴露；ProjectionFile 内容访问和可写 OverlayFile 行为尚未实现。
 
 ## 核心模型
 

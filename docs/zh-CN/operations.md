@@ -89,6 +89,10 @@ flock(LOCK_EX | LOCK_NB)
 
 不得卸载未知 FUSE 文件系统。
 
+daemon 必须通过持续持有的 mountpoint 目录 descriptor 挂载，而不是再次解析配置路径。
+该 descriptor-anchored direct `mount(2)` 要求 root 或 `CAP_SYS_ADMIN`；启动不得回退到
+未锚定的 `fusermount` 路径。
+
 ## 5. 正常停止
 
 1. 停止接受新控制请求和命名空间写事务。

@@ -6,6 +6,7 @@ require github.com/pelletier/go-toml/v2 v2.3.1
 
 require (
 	github.com/alecthomas/kong v1.16.0
+	github.com/hanwen/go-fuse/v2 v2.11.0
 	golang.org/x/sys v0.46.0
 	modernc.org/sqlite v1.54.0
 )
