@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	aclAccessXattr = "system.posix_acl_access"
-	aclVersion     = 0x0002
-	aclUndefinedID = ^uint32(0)
+	aclAccessXattr  = "system.posix_acl_access"
+	aclDefaultXattr = "system.posix_acl_default"
+	aclVersion      = 0x0002
+	aclUndefinedID  = ^uint32(0)
 
 	aclUserObject  uint16 = 0x01
 	aclUser        uint16 = 0x02
@@ -35,7 +36,7 @@ type aclEntry struct {
 
 func readAccessACL(path string) ([]aclEntry, error) {
 	size, err := unix.Getxattr(path, aclAccessXattr, nil)
-	if errors.Is(err, unix.ENODATA) {
+	if errors.Is(err, unix.ENODATA) || errors.Is(err, unix.ENOTSUP) {
 		return nil, nil
 	}
 	if err != nil {
@@ -303,4 +304,82 @@ func aclContains(entries []aclEntry, want aclEntry) bool {
 		}
 	}
 	return permissions&want.Permissions == want.Permissions
+}
+
+func aclGuaranteesUserAccess(
+	entries []aclEntry,
+	mode fs.FileMode,
+	ownerUID uint32,
+	uid uint32,
+	required uint16,
+) bool {
+	if uid == ownerUID {
+		return uint16(mode.Perm()>>6)&required == required
+	}
+	if len(entries) == 0 {
+		return uint16(mode.Perm()>>3)&required == required &&
+			uint16(mode.Perm())&required == required
+	}
+	if permissions, ok := aclPermissions(entries, aclUser, uid); ok {
+		return aclMaskPermissions(entries, permissions)&required == required
+	}
+	return aclOtherPermissions(entries)&required == required &&
+		aclAllGroupClassEntriesAllow(entries, required)
+}
+
+func aclGuaranteesGroupAccess(
+	entries []aclEntry,
+	mode fs.FileMode,
+	ownerGID uint32,
+	gid uint32,
+	required uint16,
+) bool {
+	if len(entries) == 0 {
+		groupAllows := uint16(mode.Perm()>>3)&required == required
+		if ownerGID == gid {
+			return groupAllows
+		}
+		return groupAllows && uint16(mode.Perm())&required == required
+	}
+
+	matched := false
+	permissions := uint16(0)
+	if ownerGID == gid {
+		matched = true
+		groupObject, _ := aclPermissions(entries, aclGroupObject, aclUndefinedID)
+		permissions |= groupObject
+	}
+	if named, ok := aclPermissions(entries, aclGroup, gid); ok {
+		matched = true
+		permissions |= named
+	}
+	if matched {
+		return aclMaskPermissions(entries, permissions)&required == required
+	}
+	return aclOtherPermissions(entries)&required == required &&
+		aclAllGroupClassEntriesAllow(entries, required)
+}
+
+func aclMaskPermissions(entries []aclEntry, permissions uint16) uint16 {
+	if mask, ok := aclPermissions(entries, aclMask, aclUndefinedID); ok {
+		return permissions & mask
+	}
+	return permissions
+}
+
+func aclOtherPermissions(entries []aclEntry) uint16 {
+	permissions, _ := aclPermissions(entries, aclOther, aclUndefinedID)
+	return permissions
+}
+
+func aclAllGroupClassEntriesAllow(entries []aclEntry, required uint16) bool {
+	for _, entry := range entries {
+		switch entry.Tag {
+		case aclGroupObject, aclGroup:
+			if aclMaskPermissions(entries, entry.Permissions)&required != required {
+				return false
+			}
+		}
+	}
+	return true
 }

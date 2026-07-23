@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
+	"golang.org/x/sys/unix"
 )
 
 func TestServerSecurityAuthorizesCommandRoles(t *testing.T) {
@@ -92,7 +93,7 @@ func TestServerSecurityAuthorizesCommandRoles(t *testing.T) {
 func TestPeerIdentityUsesSocketCredentialsAndSupplementaryGroups(t *testing.T) {
 	t.Parallel()
 
-	socketPath := filepath.Join(t.TempDir(), "peer.sock")
+	socketPath := filepath.Join(controlSocketTempDir(t), "peer.sock")
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil {
 		t.Fatalf("ListenUnix: %v", err)
@@ -148,9 +149,10 @@ func TestPeerIdentityUsesSocketCredentialsAndSupplementaryGroups(t *testing.T) {
 
 func TestServeRejectsUnauthorizedRequestBeforeDispatch(t *testing.T) {
 	service := &countingBatchService{}
-	socketPath := filepath.Join(t.TempDir(), "control.sock")
+	socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
 	go func() {
 		serverDone <- serveWithOptions(
 			ctx,
@@ -170,6 +172,7 @@ func TestServeRejectsUnauthorizedRequestBeforeDispatch(t *testing.T) {
 						GID: differentUint32(uint32(os.Getegid())),
 					}, nil
 				},
+				ready: ready,
 			},
 		)
 	}()
@@ -179,7 +182,7 @@ func TestServeRejectsUnauthorizedRequestBeforeDispatch(t *testing.T) {
 			t.Errorf("serveWithOptions: %v", err)
 		}
 	}()
-	waitForSocket(t, socketPath)
+	waitForServerReady(t, ready)
 
 	_, err := NewClient(socketPath).List(context.Background())
 	var remote *RemoteError
@@ -196,10 +199,11 @@ func TestServeRejectsUnauthorizedRequestBeforeDispatch(t *testing.T) {
 
 func TestServeAllowsControlGroupRequest(t *testing.T) {
 	service := &countingBatchService{}
-	socketPath := filepath.Join(t.TempDir(), "control.sock")
+	socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")
 	controlGroupID := uint32(os.Getegid())
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
 	go func() {
 		serverDone <- serveWithOptions(
 			ctx,
@@ -216,16 +220,17 @@ func TestServeAllowsControlGroupRequest(t *testing.T) {
 				readPeerIdentity: func(*net.UnixConn) (peerIdentity, error) {
 					return peerIdentity{UID: 1000, GID: controlGroupID}, nil
 				},
+				ready: ready,
 			},
 		)
 	}()
-	waitForSocket(t, socketPath)
 	defer func() {
 		cancel()
 		if err := <-serverDone; err != nil {
 			t.Errorf("serveWithOptions: %v", err)
 		}
 	}()
+	waitForServerReady(t, ready)
 
 	listed, err := NewClient(socketPath).List(context.Background())
 	if err != nil {
@@ -240,15 +245,31 @@ func TestServeAllowsControlGroupRequest(t *testing.T) {
 }
 
 func TestServeSetsSocketMetadataAndRoleAccessACLs(t *testing.T) {
-	parent := t.TempDir()
+	parent := controlSocketTempDir(t)
 	if err := os.Chmod(parent, 0o700); err != nil {
 		t.Fatalf("Chmod parent: %v", err)
 	}
 	socketPath := filepath.Join(parent, "control.sock")
 	administratorUID := differentUint32(uint32(os.Geteuid()))
 	controlGroupID := uint32(os.Getegid())
+	unrelatedUID := differentUint32(administratorUID)
+	setACLXattr(t, parent, aclAccessXattr, []aclEntry{
+		{Tag: aclUserObject, Permissions: aclRead | aclWrite | aclExecute, ID: aclUndefinedID},
+		{Tag: aclUser, Permissions: aclExecute, ID: unrelatedUID},
+		{Tag: aclGroupObject, Permissions: 0, ID: aclUndefinedID},
+		{Tag: aclMask, Permissions: aclExecute, ID: aclUndefinedID},
+		{Tag: aclOther, Permissions: 0, ID: aclUndefinedID},
+	})
+	setACLXattr(t, parent, aclDefaultXattr, []aclEntry{
+		{Tag: aclUserObject, Permissions: aclRead | aclWrite | aclExecute, ID: aclUndefinedID},
+		{Tag: aclUser, Permissions: aclRead | aclWrite, ID: unrelatedUID},
+		{Tag: aclGroupObject, Permissions: 0, ID: aclUndefinedID},
+		{Tag: aclMask, Permissions: aclRead | aclWrite, ID: aclUndefinedID},
+		{Tag: aclOther, Permissions: 0, ID: aclUndefinedID},
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
 	go func() {
 		serverDone <- serveWithOptions(
 			ctx,
@@ -263,16 +284,17 @@ func TestServeSetsSocketMetadataAndRoleAccessACLs(t *testing.T) {
 					controlGroupID:   controlGroupID,
 				},
 				readPeerIdentity: readPeerIdentity,
+				ready:            ready,
 			},
 		)
 	}()
-	waitForSocket(t, socketPath)
 	defer func() {
 		cancel()
 		if err := <-serverDone; err != nil {
 			t.Errorf("serveWithOptions: %v", err)
 		}
 	}()
+	waitForServerReady(t, ready)
 
 	info, err := os.Lstat(socketPath)
 	if err != nil {
@@ -300,12 +322,15 @@ func TestServeSetsSocketMetadataAndRoleAccessACLs(t *testing.T) {
 		t.Fatalf("read socket ACL: %v", err)
 	}
 	requireACLEntry(t, socketACL, aclUser, administratorUID, aclRead|aclWrite)
+	requireACLEntry(t, socketACL, aclUser, unrelatedUID, aclRead|aclWrite)
+	requireACLEntry(t, socketACL, aclGroup, controlGroupID, aclRead|aclWrite)
 
 	parentACL, err := readAccessACL(parent)
 	if err != nil {
 		t.Fatalf("read parent ACL: %v", err)
 	}
 	requireACLEntry(t, parentACL, aclUser, administratorUID, aclExecute)
+	requireACLEntry(t, parentACL, aclUser, unrelatedUID, aclExecute)
 	requireACLEntry(t, parentACL, aclGroup, controlGroupID, aclExecute)
 
 	parentInfo, err := os.Stat(parent)
@@ -317,20 +342,37 @@ func TestServeSetsSocketMetadataAndRoleAccessACLs(t *testing.T) {
 	}
 }
 
-func TestConfiguredAdministratorConnectsThroughACL(t *testing.T) {
+func TestAuthorizedRolesConnectThroughExtendedACL(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root or a root-mapped user namespace")
 	}
 
 	const administratorUID uint32 = 1
 	const controlGroupID uint32 = 2
-	parent := t.TempDir()
-	if err := os.Chmod(parent, 0o700); err != nil {
-		t.Fatalf("Chmod parent: %v", err)
+	const controlUserUID uint32 = 3
+	const unrelatedUID uint32 = 4
+	parent := controlSocketTempDir(t)
+	if err := os.Chown(parent, 0, int(controlGroupID)); err != nil {
+		t.Fatalf("Chown parent: %v", err)
 	}
+	setACLXattr(t, parent, aclAccessXattr, []aclEntry{
+		{Tag: aclUserObject, Permissions: aclRead | aclWrite | aclExecute, ID: aclUndefinedID},
+		{Tag: aclUser, Permissions: aclExecute, ID: unrelatedUID},
+		{Tag: aclGroupObject, Permissions: 0, ID: aclUndefinedID},
+		{Tag: aclMask, Permissions: aclExecute, ID: aclUndefinedID},
+		{Tag: aclOther, Permissions: 0, ID: aclUndefinedID},
+	})
+	setACLXattr(t, parent, aclDefaultXattr, []aclEntry{
+		{Tag: aclUserObject, Permissions: aclRead | aclWrite | aclExecute, ID: aclUndefinedID},
+		{Tag: aclUser, Permissions: aclRead | aclWrite, ID: unrelatedUID},
+		{Tag: aclGroupObject, Permissions: 0, ID: aclUndefinedID},
+		{Tag: aclMask, Permissions: aclRead | aclWrite, ID: aclUndefinedID},
+		{Tag: aclOther, Permissions: 0, ID: aclUndefinedID},
+	})
 	socketPath := filepath.Join(parent, "control.sock")
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
 	go func() {
 		serverDone <- serveWithOptions(
 			ctx,
@@ -345,6 +387,7 @@ func TestConfiguredAdministratorConnectsThroughACL(t *testing.T) {
 					controlGroupID:   controlGroupID,
 				},
 				readPeerIdentity: readPeerIdentity,
+				ready:            ready,
 			},
 		)
 	}()
@@ -354,7 +397,7 @@ func TestConfiguredAdministratorConnectsThroughACL(t *testing.T) {
 			t.Errorf("serveWithOptions: %v", err)
 		}
 	}()
-	waitForSocket(t, socketPath)
+	waitForServerReady(t, ready)
 
 	executable, err := os.Executable()
 	if err != nil {
@@ -364,7 +407,7 @@ func TestConfiguredAdministratorConnectsThroughACL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile executable: %v", err)
 	}
-	clientDir := t.TempDir()
+	clientDir := controlSocketTempDir(t)
 	if err := os.Chmod(clientDir, 0o755); err != nil {
 		t.Fatalf("Chmod client directory: %v", err)
 	}
@@ -373,24 +416,25 @@ func TestConfiguredAdministratorConnectsThroughACL(t *testing.T) {
 		t.Fatalf("WriteFile client executable: %v", err)
 	}
 
-	command := exec.Command(
+	runControlACLClient(
+		t,
 		clientExecutable,
-		"-test.run=^TestConfiguredAdministratorACLClient$",
+		socketPath,
+		administratorUID,
+		administratorUID,
+		[]uint32{administratorUID},
 	)
-	command.Env = append(os.Environ(), "SCRAPEFS_CONTROL_ACL_TEST_SOCKET="+socketPath)
-	command.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid:    administratorUID,
-			Gid:    administratorUID,
-			Groups: []uint32{administratorUID},
-		},
-	}
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("administrator client: %v\n%s", err, output)
-	}
+	runControlACLClient(
+		t,
+		clientExecutable,
+		socketPath,
+		controlUserUID,
+		controlGroupID,
+		[]uint32{controlGroupID},
+	)
 }
 
-func TestConfiguredAdministratorACLClient(t *testing.T) {
+func TestAuthorizedRoleACLClient(t *testing.T) {
 	socketPath := os.Getenv("SCRAPEFS_CONTROL_ACL_TEST_SOCKET")
 	if socketPath == "" {
 		t.Skip("helper process")
@@ -401,13 +445,14 @@ func TestConfiguredAdministratorACLClient(t *testing.T) {
 }
 
 func TestServeSkipsParentACLWhenModeAlreadyAllowsTraversal(t *testing.T) {
-	parent := t.TempDir()
+	parent := controlSocketTempDir(t)
 	if err := os.Chmod(parent, 0o755); err != nil {
 		t.Fatalf("Chmod parent: %v", err)
 	}
 	socketPath := filepath.Join(parent, "control.sock")
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
 	go func() {
 		serverDone <- serveWithOptions(
 			ctx,
@@ -422,16 +467,17 @@ func TestServeSkipsParentACLWhenModeAlreadyAllowsTraversal(t *testing.T) {
 					controlGroupID:   uint32(os.Getegid()),
 				},
 				readPeerIdentity: readPeerIdentity,
+				ready:            ready,
 			},
 		)
 	}()
-	waitForSocket(t, socketPath)
 	defer func() {
 		cancel()
 		if err := <-serverDone; err != nil {
 			t.Errorf("serveWithOptions: %v", err)
 		}
 	}()
+	waitForServerReady(t, ready)
 
 	parentACL, err := readAccessACL(parent)
 	if err != nil {
@@ -450,7 +496,10 @@ func TestPrepareSocketPathRejectsUnsafeOrUnexpectedExistingPaths(t *testing.T) {
 		controlGroupID: uint32(os.Getegid()),
 	}
 	t.Run("symlink parent", func(t *testing.T) {
-		root := t.TempDir()
+		root := controlSocketTempDir(t)
+		if err := os.Chmod(root, 0o755); err != nil {
+			t.Fatalf("Chmod root: %v", err)
+		}
 		realParent := filepath.Join(root, "real")
 		if err := os.Mkdir(realParent, 0o700); err != nil {
 			t.Fatalf("Mkdir real parent: %v", err)
@@ -470,7 +519,7 @@ func TestPrepareSocketPathRejectsUnsafeOrUnexpectedExistingPaths(t *testing.T) {
 	})
 
 	t.Run("symlink socket", func(t *testing.T) {
-		root := t.TempDir()
+		root := controlSocketTempDir(t)
 		target := filepath.Join(root, "target")
 		if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
 			t.Fatalf("WriteFile target: %v", err)
@@ -490,7 +539,7 @@ func TestPrepareSocketPathRejectsUnsafeOrUnexpectedExistingPaths(t *testing.T) {
 	})
 
 	t.Run("writable parent", func(t *testing.T) {
-		parent := t.TempDir()
+		parent := controlSocketTempDir(t)
 		if err := os.Chmod(parent, 0o770); err != nil {
 			t.Fatalf("Chmod parent: %v", err)
 		}
@@ -505,7 +554,10 @@ func TestPrepareSocketPathRejectsUnsafeOrUnexpectedExistingPaths(t *testing.T) {
 	})
 
 	t.Run("non-sticky writable ancestor", func(t *testing.T) {
-		root := t.TempDir()
+		root := controlSocketTempDir(t)
+		if err := os.Chmod(root, 0o755); err != nil {
+			t.Fatalf("Chmod root: %v", err)
+		}
 		ancestor := filepath.Join(root, "unsafe")
 		if err := os.Mkdir(ancestor, 0o770); err != nil {
 			t.Fatalf("Mkdir ancestor: %v", err)
@@ -527,8 +579,60 @@ func TestPrepareSocketPathRejectsUnsafeOrUnexpectedExistingPaths(t *testing.T) {
 		}
 	})
 
+	t.Run("non-traversable ancestor", func(t *testing.T) {
+		root := controlSocketTempDir(t)
+		if err := os.Chmod(root, 0o755); err != nil {
+			t.Fatalf("Chmod root: %v", err)
+		}
+		ancestor := filepath.Join(root, "private")
+		if err := os.Mkdir(ancestor, 0o700); err != nil {
+			t.Fatalf("Mkdir ancestor: %v", err)
+		}
+		parent := filepath.Join(ancestor, "run")
+		if err := os.Mkdir(parent, 0o700); err != nil {
+			t.Fatalf("Mkdir parent: %v", err)
+		}
+
+		prepared, err := prepareSocketPath(filepath.Join(parent, "control.sock"), security)
+		if prepared != nil {
+			prepared.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), "does not allow control group GID") {
+			t.Fatalf("prepareSocketPath error = %v, want traversal error", err)
+		}
+	})
+
+	t.Run("ancestor with role ACLs", func(t *testing.T) {
+		root := controlSocketTempDir(t)
+		if err := os.Chmod(root, 0o755); err != nil {
+			t.Fatalf("Chmod root: %v", err)
+		}
+		ancestor := filepath.Join(root, "private")
+		if err := os.Mkdir(ancestor, 0o700); err != nil {
+			t.Fatalf("Mkdir ancestor: %v", err)
+		}
+		allowed := security
+		allowed.administratorUID = differentUint32(uint32(os.Geteuid()))
+		if err := updateAccessACL(ancestor, 0o700, []aclEntry{
+			{Tag: aclUser, Permissions: aclExecute, ID: allowed.administratorUID},
+			{Tag: aclGroup, Permissions: aclExecute, ID: allowed.controlGroupID},
+		}); err != nil {
+			t.Fatalf("updateAccessACL ancestor: %v", err)
+		}
+		parent := filepath.Join(ancestor, "run")
+		if err := os.Mkdir(parent, 0o700); err != nil {
+			t.Fatalf("Mkdir parent: %v", err)
+		}
+
+		prepared, err := prepareSocketPath(filepath.Join(parent, "control.sock"), allowed)
+		if err != nil {
+			t.Fatalf("prepareSocketPath: %v", err)
+		}
+		prepared.Close()
+	})
+
 	t.Run("unexpected stale socket group", func(t *testing.T) {
-		socketPath := filepath.Join(t.TempDir(), "control.sock")
+		socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")
 		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 		if err != nil {
 			t.Fatalf("ListenUnix stale socket: %v", err)
@@ -553,7 +657,7 @@ func TestPrepareSocketPathRejectsUnsafeOrUnexpectedExistingPaths(t *testing.T) {
 	})
 
 	t.Run("expected stale socket", func(t *testing.T) {
-		socketPath := filepath.Join(t.TempDir(), "control.sock")
+		socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")
 		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 		if err != nil {
 			t.Fatalf("ListenUnix stale socket: %v", err)
@@ -575,7 +679,10 @@ func TestPrepareSocketPathRejectsUnsafeOrUnexpectedExistingPaths(t *testing.T) {
 }
 
 func TestPreparedSocketPathAnchorsBindVerificationAndCleanup(t *testing.T) {
-	root := t.TempDir()
+	root := controlSocketTempDir(t)
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatalf("Chmod root: %v", err)
+	}
 	parent := filepath.Join(root, "run")
 	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatalf("Mkdir parent: %v", err)
@@ -785,4 +892,39 @@ func requireACLEntry(
 		}
 	}
 	t.Errorf("ACL entry tag=%d id=%d not found in %#v", tag, id, entries)
+}
+
+func setACLXattr(t *testing.T, path, name string, entries []aclEntry) {
+	t.Helper()
+
+	if err := unix.Setxattr(path, name, encodeAccessACL(entries), 0); err != nil {
+		t.Fatalf("Setxattr %s on %q: %v", name, path, err)
+	}
+}
+
+func runControlACLClient(
+	t *testing.T,
+	executable string,
+	socketPath string,
+	uid uint32,
+	gid uint32,
+	groups []uint32,
+) {
+	t.Helper()
+
+	command := exec.Command(
+		executable,
+		"-test.run=^TestAuthorizedRoleACLClient$",
+	)
+	command.Env = append(os.Environ(), "SCRAPEFS_CONTROL_ACL_TEST_SOCKET="+socketPath)
+	command.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:    uid,
+			Gid:    gid,
+			Groups: groups,
+		},
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("ACL client %d:%d: %v\n%s", uid, gid, err, output)
+	}
 }

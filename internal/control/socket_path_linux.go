@@ -44,7 +44,7 @@ func prepareSocketPath(
 
 	parentPath := filepath.Dir(socketPath)
 	name := filepath.Base(socketPath)
-	parent, err := openSocketParent(parentPath, security.daemonUID)
+	parent, err := openSocketParent(parentPath, security)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func prepareSocketPath(
 	return prepared, nil
 }
 
-func openSocketParent(path string, daemonUID uint32) (*os.File, error) {
+func openSocketParent(path string, security serverSecurity) (*os.File, error) {
 	currentFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open filesystem root for control socket: %w", err)
@@ -91,6 +91,11 @@ func openSocketParent(path string, daemonUID uint32) (*os.File, error) {
 		currentFD = rootFD
 	}
 	currentPath := "/"
+	if len(components) > 0 {
+		if err := validateSocketAncestor(currentFD, currentPath, security); err != nil {
+			return nil, errors.Join(err, unix.Close(currentFD))
+		}
+	}
 	for index, component := range components {
 		flags := unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC
 		if index == len(components)-1 {
@@ -122,13 +127,13 @@ func openSocketParent(path string, daemonUID uint32) (*os.File, error) {
 				unix.Close(currentFD),
 			)
 		}
-		if stat.Uid != 0 && stat.Uid != daemonUID {
+		if stat.Uid != 0 && stat.Uid != security.daemonUID {
 			return nil, errors.Join(
 				fmt.Errorf(
 					"control socket directory %q owner UID is %d, want root or daemon effective UID %d",
 					currentPath,
 					stat.Uid,
-					daemonUID,
+					security.daemonUID,
 				),
 				unix.Close(currentFD),
 			)
@@ -144,6 +149,11 @@ func openSocketParent(path string, daemonUID uint32) (*os.File, error) {
 				unix.Close(currentFD),
 			)
 		}
+		if index < len(components)-1 {
+			if err := validateSocketAncestor(currentFD, currentPath, security); err != nil {
+				return nil, errors.Join(err, unix.Close(currentFD))
+			}
+		}
 	}
 
 	var stat unix.Stat_t
@@ -153,13 +163,13 @@ func openSocketParent(path string, daemonUID uint32) (*os.File, error) {
 			unix.Close(currentFD),
 		)
 	}
-	if stat.Uid != daemonUID {
+	if stat.Uid != security.daemonUID {
 		return nil, errors.Join(
 			fmt.Errorf(
 				"control socket parent %q owner UID is %d, want daemon effective UID %d",
 				path,
 				stat.Uid,
-				daemonUID,
+				security.daemonUID,
 			),
 			unix.Close(currentFD),
 		)
@@ -188,6 +198,47 @@ func openSocketParent(path string, daemonUID uint32) (*os.File, error) {
 		)
 	}
 	return parent, nil
+}
+
+func validateSocketAncestor(fd int, path string, security serverSecurity) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return fmt.Errorf("inspect control socket ancestor %q: %w", path, err)
+	}
+	entries, err := readAccessACL(descriptorPathForFD(uintptr(fd)))
+	if err != nil {
+		return fmt.Errorf("read control socket ancestor ACL for %q: %w", path, err)
+	}
+	mode := os.FileMode(stat.Mode).Perm()
+	if security.administratorUID != 0 &&
+		security.administratorUID != security.daemonUID &&
+		!aclGuaranteesUserAccess(
+			entries,
+			mode,
+			stat.Uid,
+			security.administratorUID,
+			aclExecute,
+		) {
+		return fmt.Errorf(
+			"control socket ancestor %q does not allow configured administrator UID %d traversal",
+			path,
+			security.administratorUID,
+		)
+	}
+	if !aclGuaranteesGroupAccess(
+		entries,
+		mode,
+		stat.Gid,
+		security.controlGroupID,
+		aclExecute,
+	) {
+		return fmt.Errorf(
+			"control socket ancestor %q does not allow control group GID %d traversal",
+			path,
+			security.controlGroupID,
+		)
+	}
+	return nil
 }
 
 func classifySocketParentOpenError(path string, err error) error {
@@ -268,30 +319,39 @@ func (prepared *preparedSocketPath) setMetadata(mode os.FileMode) error {
 	return nil
 }
 
-func (prepared *preparedSocketPath) grantRoleAccess(
-	mode os.FileMode,
-	security serverSecurity,
-) error {
+func (prepared *preparedSocketPath) grantRoleAccess(security serverSecurity) error {
 	parentPath := prepared.descriptorPath()
 	var parentStat unix.Stat_t
 	if err := unix.Fstat(int(prepared.parent.Fd()), &parentStat); err != nil {
 		return fmt.Errorf("inspect control socket parent for ACL: %w", err)
 	}
+	parentACL, err := readAccessACL(parentPath)
+	if err != nil {
+		return err
+	}
 	parentGrants := make([]aclEntry, 0, 2)
 	if security.administratorUID != 0 &&
 		security.administratorUID != security.daemonUID &&
-		uint16(parentStat.Mode)&aclExecute == 0 {
+		!aclGuaranteesUserAccess(
+			parentACL,
+			os.FileMode(parentStat.Mode).Perm(),
+			parentStat.Uid,
+			security.administratorUID,
+			aclExecute,
+		) {
 		parentGrants = append(parentGrants, aclEntry{
 			Tag:         aclUser,
 			Permissions: aclExecute,
 			ID:          security.administratorUID,
 		})
 	}
-	groupPermissions := uint16(parentStat.Mode>>3) & 0o7
-	otherPermissions := uint16(parentStat.Mode) & 0o7
-	if otherPermissions&aclExecute == 0 &&
-		(parentStat.Gid != security.controlGroupID ||
-			groupPermissions&aclExecute == 0) {
+	if !aclGuaranteesGroupAccess(
+		parentACL,
+		os.FileMode(parentStat.Mode).Perm(),
+		parentStat.Gid,
+		security.controlGroupID,
+		aclExecute,
+	) {
 		parentGrants = append(parentGrants, aclEntry{
 			Tag:         aclGroup,
 			Permissions: aclExecute,
@@ -299,18 +359,54 @@ func (prepared *preparedSocketPath) grantRoleAccess(
 		})
 	}
 
-	socketGrants := make([]aclEntry, 0, 1)
+	var socketStat unix.Stat_t
+	if err := unix.Fstatat(
+		int(prepared.parent.Fd()),
+		prepared.name,
+		&socketStat,
+		unix.AT_SYMLINK_NOFOLLOW,
+	); err != nil {
+		return fmt.Errorf("inspect control socket for ACL: %w", err)
+	}
+	socketACL, err := readAccessACL(prepared.socketDescriptorPath())
+	if err != nil {
+		return err
+	}
+	socketGrants := make([]aclEntry, 0, 2)
 	if security.administratorUID != 0 &&
 		security.administratorUID != security.daemonUID &&
-		mode.Perm()&0o006 != 0o006 {
+		!aclGuaranteesUserAccess(
+			socketACL,
+			os.FileMode(socketStat.Mode).Perm(),
+			socketStat.Uid,
+			security.administratorUID,
+			aclRead|aclWrite,
+		) {
 		socketGrants = append(socketGrants, aclEntry{
 			Tag:         aclUser,
 			Permissions: aclRead | aclWrite,
 			ID:          security.administratorUID,
 		})
 	}
+	if !aclGuaranteesGroupAccess(
+		socketACL,
+		os.FileMode(socketStat.Mode).Perm(),
+		socketStat.Gid,
+		security.controlGroupID,
+		aclRead|aclWrite,
+	) {
+		socketGrants = append(socketGrants, aclEntry{
+			Tag:         aclGroup,
+			Permissions: aclRead | aclWrite,
+			ID:          security.controlGroupID,
+		})
+	}
 	if len(socketGrants) > 0 {
-		if err := updateAccessACL(prepared.socketDescriptorPath(), mode, socketGrants); err != nil {
+		if err := updateAccessACL(
+			prepared.socketDescriptorPath(),
+			os.FileMode(socketStat.Mode).Perm(),
+			socketGrants,
+		); err != nil {
 			return err
 		}
 	}
@@ -366,7 +462,7 @@ func (prepared *preparedSocketPath) verifyConfiguredSocket() error {
 }
 
 func (prepared *preparedSocketPath) descriptorPath() string {
-	return "/proc/self/fd/" + strconv.FormatUint(uint64(prepared.parent.Fd()), 10)
+	return descriptorPathForFD(prepared.parent.Fd())
 }
 
 func (prepared *preparedSocketPath) socketDescriptorPath() string {
@@ -375,4 +471,8 @@ func (prepared *preparedSocketPath) socketDescriptorPath() string {
 
 func (prepared *preparedSocketPath) Close() error {
 	return prepared.parent.Close()
+}
+
+func descriptorPathForFD(fd uintptr) string {
+	return "/proc/self/fd/" + strconv.FormatUint(uint64(fd), 10)
 }

@@ -80,7 +80,7 @@
 - Overlay backing object 使用 daemon owner 和 `0600`，不跟随虚拟 chmod/chown。
 - ProjectionFile 始终只读。
 - daemon 在打开 SQLite 前获取宿主文件系统上的 `/run/scrapefs/scrapefsd.lock`。
-- 配置的管理员与 `scrapefs-control` 成员可以在 peer-credential 授权前 traverse 控制 socket 父目录并连接；daemon 必须使用 POSIX ACL 而不是 world access 来保持 socket mode `0660`。
+- 配置的管理员与 `scrapefs-control` 成员可以在 peer-credential 授权前 traverse 完整控制 socket 路径并连接；ACL mask 不得掩盖缺失的 owning-group 权限，限制性中间祖先必须被拒绝，daemon 必须保持 socket mode `0660` 而不是增加 world access。
 - 控制 socket 的 bind 和 unlink 必须锚定到已校验的父目录 descriptor，替换路径祖先不得将 daemon 重定向到另一个 socket inode。
 - 数据库路径校验后替换祖先目录不得重定向 SQLite；拒绝更新版本 schema 时不得改变 journal mode。
 - readiness 只在数据库、索引、mount 和 socket 全部可用后发送。

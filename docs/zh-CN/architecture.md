@@ -55,7 +55,7 @@ NFO、海报等 artifact 在 Batch applied 后通过普通 FUSE 文件操作创�
 
 已实现的 Projection Batch 控制协议在每个 Unix socket 连接中使用一条严格 JSON request 和一条 JSON response。daemon 通过 `SO_PEERCRED` 获取调用者的有效 UID/GID，通过 `SO_PEERGROUPS` 获取 supplementary groups，不信任 client 提交的身份。root 和配置的管理员 UID 同时满足管理员与控制用户策略；其他调用者执行控制用户命令时，其有效或 supplementary group 必须包含固定的 `scrapefs-control` GID。当普通 mode bit 尚未提供所需访问权限时，daemon 通过 named POSIX ACL 授予配置的非 root 管理员 socket 访问权限，并授予该管理员与 `scrapefs-control` 对 daemon-owned socket 父目录的 traverse 权限。CLI 可以使用 `--socket` 覆盖默认 endpoint。
 
-socket 父目录及其每一级祖先必须在不跟随 symlink 的情况下打开。祖先必须由 root 或 daemon 所有；group/other 可写的祖先只有在设置 sticky bit 时才允许；最终父目录必须由 daemon 所有且不得允许 group/other 写入。bind、metadata 修改、ACL 安装、stale path 删除和 close-time unlink 都必须相对持续持有的父目录 descriptor 执行；fd-anchored pathname 操作要求 procfs 提供 `/proc/self/fd`。开始接受 request 前，配置路径必须解析到通过该 descriptor bind 的同一个 socket inode。
+socket 父目录及其每一级祖先必须在不跟随 symlink 的情况下打开。祖先必须由 root 或 daemon 所有；group/other 可写的祖先只有在设置 sticky bit 时才允许。每个中间祖先都必须已经向配置的管理员和 `scrapefs-control` 提供有效 traverse 权限；ACL 校验必须在 ACL mask 下读取 owning-group entry 与 named entry，不能把 stat group bit 当作 owning-group 权限。最终父目录必须由 daemon 所有且不得允许 group/other 写入，缺失的角色权限在最终父目录和 socket 上补齐。bind、metadata 修改、ACL 安装、stale path 删除和 close-time unlink 都必须相对持续持有的父目录 descriptor 执行；fd-anchored pathname 操作要求 procfs 提供 `/proc/self/fd`。服务只能在角色 ACL 安装完成，且配置路径被确认解析到通过该 descriptor bind 的同一个 socket inode 后进入 ready。
 
 控制服务最多接受 32 个 active connection。request 上限为 16 MiB，必须在 5 秒内接收完成；response 必须在 30 秒内写完。可重试的 accept 资源错误不会导致 daemon 退出。
 

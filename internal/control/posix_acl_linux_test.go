@@ -59,3 +59,40 @@ func TestMergeAccessACLDoesNotBroadenMaskedPermissions(t *testing.T) {
 		t.Errorf("owning group permissions = %#o, unexpectedly gained execute", permissions)
 	}
 }
+
+func TestACLGuaranteesGroupAccessUsesGroupObjectInsteadOfModeMask(t *testing.T) {
+	t.Parallel()
+
+	const controlGroupID uint32 = 3000
+	entries := []aclEntry{
+		{Tag: aclUserObject, Permissions: aclRead | aclWrite | aclExecute, ID: aclUndefinedID},
+		{Tag: aclUser, Permissions: aclExecute, ID: 2000},
+		{Tag: aclGroupObject, Permissions: 0, ID: aclUndefinedID},
+		{Tag: aclMask, Permissions: aclExecute, ID: aclUndefinedID},
+		{Tag: aclOther, Permissions: 0, ID: aclUndefinedID},
+	}
+	if aclGuaranteesGroupAccess(
+		entries,
+		fs.FileMode(0o710),
+		controlGroupID,
+		controlGroupID,
+		aclExecute,
+	) {
+		t.Fatal("group access succeeded from ACL mask without owning-group permission")
+	}
+
+	entries = append(entries, aclEntry{
+		Tag:         aclGroup,
+		Permissions: aclExecute,
+		ID:          controlGroupID,
+	})
+	if !aclGuaranteesGroupAccess(
+		entries,
+		fs.FileMode(0o710),
+		controlGroupID,
+		controlGroupID,
+		aclExecute,
+	) {
+		t.Fatal("named control-group access was not recognized")
+	}
+}

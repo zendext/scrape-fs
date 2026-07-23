@@ -80,6 +80,7 @@ type serverOptions struct {
 	limits           serverLimits
 	security         serverSecurity
 	readPeerIdentity peerIdentityReader
+	ready            chan<- struct{}
 }
 
 func NewClient(socketPath string) *Client {
@@ -288,11 +289,14 @@ func serveWithOptions(
 	if err := prepared.setMetadata(mode); err != nil {
 		return err
 	}
-	if err := prepared.grantRoleAccess(mode, options.security); err != nil {
+	if err := prepared.grantRoleAccess(options.security); err != nil {
 		return err
 	}
 	if err := prepared.verifyConfiguredSocket(); err != nil {
 		return err
+	}
+	if options.ready != nil {
+		close(options.ready)
 	}
 
 	stopped := make(chan struct{})
