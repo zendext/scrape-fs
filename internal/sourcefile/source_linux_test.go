@@ -3,6 +3,7 @@ package sourcefile
 import (
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -188,9 +189,20 @@ func TestOpenRejectsNonRegularFiles(t *testing.T) {
 	if err := unix.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatalf("Mkfifo: %v", err)
 	}
+	socket := filepath.Join(t.TempDir(), "source.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("Listen Unix socket: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("Close Unix socket: %v", err)
+		}
+	})
 	tests := map[string]string{
-		"directory": t.TempDir(),
-		"FIFO":      fifo,
+		"directory":          t.TempDir(),
+		"FIFO":               fifo,
+		"Unix domain socket": socket,
 	}
 	if _, err := os.Stat("/dev/null"); err == nil {
 		tests["character device"] = "/dev/null"

@@ -170,6 +170,9 @@ func openError(path string, err error) error {
 	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EXDEV) {
 		return fmt.Errorf("%w: open %q: %v", ErrUnsafePath, path, err)
 	}
+	if errors.Is(err, unix.ENXIO) {
+		return fmt.Errorf("%w: %q: %w", ErrNotRegular, path, err)
+	}
 	if errors.Is(err, unix.ENOSYS) ||
 		errors.Is(err, unix.EINVAL) ||
 		errors.Is(err, unix.EPERM) {

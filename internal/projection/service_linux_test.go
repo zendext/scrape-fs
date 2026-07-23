@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -240,6 +241,11 @@ func TestServiceCreateProjectionRejectsInvalidInputsBeforeMutation(t *testing.T)
 			target: "media:/Movies/Dune.mkv",
 			want:   ErrSourceNotRegular,
 		},
+		"Unix domain socket source": {
+			source: unixSocketSource,
+			target: "media:/Movies/Dune.mkv",
+			want:   ErrSourceNotRegular,
+		},
 		"missing Library": {
 			source: regularSource,
 			target: "missing:/Movies/Dune.mkv",
@@ -432,6 +438,22 @@ func unsafeSource(t *testing.T) string {
 		t.Fatalf("Mkdir child: %v", err)
 	}
 	return child + "/../source.mkv"
+}
+
+func unixSocketSource(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "source.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("Listen Unix socket: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := listener.Close(); err != nil {
+			t.Errorf("Close Unix socket: %v", err)
+		}
+	})
+	return path
 }
 
 func statSource(t *testing.T, path string) unix.Stat_t {
