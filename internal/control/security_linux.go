@@ -84,6 +84,7 @@ func requiredCommandRole(command string) commandRole {
 	switch {
 	case command == "status",
 		command == "doctor",
+		command == "library.list",
 		strings.HasPrefix(command, "projection."):
 		return commandRoleControl
 	case command == "gc",

@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zendext/scrape-fs/internal/library"
+	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
 	"golang.org/x/sys/unix"
 )
@@ -35,7 +37,7 @@ func TestServerSecurityAuthorizesCommandRoles(t *testing.T) {
 	}{
 		{
 			name:     "root administers",
-			command:  "library.add",
+			command:  "library.create",
 			identity: peerIdentity{UID: 0},
 		},
 		{
@@ -57,6 +59,11 @@ func TestServerSecurityAuthorizesCommandRoles(t *testing.T) {
 			name:     "supplementary control group uses control command",
 			command:  "doctor",
 			identity: peerIdentity{UID: 1000, GID: 1000, Groups: []uint32{84}},
+		},
+		{
+			name:     "control group lists libraries",
+			command:  "library.list",
+			identity: peerIdentity{UID: 1000, GID: 84},
 		},
 		{
 			name:     "control user cannot administer",
@@ -195,6 +202,62 @@ func TestServeRejectsUnauthorizedRequestBeforeDispatch(t *testing.T) {
 	}
 	if service.Calls() != 0 {
 		t.Errorf("service calls = %d, want 0", service.Calls())
+	}
+}
+
+func TestServeRejectsControlUserLibraryCreationBeforeDispatch(t *testing.T) {
+	libraryService := &countingLibraryService{}
+	socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")
+	controlGroupID := uint32(os.Getegid())
+	ctx, cancel := context.WithCancel(context.Background())
+	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
+	go func() {
+		serverDone <- serveWithOptions(
+			ctx,
+			socketPath,
+			0o660,
+			staticBatchService{},
+			serverOptions{
+				limits: defaultServerLimits(),
+				security: serverSecurity{
+					daemonUID:        uint32(os.Geteuid()),
+					administratorUID: 42,
+					controlGroupID:   controlGroupID,
+				},
+				readPeerIdentity: func(*net.UnixConn) (peerIdentity, error) {
+					return peerIdentity{
+						UID: differentUint32(42),
+						GID: controlGroupID,
+					}, nil
+				},
+				ready:          ready,
+				libraryService: libraryService,
+			},
+		)
+	}()
+	defer func() {
+		cancel()
+		if err := <-serverDone; err != nil {
+			t.Errorf("serveWithOptions: %v", err)
+		}
+	}()
+	waitForServerReady(t, ready)
+
+	_, err := NewClient(socketPath).CreateLibrary(
+		context.Background(),
+		"media",
+		library.ProfileIdentifier{Name: "jellyfin", Version: 1},
+	)
+	var remote *RemoteError
+	if !errors.As(err, &remote) {
+		t.Fatalf("CreateLibrary error = %v, want RemoteError", err)
+	}
+	if remote.Code != "PermissionDenied" {
+		t.Errorf("RemoteError code = %q, want PermissionDenied", remote.Code)
+	}
+	if libraryService.Calls() != 0 {
+		t.Errorf("Library service calls = %d, want 0", libraryService.Calls())
 	}
 }
 
@@ -972,6 +1035,36 @@ func TestResolveGroupID(t *testing.T) {
 type countingBatchService struct {
 	mu    sync.Mutex
 	calls int
+}
+
+type countingLibraryService struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (service *countingLibraryService) Calls() int {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return service.calls
+}
+
+func (service *countingLibraryService) Create(
+	context.Context,
+	library.CreateRequest,
+) (namespace.Library, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.calls++
+	return namespace.Library{}, nil
+}
+
+func (service *countingLibraryService) List(
+	context.Context,
+) ([]namespace.Library, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.calls++
+	return []namespace.Library{}, nil
 }
 
 func (service *countingBatchService) Calls() int {

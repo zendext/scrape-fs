@@ -7,7 +7,7 @@
 第一版控制面使用两个身份角色：
 
 1. **管理员**：root 或配置的管理员 UID，可管理 Library 和 daemon。
-2. **控制用户**：属于 `scrapefs-control` 组，可选择源路径、创建 Projection、validate/apply/undo Projection Batch、查看 status/doctor。
+2. **控制用户**：属于 `scrapefs-control` 组，可列出 Library、选择源路径、创建 Projection、validate/apply/undo Projection Batch、查看 status/doctor。
 
 推荐 socket：
 
@@ -20,7 +20,7 @@ mode: 0660
 
 控制服务启动时，daemon 必须解析固定的 `scrapefs-control` group。group 不存在或 GID 不是有效数值时，不得创建 socket。
 
-daemon 通过 `SO_PEERCRED` 获取调用者的有效 UID/GID，通过 `SO_PEERGROUPS` 获取 supplementary groups，并忽略 client 提交的身份。root 和 `control.administrator_uid` 可以执行管理员与控制用户命令；其他调用者执行 Projection、Projection Batch、status 和 doctor 命令时，其有效或 supplementary group 必须包含 `scrapefs-control` GID。未授权请求必须在调用业务服务前返回稳定的 `PermissionDenied` 错误。
+daemon 通过 `SO_PEERCRED` 获取调用者的有效 UID/GID，通过 `SO_PEERGROUPS` 获取 supplementary groups，并忽略 client 提交的身份。root 和 `control.administrator_uid` 可以执行管理员与控制用户命令；其他调用者执行 Library list、Projection、Projection Batch、status 和 doctor 命令时，其有效或 supplementary group 必须包含 `scrapefs-control` GID。创建 Library 及其他 Library mutation 需要管理员权限。未授权请求必须在调用业务服务前返回稳定的 `PermissionDenied` 错误。
 
 socket owner 使用 daemon effective UID，group 使用 `scrapefs-control` GID。`control.socket_mode` 必须同时授予 owner 和 group 读写权限，默认值仍为 `0660`。当普通 mode bit 尚未提供所需访问权限时，配置的非 root 管理员如果不是 daemon UID，必须通过 named user ACL 获得 socket 读写权限；daemon-owned 父目录必须为该管理员和 `scrapefs-control` 添加 named traverse ACL。因此初始 mode 为 `0700` 的父目录不会阻止已授权调用者。已有且无关的父目录 ACL entry 及其有效权限必须保留。由于匹配的 named-user ACL 优先于所有 group entry，任何无关 named-user entry 缺少控制角色所需权限时，daemon 必须启动失败，不得扩大或删除该 entry；配置管理员自身的 entry 可以修复为文档规定的权限。文件系统无法持久化所需 POSIX access ACL 时，daemon 必须启动失败，不得静默导致已授权角色不可访问。
 
@@ -119,7 +119,7 @@ mode: 0710
 scrapefs status
 scrapefs doctor
 
-scrapefs library add
+scrapefs library add <name> --profile <name>@<version>
 scrapefs library list
 scrapefs library rename
 scrapefs library set-profile
@@ -146,7 +146,9 @@ daemon：
 scrapefsd
 ```
 
-所有已实现的 Projection Batch 命令都输出机器可读 JSON。`projection batch validate` 和 `projection batch apply` 使用 `--file <path>` 读取 UTF-8 JSON，并使用 `--file -` 从 stdin 读取。非 TTY 或显式机器可读模式不得提示输入或自动 apply。CLI 默认连接 `/run/scrapefs/scrapefs.sock`，可使用全局 `--socket <path>` 覆盖为配置的路径。
+所有已实现的 Library 和 Projection Batch 命令都输出机器可读 JSON。`library add` 使用调用管理员的 peer UID/GID 创建 ACTIVE Library，并使用固定的 v1 mode：LibraryRoot 和目录为 `0775`，Projection 为 `0444`，OverlayFile 为 `0664`。只接受内置的 `jellyfin@1` 和 `plex@1` Profile。`library list` 按名称确定性排序返回 ACTIVE Library，管理员和控制用户均可调用。
+
+`projection batch validate` 和 `projection batch apply` 使用 `--file <path>` 读取 UTF-8 JSON，并使用 `--file -` 从 stdin 读取。非 TTY 或显式机器可读模式不得提示输入或自动 apply。CLI 默认连接 `/run/scrapefs/scrapefs.sock`，可使用全局 `--socket <path>` 覆盖为配置的路径。
 
 ## 8. 第一版配置
 

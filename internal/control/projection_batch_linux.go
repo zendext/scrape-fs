@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/projection"
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
@@ -60,6 +61,9 @@ type request struct {
 	Batch          []byte `json:"batch,omitempty"`
 	ExpectedDigest string `json:"expected_digest,omitempty"`
 	BatchID        string `json:"batch_id,omitempty"`
+	LibraryName    string `json:"library_name,omitempty"`
+	ProfileName    string `json:"profile_name,omitempty"`
+	ProfileVersion int64  `json:"profile_version,omitempty"`
 }
 
 type response struct {
@@ -81,6 +85,7 @@ type serverOptions struct {
 	security         serverSecurity
 	readPeerIdentity peerIdentityReader
 	ready            chan<- struct{}
+	libraryService   LibraryService
 }
 
 func NewClient(socketPath string) *Client {
@@ -215,7 +220,11 @@ func Serve(
 	mode fs.FileMode,
 	administratorUID uint32,
 	service BatchService,
+	libraryService LibraryService,
 ) error {
+	if libraryService == nil {
+		return fmt.Errorf("Library control service must not be nil")
+	}
 	controlGroupID, err := resolveGroupID(ControlGroupName, systemGroupLookup)
 	if err != nil {
 		return err
@@ -228,6 +237,7 @@ func Serve(
 			controlGroupID:   controlGroupID,
 		},
 		readPeerIdentity: readPeerIdentity,
+		libraryService:   libraryService,
 	})
 }
 
@@ -466,6 +476,36 @@ func handleConnection(
 	}
 	var result any
 	switch request.Command {
+	case "library.create":
+		if options.libraryService == nil {
+			err = fmt.Errorf("Library control service is unavailable")
+			break
+		}
+		var created namespace.Library
+		created, err = options.libraryService.Create(ctx, library.CreateRequest{
+			Name: request.LibraryName,
+			Profile: library.ProfileIdentifier{
+				Name:    request.ProfileName,
+				Version: request.ProfileVersion,
+			},
+			Actor: actor,
+			UID:   identity.UID,
+			GID:   identity.GID,
+			Modes: library.DefaultModes,
+		})
+		if err == nil {
+			result = libraryResult(created)
+		}
+	case "library.list":
+		if options.libraryService == nil {
+			err = fmt.Errorf("Library control service is unavailable")
+			break
+		}
+		var libraries []namespace.Library
+		libraries, err = options.libraryService.List(ctx)
+		if err == nil {
+			result = libraryListResult(libraries)
+		}
 	case "projection.batch.validate":
 		result, err = service.Validate(ctx, request.Batch)
 	case "projection.batch.apply":
@@ -513,6 +553,10 @@ func writeResponse(connection io.Writer, result any, err error) {
 }
 
 func classifyError(err error) string {
+	var coded interface{ ErrorCode() string }
+	if errors.As(err, &coded) {
+		return coded.ErrorCode()
+	}
 	switch {
 	case errors.Is(err, ErrPermissionDenied):
 		return "PermissionDenied"
@@ -524,6 +568,10 @@ func classifyError(err error) string {
 		return "LibraryNotFound"
 	case errors.Is(err, namespace.ErrProfileNotFound):
 		return "ProfileNotFound"
+	case errors.Is(err, library.ErrAlreadyExists):
+		return "LibraryExists"
+	case errors.Is(err, namespace.ErrInvalidLibrary):
+		return "InvalidLibrary"
 	case errors.Is(err, namespace.ErrInvalidPath):
 		return "InvalidPath"
 	case errors.Is(err, projection.ErrUnsafeSource):
