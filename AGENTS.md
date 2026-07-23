@@ -12,12 +12,13 @@
 
 - Implement code, configuration, and behavior changes in a dedicated Git worktree.
 - Documentation-only changes may be implemented without creating a separate worktree.
+- Store task worktrees under the repository's `.worktrees/` directory.
 - Name task branches `issue-<number>-<short-description>`.
 - Create a task worktree from the current remote `main` branch:
 
 ```bash
 git fetch origin main
-git worktree add ../scrape-fs-issue-<number> \
+git worktree add .worktrees/issue-<number>-<short-description> \
   -b issue-<number>-<short-description> origin/main
 ```
 
