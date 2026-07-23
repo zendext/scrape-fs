@@ -19,7 +19,7 @@ import (
 )
 
 func TestProjectionBatchClientServerRoundTrip(t *testing.T) {
-	root := t.TempDir()
+	root := controlSocketTempDir(t)
 	opened, err := database.OpenWithOptions(
 		context.Background(),
 		filepath.Join(root, "state", "scrapefs.db"),
@@ -47,22 +47,24 @@ func TestProjectionBatchClientServerRoundTrip(t *testing.T) {
 	socketPath := filepath.Join(root, "control.sock")
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
 	go func() {
-		serverDone <- serveWithLimits(
+		serverDone <- serveWithTestOptions(
 			ctx,
 			socketPath,
 			0o660,
 			projectionbatch.NewService(repository),
 			defaultServerLimits(),
+			ready,
 		)
 	}()
-	waitForSocket(t, socketPath)
 	t.Cleanup(func() {
 		cancel()
 		if err := <-serverDone; err != nil {
 			t.Errorf("Serve: %v", err)
 		}
 	})
+	waitForServerReady(t, ready)
 
 	source := filepath.Join(root, "Dune.mkv")
 	if err := os.WriteFile(source, []byte("video"), 0o600); err != nil {
@@ -126,7 +128,7 @@ func TestProjectionBatchClientServerRoundTrip(t *testing.T) {
 }
 
 func TestProjectionBatchClientReturnsMachineReadableRemoteError(t *testing.T) {
-	root := t.TempDir()
+	root := controlSocketTempDir(t)
 	opened, err := database.OpenWithOptions(
 		context.Background(),
 		filepath.Join(root, "state", "scrapefs.db"),
@@ -140,22 +142,24 @@ func TestProjectionBatchClientReturnsMachineReadableRemoteError(t *testing.T) {
 	socketPath := filepath.Join(root, "control.sock")
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
 	go func() {
-		serverDone <- serveWithLimits(
+		serverDone <- serveWithTestOptions(
 			ctx,
 			socketPath,
 			0o600,
 			projectionbatch.NewService(namespace.NewRepository(opened)),
 			defaultServerLimits(),
+			ready,
 		)
 	}()
-	waitForSocket(t, socketPath)
 	defer func() {
 		cancel()
 		if err := <-serverDone; err != nil {
 			t.Errorf("Serve: %v", err)
 		}
 	}()
+	waitForServerReady(t, ready)
 
 	_, err = NewClient(socketPath).Validate(context.Background(), []byte(`{}`))
 	var remote *RemoteError
@@ -168,12 +172,13 @@ func TestProjectionBatchClientReturnsMachineReadableRemoteError(t *testing.T) {
 }
 
 func TestServeBoundsIdleAndOversizedConnections(t *testing.T) {
-	root := t.TempDir()
+	root := controlSocketTempDir(t)
 	socketPath := filepath.Join(root, "control.sock")
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
 	go func() {
-		serverDone <- serveWithLimits(
+		serverDone <- serveWithTestOptions(
 			ctx,
 			socketPath,
 			0o600,
@@ -185,15 +190,16 @@ func TestServeBoundsIdleAndOversizedConnections(t *testing.T) {
 				maxRequestBytes:  256,
 				acceptRetryDelay: time.Millisecond,
 			},
+			ready,
 		)
 	}()
-	waitForSocket(t, socketPath)
 	defer func() {
 		cancel()
 		if err := <-serverDone; err != nil {
 			t.Errorf("Serve: %v", err)
 		}
 	}()
+	waitForServerReady(t, ready)
 
 	var idle []net.Conn
 	for range 6 {
@@ -288,17 +294,47 @@ func (staticBatchService) Undo(
 	return projectionbatch.UndoResult{Schema: projectionbatch.UndoSchema}, nil
 }
 
-func waitForSocket(t *testing.T, path string) {
+func serveWithTestOptions(
+	ctx context.Context,
+	socketPath string,
+	mode fs.FileMode,
+	service BatchService,
+	limits serverLimits,
+	ready chan<- struct{},
+) error {
+	return serveWithOptions(ctx, socketPath, mode, service, serverOptions{
+		limits: limits,
+		security: serverSecurity{
+			daemonUID:        uint32(os.Geteuid()),
+			administratorUID: uint32(os.Geteuid()),
+			controlGroupID:   uint32(os.Getegid()),
+		},
+		readPeerIdentity: readPeerIdentity,
+		ready:            ready,
+	})
+}
+
+func waitForServerReady(t *testing.T, ready <-chan struct{}) {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSocket != 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("socket %q was not created", path)
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("control server did not become ready")
 	}
+}
+
+func controlSocketTempDir(t *testing.T) string {
+	t.Helper()
+
+	path, err := os.MkdirTemp(os.TempDir(), "scrapefs-control-test-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(path); err != nil {
+			t.Errorf("RemoveAll %q: %v", path, err)
+		}
+	})
+	return path
 }

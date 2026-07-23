@@ -77,7 +77,7 @@ negative_timeout = "500ms"
 
 [control]
 socket_path = "/srv/scrapefs-run/control.sock"
-socket_mode = 0o600
+socket_mode = 0o660
 administrator_uid = 1000
 
 [agent]
@@ -101,7 +101,7 @@ orphan_grace_period = "48h"
 	if got.FUSE.NegativeTimeout != 500*time.Millisecond {
 		t.Errorf("NegativeTimeout = %v", got.FUSE.NegativeTimeout)
 	}
-	if got.Control.SocketMode != fs.FileMode(0o600) {
+	if got.Control.SocketMode != fs.FileMode(0o660) {
 		t.Errorf("SocketMode = %#o", got.Control.SocketMode)
 	}
 	if got.Control.AdministratorUID != 1000 {
@@ -150,6 +150,11 @@ func TestDecodeRejectsInvalidConfiguration(t *testing.T) {
 			want:  "control.administrator_uid",
 		},
 		{
+			name:  "ACL undefined UID",
+			input: "[control]\nadministrator_uid = 4294967295\n",
+			want:  "control.administrator_uid",
+		},
+		{
 			name:  "zero mode",
 			input: "[control]\nsocket_mode = 0o000\n",
 			want:  "control.socket_mode",
@@ -158,6 +163,11 @@ func TestDecodeRejectsInvalidConfiguration(t *testing.T) {
 			name:  "special mode bits",
 			input: "[control]\nsocket_mode = 0o1660\n",
 			want:  "control.socket_mode",
+		},
+		{
+			name:  "socket mode blocks control group writes",
+			input: "[control]\nsocket_mode = 0o640\n",
+			want:  "read and write",
 		},
 		{
 			name:  "decimal mode",

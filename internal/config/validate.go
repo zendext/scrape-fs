@@ -82,11 +82,14 @@ func (raw rawConfig) validate() (Config, error) {
 		return Config{}, fmt.Errorf("agent.max_binary_file_size: must not exceed agent.max_session_total_size")
 	}
 
-	if raw.Control.AdministratorUID < 0 || raw.Control.AdministratorUID > math.MaxUint32 {
-		return Config{}, fmt.Errorf("control.administrator_uid: must be between 0 and %d", uint64(math.MaxUint32))
+	if raw.Control.AdministratorUID < 0 || raw.Control.AdministratorUID >= math.MaxUint32 {
+		return Config{}, fmt.Errorf("control.administrator_uid: must be between 0 and %d", uint64(math.MaxUint32-1))
 	}
 	if raw.Control.SocketMode < 0o001 || raw.Control.SocketMode > 0o777 {
 		return Config{}, fmt.Errorf("control.socket_mode: must contain only permission bits from 0o001 through 0o777")
+	}
+	if raw.Control.SocketMode&0o660 != 0o660 {
+		return Config{}, fmt.Errorf("control.socket_mode: must grant read and write permission to owner and group")
 	}
 
 	return Config{

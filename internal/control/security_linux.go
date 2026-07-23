@@ -58,7 +58,7 @@ func resolveGroupID(name string, lookup groupLookup) (uint32, error) {
 		return 0, fmt.Errorf("resolve control group %q: %w", name, err)
 	}
 	id, err := strconv.ParseUint(value, 10, 32)
-	if err != nil {
+	if err != nil || id == uint64(aclUndefinedID) {
 		return 0, fmt.Errorf("control group %q has invalid GID %q", name, value)
 	}
 	return uint32(id), nil
