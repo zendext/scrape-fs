@@ -18,7 +18,6 @@ type Config struct {
 	Storage Storage
 	FUSE    FUSE
 	Control Control
-	Agent   Agent
 	GC      GC
 }
 
@@ -40,13 +39,6 @@ type Control struct {
 	AdministratorUID uint32
 }
 
-type Agent struct {
-	MaxTextFileSize     uint64
-	MaxBinaryFileSize   uint64
-	MaxSessionTotalSize uint64
-	MaxUploadDuration   time.Duration
-}
-
 type GC struct {
 	OrphanGracePeriod time.Duration
 }
@@ -55,7 +47,6 @@ type rawConfig struct {
 	Storage rawStorage `toml:"storage"`
 	FUSE    rawFUSE    `toml:"fuse"`
 	Control rawControl `toml:"control"`
-	Agent   rawAgent   `toml:"agent"`
 	GC      rawGC      `toml:"gc"`
 }
 
@@ -75,13 +66,6 @@ type rawControl struct {
 	SocketPath       string  `toml:"socket_path"`
 	SocketMode       rawMode `toml:"socket_mode"`
 	AdministratorUID int64   `toml:"administrator_uid"`
-}
-
-type rawAgent struct {
-	MaxTextFileSize     string `toml:"max_text_file_size"`
-	MaxBinaryFileSize   string `toml:"max_binary_file_size"`
-	MaxSessionTotalSize string `toml:"max_session_total_size"`
-	MaxUploadDuration   string `toml:"max_upload_duration"`
 }
 
 type rawGC struct {
@@ -113,6 +97,14 @@ func Decode(reader io.Reader) (Config, error) {
 	if err := decoder.Decode(&raw); err != nil {
 		var strictError *toml.StrictMissingError
 		if errors.As(err, &strictError) {
+			for _, decodeError := range strictError.Errors {
+				key := decodeError.Key()
+				if len(key) > 0 && key[0] == "agent" {
+					return Config{}, fmt.Errorf(
+						"decode TOML configuration: unknown legacy [agent] table; remove it because the external Agent is configured outside scrapefsd",
+					)
+				}
+			}
 			return Config{}, fmt.Errorf("decode TOML configuration: unknown fields:\n%s", strictError.String())
 		}
 		return Config{}, fmt.Errorf("decode TOML configuration: %w", err)
@@ -136,12 +128,6 @@ func defaultRawConfig() rawConfig {
 			SocketPath:       "/run/scrapefs/scrapefs.sock",
 			SocketMode:       rawMode(0o660),
 			AdministratorUID: 0,
-		},
-		Agent: rawAgent{
-			MaxTextFileSize:     "4MiB",
-			MaxBinaryFileSize:   "32MiB",
-			MaxSessionTotalSize: "256MiB",
-			MaxUploadDuration:   "120s",
 		},
 		GC: rawGC{
 			OrphanGracePeriod: "24h",
