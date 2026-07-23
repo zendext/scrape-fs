@@ -31,6 +31,8 @@ The relative path:
 
 Generic validation rejects absolute or lexically non-normalized paths before namespace mutation. Profile-specific naming and path-safety validation runs afterward.
 
+The built-in `jellyfin@1` and `plex@1` Profiles reject Unicode control characters. `jellyfin@1` also rejects Jellyfin's reserved `<`, `>`, `:`, `"`, `\`, `|`, `?`, and `*` characters; `/` is already rejected by generic component validation. Player naming recommendations are not hard path-safety errors.
+
 `projection add` uses one SQLite transaction to:
 
 1. validate the source file;

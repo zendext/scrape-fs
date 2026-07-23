@@ -105,6 +105,9 @@ func TestOpenRejectsUnsafePaths(t *testing.T) {
 			if err == nil {
 				t.Fatal("Open succeeded")
 			}
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Errorf("Open error = %v, want ErrUnsafePath", err)
+			}
 			if !strings.Contains(err.Error(), test.errorDetail) {
 				t.Errorf("Open error = %q, want detail %q", err, test.errorDetail)
 			}
@@ -144,6 +147,9 @@ func TestOpenRejectsSymlinks(t *testing.T) {
 			if err == nil {
 				t.Fatal("Open succeeded")
 			}
+			if !errors.Is(err, ErrUnsafePath) {
+				t.Errorf("Open error = %v, want ErrUnsafePath", err)
+			}
 		})
 	}
 }
@@ -172,6 +178,9 @@ func TestOpenRejectsMagicLinks(t *testing.T) {
 	if err == nil {
 		t.Fatal("Open succeeded")
 	}
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Errorf("Open error = %v, want ErrUnsafePath", err)
+	}
 }
 
 func TestOpenRejectsNonRegularFiles(t *testing.T) {
@@ -195,6 +204,9 @@ func TestOpenRejectsNonRegularFiles(t *testing.T) {
 			}
 			if err == nil {
 				t.Fatal("Open succeeded")
+			}
+			if !errors.Is(err, ErrNotRegular) {
+				t.Errorf("Open error = %v, want ErrNotRegular", err)
 			}
 			if !strings.Contains(err.Error(), "regular file") {
 				t.Errorf("Open error = %q, want regular file detail", err)
