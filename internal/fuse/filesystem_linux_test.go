@@ -309,6 +309,9 @@ func TestMountOptionsApplyDocumentedFlagsAndTimeouts(t *testing.T) {
 	if options.RootStableAttr == nil || options.RootStableAttr.Ino != 1 {
 		t.Errorf("root stable attr = %#v, want inode 1", options.RootStableAttr)
 	}
+	if !options.NullPermissions {
+		t.Fatal("NullPermissions = false, want exact persisted permission bits")
+	}
 	if options.ExplicitDataCacheControl {
 		t.Fatal("ExplicitDataCacheControl = true, want auto cache invalidation")
 	}

@@ -28,7 +28,8 @@ type mountFilesystem func(
 type Mounted struct {
 	server     mountedServer
 	mountpoint *preparedMountpoint
-	unmount    sync.Once
+	mu         sync.Mutex
+	finished   bool
 	unmountErr error
 }
 
@@ -78,21 +79,24 @@ func Mount(
 }
 
 type directMountedServer struct {
-	server     *gofuse.Server
-	target     string
-	unmount    sync.Once
-	unmountErr error
+	server    *gofuse.Server
+	target    string
+	mu        sync.Mutex
+	unmounted bool
 }
 
 func (server *directMountedServer) Unmount() error {
-	server.unmount.Do(func() {
-		if err := unix.Unmount(server.target, 0); err != nil {
-			server.unmountErr = err
-			return
-		}
-		server.server.Wait()
-	})
-	return server.unmountErr
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.unmounted {
+		return nil
+	}
+	if err := unix.Unmount(server.target, 0); err != nil {
+		return err
+	}
+	server.server.Wait()
+	server.unmounted = true
+	return nil
 }
 
 func mountNodeFS(
@@ -191,18 +195,19 @@ func (mounted *Mounted) Unmount() error {
 	if mounted == nil {
 		return nil
 	}
-	mounted.unmount.Do(func() {
-		unmountErr := unmountPrepared(mounted.mountpoint, mounted.server)
-		var verifyErr error
-		if unmountErr == nil {
-			verifyErr = mounted.mountpoint.verifyPath()
-		}
-		mounted.unmountErr = errors.Join(
-			unmountErr,
-			verifyErr,
-			mounted.mountpoint.Close(),
-		)
-	})
+	mounted.mu.Lock()
+	defer mounted.mu.Unlock()
+	if mounted.finished {
+		return mounted.unmountErr
+	}
+	if err := unmountPrepared(mounted.mountpoint, mounted.server); err != nil {
+		return err
+	}
+	mounted.unmountErr = errors.Join(
+		mounted.mountpoint.verifyPath(),
+		mounted.mountpoint.Close(),
+	)
+	mounted.finished = true
 	return mounted.unmountErr
 }
 
@@ -223,24 +228,13 @@ func verifyMounted(path string) error {
 	if mounted == nil {
 		return fmt.Errorf("FUSE mountpoint %q is not mounted after startup", path)
 	}
-	if !mounted.scrapeFS() {
+	if !mounted.ownedScrapeFS() {
 		return fmt.Errorf(
-			"FUSE mountpoint %q resolved to unexpected mount %s from %s",
+			"FUSE mountpoint %q resolved to an unexpected or unowned mount %s from %s",
 			path,
 			mounted.filesystemType,
 			mounted.source,
 		)
-	}
-	for _, option := range []string{
-		"allow_other",
-		"default_permissions",
-		"nodev",
-		"nosuid",
-		"noexec",
-	} {
-		if !mounted.hasOption(option) {
-			return fmt.Errorf("FUSE mountpoint %q is missing required option %q", path, option)
-		}
 	}
 	return nil
 }

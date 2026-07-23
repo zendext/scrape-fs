@@ -55,6 +55,7 @@ func filesystemOptions(configuration config.FUSE) gofs.Options {
 		AttrTimeout:     durationPointer(configuration.AttrTimeout),
 		NegativeTimeout: durationPointer(configuration.NegativeTimeout),
 		RootStableAttr:  &gofs.StableAttr{Ino: 1},
+		NullPermissions: true,
 	}
 }
 

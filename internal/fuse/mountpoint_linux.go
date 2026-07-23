@@ -132,6 +132,9 @@ func prepareMountpointDirectory(path string) (_ *preparedMountpoint, err error) 
 				)
 			}
 			created = mkdirErr == nil
+			if created {
+				flags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
+			}
 			nextFD, openErr = unix.Openat2(currentFD, component, &unix.OpenHow{
 				Flags:   uint64(flags),
 				Resolve: mountpointResolveFlags,
@@ -158,6 +161,16 @@ func prepareMountpointDirectory(path string) (_ *preparedMountpoint, err error) 
 			)
 		}
 
+		if created {
+			if err := unix.Fchmod(nextFD, uint32(mode.Perm())); err != nil {
+				unix.Close(nextFD)
+				return nil, fmt.Errorf(
+					"set FUSE mountpoint directory %q mode: %w",
+					filepath.Join(currentPath, component),
+					err,
+				)
+			}
+		}
 		if err := unix.Close(currentFD); err != nil {
 			unix.Close(nextFD)
 			return nil, fmt.Errorf("close FUSE mountpoint ancestor: %w", err)
@@ -165,11 +178,6 @@ func prepareMountpointDirectory(path string) (_ *preparedMountpoint, err error) 
 		currentFD = nextFD
 		currentPath = filepath.Join(currentPath, component)
 
-		if created && final {
-			if err := unix.Fchmod(currentFD, uint32(mode.Perm())); err != nil {
-				return nil, fmt.Errorf("set FUSE mountpoint directory %q mode: %w", currentPath, err)
-			}
-		}
 		if err := validateMountpointDirectory(currentFD, currentPath, final); err != nil {
 			return nil, err
 		}
@@ -251,6 +259,26 @@ type mountRecord struct {
 func (mount mountRecord) scrapeFS() bool {
 	return mount.filesystemType == "fuse."+filesystemName &&
 		mount.source == filesystemName
+}
+
+func (mount mountRecord) ownedScrapeFS() bool {
+	if !mount.scrapeFS() {
+		return false
+	}
+	for _, option := range []string{
+		fmt.Sprintf("user_id=%d", os.Geteuid()),
+		fmt.Sprintf("group_id=%d", os.Getegid()),
+		"allow_other",
+		"default_permissions",
+		"nodev",
+		"nosuid",
+		"noexec",
+	} {
+		if !mount.hasOption(option) {
+			return false
+		}
+	}
+	return true
 }
 
 func (mount mountRecord) hasOption(option string) bool {
@@ -354,7 +382,7 @@ func clearExistingMount(
 	if len(existing) != 1 {
 		return fmt.Errorf("FUSE mountpoint %q has multiple existing mounts", path)
 	}
-	if !existing[0].scrapeFS() {
+	if !existing[0].ownedScrapeFS() {
 		return fmt.Errorf(
 			"FUSE mountpoint %q contains an unrelated existing mount (%s from %s)",
 			path,

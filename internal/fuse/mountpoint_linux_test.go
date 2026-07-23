@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -27,6 +28,30 @@ func TestPrepareMountpointCreatesFailClosedEmptyDirectory(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != mountpointMode {
 		t.Errorf("mode = %#o, want %#o", got, mountpointMode)
+	}
+}
+
+func TestPrepareMountpointSetsCreatedAncestorModeIndependentOfUmask(t *testing.T) {
+	root := t.TempDir()
+	previousUmask := syscall.Umask(0o077)
+	t.Cleanup(func() {
+		syscall.Umask(previousUmask)
+	})
+	parent := filepath.Join(root, "parent")
+	path := filepath.Join(parent, "mount")
+
+	prepared, err := prepareMountpointDirectory(path)
+	if err != nil {
+		t.Fatalf("prepareMountpointDirectory: %v", err)
+	}
+	defer prepared.Close()
+
+	info, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("Stat parent: %v", err)
+	}
+	if got := info.Mode().Perm(); got != mountpointAncestorMode {
+		t.Errorf("parent mode = %#o, want %#o", got, mountpointAncestorMode)
 	}
 }
 
@@ -148,6 +173,45 @@ func (fakeMountedServer) Unmount() error {
 	return nil
 }
 
+type retryMountedServer struct {
+	calls int
+}
+
+func (server *retryMountedServer) Unmount() error {
+	server.calls++
+	if server.calls == 1 {
+		return syscall.EBUSY
+	}
+	return nil
+}
+
+func TestMountedUnmountRetainsAnchorAndRetriesAfterFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mount")
+	prepared, err := prepareMountpointDirectory(path)
+	if err != nil {
+		t.Fatalf("prepareMountpointDirectory: %v", err)
+	}
+	server := &retryMountedServer{}
+	mounted := &Mounted{server: server, mountpoint: prepared}
+
+	if err := mounted.Unmount(); !errors.Is(err, syscall.EBUSY) {
+		t.Fatalf("first Unmount error = %v, want EBUSY", err)
+	}
+	if _, err := prepared.directory.Stat(); err != nil {
+		t.Fatalf("mountpoint anchor closed after failed unmount: %v", err)
+	}
+
+	if err := mounted.Unmount(); err != nil {
+		t.Fatalf("second Unmount: %v", err)
+	}
+	if server.calls != 2 {
+		t.Errorf("server Unmount calls = %d, want 2", server.calls)
+	}
+	if _, err := prepared.directory.Stat(); err == nil {
+		t.Fatal("mountpoint anchor remains open after successful unmount")
+	}
+}
+
 func TestPrepareMountpointRejectsUnsafePaths(t *testing.T) {
 	t.Run("symlink", func(t *testing.T) {
 		root := t.TempDir()
@@ -245,16 +309,43 @@ func TestClearExistingMountFailsClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("stale ScrapeFS mount", func(t *testing.T) {
-		var path string
-		var flags int
+	t.Run("spoofed ScrapeFS mount", func(t *testing.T) {
+		unmounted := false
 		err := clearExistingMount(
 			"/mnt/scrapefs",
 			[]mountRecord{{
 				mountpoint:     "/mnt/scrapefs",
 				filesystemType: "fuse.scrapefs",
 				source:         "scrapefs",
+				options: map[string]struct{}{
+					"user_id=" + strconv.FormatUint(uint64(differentID(uint32(os.Geteuid()))), 10): {},
+					"group_id=" + strconv.FormatUint(uint64(os.Getegid()), 10):                     {},
+					"allow_other":         {},
+					"default_permissions": {},
+					"nodev":               {},
+					"nosuid":              {},
+					"noexec":              {},
+				},
 			}},
+			func(string, int) error {
+				unmounted = true
+				return nil
+			},
+		)
+		if err == nil || !strings.Contains(err.Error(), "unrelated") {
+			t.Fatalf("error = %v, want unrelated mount rejection", err)
+		}
+		if unmounted {
+			t.Fatal("spoofed ScrapeFS mount was unmounted")
+		}
+	})
+
+	t.Run("stale ScrapeFS mount", func(t *testing.T) {
+		var path string
+		var flags int
+		err := clearExistingMount(
+			"/mnt/scrapefs",
+			[]mountRecord{currentScrapeFSMount("/mnt/scrapefs")},
 			func(gotPath string, gotFlags int) error {
 				path = gotPath
 				flags = gotFlags
@@ -272,11 +363,7 @@ func TestClearExistingMountFailsClosed(t *testing.T) {
 	t.Run("busy stale mount", func(t *testing.T) {
 		err := clearExistingMount(
 			"/mnt/scrapefs",
-			[]mountRecord{{
-				mountpoint:     "/mnt/scrapefs",
-				filesystemType: "fuse.scrapefs",
-				source:         "scrapefs",
-			}},
+			[]mountRecord{currentScrapeFSMount("/mnt/scrapefs")},
 			func(string, int) error {
 				return syscall.EBUSY
 			},
@@ -285,4 +372,28 @@ func TestClearExistingMountFailsClosed(t *testing.T) {
 			t.Fatalf("error = %v, want EBUSY", err)
 		}
 	})
+}
+
+func differentID(value uint32) uint32 {
+	if value == ^uint32(0) {
+		return value - 1
+	}
+	return value + 1
+}
+
+func currentScrapeFSMount(path string) mountRecord {
+	return mountRecord{
+		mountpoint:     path,
+		filesystemType: "fuse.scrapefs",
+		source:         "scrapefs",
+		options: map[string]struct{}{
+			"user_id=" + strconv.Itoa(os.Geteuid()):  {},
+			"group_id=" + strconv.Itoa(os.Getegid()): {},
+			"allow_other":                            {},
+			"default_permissions":                    {},
+			"nodev":                                  {},
+			"nosuid":                                 {},
+			"noexec":                                 {},
+		},
+	}
 }

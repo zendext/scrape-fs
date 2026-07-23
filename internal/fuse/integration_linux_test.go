@@ -389,6 +389,9 @@ func assertIntegrationMountFlags(t *testing.T, mountpoint string) {
 		if mount.mountpoint != mountpoint {
 			continue
 		}
+		if !mount.ownedScrapeFS() {
+			t.Errorf("mount is not recognized as daemon-owned ScrapeFS: %#v", mount)
+		}
 		for _, option := range []string{
 			"allow_other",
 			"default_permissions",
