@@ -11,20 +11,19 @@
 - `projection rm` 不删除源文件。
 - 删除 Projection 后清理空的 managed Directory。
 
-## 2. Scrape
+## 2. Projection Batch
 
-- `scrape submit` 只接受版本化 UTF-8 JSON Plan。
-- 未知字段、无效类型和空 entries 被拒绝。
+- Batch 只接受版本化 UTF-8 JSON。
+- 未知字段、无效类型、空 entries、重复 source 和重复 target 被拒绝。
 - 每个 entry 显式包含绝对 source 和 Library-relative target。
-- daemon 不根据 Plan 枚举目录、读取源内容、执行命令或访问网络。
-- submit 和 revise 安全打开并快照所有 source。
-- revise 使用完整替换 Plan 创建不可变 revision。
-- apply 请求必须匹配用户刚确认的 revision。
-- revision 变化后旧确认请求失败。
-- apply 前重新校验全部 source 身份、Profile、路径和冲突。
-- apply 不产生部分 Projection。
-- apply 失败后 Scrape 保持 ready。
-- applied 不可再次 apply。
+- daemon 不根据 Batch 枚举目录、读取 source 内容、执行命令或访问网络。
+- validate 安全打开全部 source，返回 diff、warning、digest 和 namespace version。
+- validate 不写 SQLite，也不创建 pending Batch、snapshot 或 revision。
+- digest 使用 `sha256:<64 位小写十六进制>`，不受 JSON 空白或对象字段顺序影响，并保留 `entries` 数组顺序。
+- apply 要求 expected digest，并重新校验全部 source、Profile、路径和冲突。
+- apply 在一个事务中创建 provenance 和全部 Projection，不产生部分结果。
+- apply 失败不留下 Batch provenance。
+- 成功 apply 返回稳定 Batch ID。
 - undo 在单事务中完成。
 - undo 不删除 OverlayFile。
 
@@ -59,9 +58,9 @@
 
 - `scrapefsd` 不内置模型 provider、Agent session 或工具调用循环。
 - 外部 Agent 使用调用者已有的宿主文件系统、控制 CLI 和 FUSE 权限。
-- 外部 Agent 通过 `scrapefs.scrape/v1` 提交显式 source-to-target Plan。
+- 外部 Agent 通过 `scrapefs.projection-batch/v1` 提交显式 source-to-target Batch。
 - 自动化命令提供机器可读 JSON，非 TTY 模式不提示输入或自动 apply。
-- Plan applied 后，外部 Agent 通过普通 FUSE 操作创建 OverlayFile。
+- Batch applied 后，外部 Agent 通过普通 FUSE 操作创建 OverlayFile。
 - ScrapeFS 不根据创建者是人工、脚本或 Agent 改变 OverlayFile 语义。
 
 ## 6. Library
@@ -99,8 +98,8 @@ Skill 应当覆盖：
 - sample 忽略；
 - Plex 和 Jellyfin；
 - 读取已有 NFO；
-- 生成 `scrapefs.scrape/v1`；
-- Plan revise、diff、validate、apply 和 undo；
+- 生成 `scrapefs.projection-batch/v1`；
+- Batch validate、用户确认、apply、show 和 undo；
 - apply 后通过 FUSE 创建 NFO 和海报。
 
 Skill 可以拒绝或要求人工处理：
@@ -113,4 +112,4 @@ Skill 可以拒绝或要求人工处理：
 - 音乐和图片库；
 - 远程网络源。
 
-这些格式能力属于 Skill，不改变 ScrapeFS Plan Schema。ScrapeFS 只要求 Plan 中的 Projection source 是可安全打开的本地 regular 文件。
+这些格式能力属于 Skill，不改变 ScrapeFS Batch Schema。ScrapeFS 只要求 Batch 中的 Projection source 是可安全打开的本地 regular 文件。

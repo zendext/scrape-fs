@@ -12,8 +12,8 @@ It projects media files from one or more local filesystems into player-friendly 
 
 - **Library**: a virtual media library exposed under the FUSE mount, such as `jellyfin` or `plex`.
 - **Projection**: a read-only mapping from an external source file to a virtual library path.
+- **Projection Batch**: external JSON input that creates and undoes multiple Projections atomically.
 - **OverlayFile**: a writable file managed by ScrapeFS, such as an NFO file, poster, or downloaded subtitle.
-- **Scrape**: a Projection plan submitted by an external tool, validated by ScrapeFS, and applied atomically.
 - **Profile**: deterministic naming and directory rules for a media player.
 
 `Node` is an internal implementation term for an entry in the virtual filesystem tree. It is not part of the user-facing API.
@@ -59,17 +59,18 @@ Removing or renaming the Projection does not modify the source file.
 
 ## External Agent Skill
 
-When media identification is needed, an external Agent skill reads the source directory, probes media, queries metadata, and submits an explicit plan:
+When media identification is needed, an external Agent skill reads the source directory, probes media, queries metadata, and generates an explicit batch:
 
 ```bash
-scrapefs scrape submit --file /tmp/dune.scrape.json
-scrapefs scrape diff scrape-42 --against namespace
-scrapefs scrape apply scrape-42 --revision 1
+scrapefs projection batch validate --file /tmp/dune.batch.json
+scrapefs projection batch apply \
+  --file /tmp/dune.batch.json \
+  --expected-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-`scrapefsd` does not run a model or expose file-read, `ffprobe`, or network tools to an Agent. It securely opens only the sources explicitly named in the plan, validates paths and conflicts, and creates the Projections atomically. The external Agent creates NFO files and artwork through ordinary FUSE operations after apply.
+`scrapefsd` does not run a model or expose file-read, `ffprobe`, or network tools to an Agent. Validate checks the batch without persistence. Apply safely reopens the sources, validates paths and conflicts, and creates every Projection atomically. The external Agent creates NFO files and artwork through ordinary FUSE operations after apply.
 
-The earlier specification used `scrapefs scrape <source> --library <name>` and assumed the daemon would enumerate and identify media. That command is removed from the target v1 CLI. `Scrape` now means the review, revision, apply, and undo lifecycle of an externally generated plan.
+The earlier specification used `scrapefs scrape <source> --library <name>` and assumed the daemon would enumerate and identify media. That command is removed from the target v1 CLI. ScrapeFS also does not persist unapplied plans, drafts, or revisions. The external Agent owns work context, while the daemon stores only minimal provenance for a successfully applied batch and later undo.
 
 ## First-Version Boundaries
 
@@ -80,7 +81,7 @@ The first version targets:
 - movies, standard `SxxEyy` episodes, and external subtitles;
 - read-only source Projections;
 - writable OverlayFiles;
-- versioned JSON Scrape plans;
+- versioned JSON Projection batches;
 - a machine-readable CLI for people and external Agent skills.
 
 It does not target an embedded model provider, daemon-side Agent sessions, torrent management, downloader integration, a GUI, writable Projections, a complete POSIX filesystem, dynamic Profile plugins, or cross-host path translation.
@@ -115,7 +116,7 @@ gofmt -w .
 - [Use cases](docs/en/use-cases.md)
 - [Architecture](docs/en/architecture.md)
 - [Projection model](docs/en/projection.md)
-- [Scrape plans and the external Agent workflow](docs/en/scrape.md)
+- [Projection batches and the external Agent workflow](docs/en/scrape.md)
 - [Filesystem and object storage](docs/en/filesystem.md)
 - [Operations and CLI](docs/en/operations.md)
 - [First-version acceptance criteria](docs/en/acceptance.md)

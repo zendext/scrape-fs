@@ -1,12 +1,12 @@
-# Scrape Plan 与外部 Agent 工作流
+# Projection Batch 与外部 Agent 工作流
 
 [English](../en/scrape.md) | **简体中文**
 
-Scrape 是由外部工具提交、经 ScrapeFS 校验并可原子应用的一组 Projection 计划。
+媒体识别不在 `scrapefsd` 中执行。外部 Agent Skill、脚本或人工工具负责读取源目录、调用 `ffprobe`、查询元数据、处理歧义并生成显式的 Projection Batch。ScrapeFS 只负责确定性的校验、预览、原子 apply 和 batch undo。
 
-媒体识别不在 `scrapefsd` 中执行。外部 Agent Skill、脚本或人工工具负责读取源目录、调用 `ffprobe`、查询元数据、处理歧义并选择目标路径。ScrapeFS 只负责确定性的源文件校验、路径校验、冲突检查、预览、apply 和 undo。
+Batch JSON 是外部输入文档，不是 daemon-side Plan。ScrapeFS 不持久化未应用 Batch，不维护 draft、ready、revision、revise 或 discard 生命周期。
 
-## 与早期规范的差异
+## 1. 与早期规范的差异
 
 早期规范计划使用：
 
@@ -18,23 +18,24 @@ scrapefs scrape \
 
 该命令意味着 daemon 枚举源目录、运行 Agent 分析并生成 Projection。这个行为尚未实现，并从目标 v1 CLI 契约中移除，不提供兼容 alias。
 
+后续的外部 Agent 设计曾考虑由 daemon 持久化 `scrapefs.scrape/v1` Plan、revision 和待确认状态。外部 Agent 已经拥有工作上下文并负责用户交互，因此这层状态重复且不再属于 v1。
+
 当前职责拆分为：
 
-1. 外部 Agent 或其他工具执行媒体刮削并生成 `scrapefs.scrape/v1` Plan。
-2. `scrapefs scrape submit` 将 Plan 提交给 daemon。
-3. daemon 负责审阅数据、revision、validate、原子 apply 和 undo。
+1. 外部 Agent 或其他工具执行媒体刮削并生成 `scrapefs.projection-batch/v1` JSON。
+2. `projection batch validate` 无状态校验并预览 Batch。
+3. `projection batch apply` 重新校验并原子创建全部 Projection。
+4. apply 成功后，daemon 只保存用于审计和 undo 的最小 Batch provenance。
 
-因此，当前文档中的 Scrape 指 Plan 生命周期，不再指 daemon 内部执行的媒体识别过程。
-
-## 1. 外部 Agent 边界
+## 2. 外部 Agent 边界
 
 外部 Agent：
 
 - 使用调用它的控制用户身份读取宿主文件系统；
-- 自行决定使用的模型、提示词、元数据 provider 和媒体探测工具；
-- 生成显式的 source-to-target Projection Plan；
-- 通过 `scrapefs` CLI 提交和审阅 Plan；
-- 在 Plan applied 后，通过普通 FUSE 文件操作创建 NFO、海报等 OverlayFile。
+- 自行决定使用的模型、提示词、metadata provider 和媒体探测工具；
+- 自行处理 ignored source、候选比较、用户确认和 Batch 文件保存；
+- 通过 `scrapefs` CLI validate 和 apply Batch；
+- apply 后通过普通 FUSE 文件操作创建 NFO、海报等 OverlayFile。
 
 ScrapeFS 不提供：
 
@@ -42,22 +43,22 @@ ScrapeFS 不提供：
 - daemon-side Agent session 或 session token；
 - 模型工具调用循环；
 - 任意文件读取、`ffprobe` 或网络查询 Agent API；
-- MediaModel、Question/Answer 或 Agent 专用 Overlay API。
+- MediaModel、Question/Answer、pending Plan 或 Agent 专用 Overlay API。
 
 外部 Agent 不是额外的权限边界。它只能使用自身的宿主文件系统权限、控制 CLI 权限和 FUSE 权限。
 
-## 2. Plan 格式
+## 3. Batch 格式
 
-第一版只接受 UTF-8 JSON。CLI 从文件或 stdin 读取版本化 Plan：
+第一版只接受严格的 UTF-8 JSON。CLI 从文件或 stdin 读取：
 
 ```bash
-scrapefs scrape submit --file /tmp/dune.scrape.json
-scrapefs scrape submit --file -
+scrapefs projection batch validate --file /tmp/dune.batch.json
+scrapefs projection batch validate --file -
 ```
 
 ```json
 {
-  "schema": "scrapefs.scrape/v1",
+  "schema": "scrapefs.projection-batch/v1",
   "library": "jellyfin",
   "entries": [
     {
@@ -68,185 +69,176 @@ scrapefs scrape submit --file -
       "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.zh.ass",
       "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).zh.ass"
     }
-  ],
-  "ignored": [
-    {
-      "source": "/mnt/disk1/downloads/Dune.2021.REMUX/sample.mkv",
-      "reason": "sample video"
-    }
   ]
 }
 ```
 
 规则：
 
-- `schema` 必须为 `scrapefs.scrape/v1`；
+- `schema` 必须为 `scrapefs.projection-batch/v1`；
 - `library` 必须引用 ACTIVE Library；
 - `entries` 必须非空；
 - `source` 必须是经过词法规范化的绝对本地路径；
-- `target` 相对于 LibraryRoot，必须经过通用和 Profile 路径校验；
-- 同一 Plan 不能重复使用 target；
-- `ignored` 只用于审阅，不创建节点，也不授予 daemon 读取对应路径的权限；
+- `target` 相对于 LibraryRoot，必须通过通用和 Profile 路径校验；
+- 同一 Batch 不能重复使用 source 或 target；
 - 未知字段和无效类型必须拒绝；
-- 第一版不支持 YAML 或跨主机路径转换。
+- 第一版不支持 YAML、远程 source 或跨主机路径转换。
 
-## 3. Submit 和源文件快照
+媒体标题、provider ID、ignored source、置信度和 Agent 推理不属于 Batch Schema。外部 Agent 可以在自己的工作上下文中保留这些信息。
 
-`scrape submit` 由控制用户调用。控制用户是可信源路径选择者。
+## 4. 无状态 Validate
 
-daemon 对每个 entry：
+```bash
+scrapefs projection batch validate \
+  --file /tmp/dune.batch.json \
+  --json
+```
 
-1. 使用安全源文件打开能力打开 `source`；
-2. 拒绝 symlink、magic link、目录和其他非 regular 文件；
-3. 保存规范化路径、device、inode、size、mode 和纳秒时间戳；
-4. 关闭提交阶段不再需要的描述符；
-5. 在 apply 前重新安全打开并校验身份。
+daemon：
 
-Plan 不能请求 daemon 枚举父目录、读取文件内容、执行命令或访问网络。
+1. 严格解析 Batch；
+2. 解析 ACTIVE Library 和当前 Profile；
+3. 使用安全源文件打开能力检查每个 source；
+4. 拒绝 symlink、magic link、目录和其他非 regular 文件；
+5. 执行通用路径和 Profile 校验；
+6. 检查 Batch 内部及当前 namespace 冲突；
+7. 计算规范化 Batch 的 SHA-256 digest；
+8. 返回 diff、warning、digest 和当前 namespace version；
+9. 关闭所有 source fd，不写 SQLite。
 
-## 4. Scrape 数据
+示例结果：
+
+```json
+{
+  "schema": "scrapefs.projection-batch-validation/v1",
+  "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "namespace_version": 42,
+  "valid": true,
+  "entries": [],
+  "warnings": []
+}
+```
+
+digest 根据严格解析后的规范化 Batch 计算，格式为 `sha256:` 后跟 64 位小写十六进制字符。输入 JSON 的空白和对象字段顺序不影响 digest，`entries` 数组顺序保留。`namespace_version` 只用于审阅；apply 时版本变化会触发重新检查，不能仅因版本不同而失败。
+
+Validate 不创建 pending Batch、source snapshot、revision 或 operation log。外部 Agent 持有原始 Batch JSON，并负责修改后重新 validate。
+
+## 5. 原子 Apply
+
+```bash
+scrapefs projection batch apply \
+  --file /tmp/dune.batch.json \
+  --expected-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+apply 前必须确认：
+
+- 调用者有控制权限；
+- expected digest 与提交 Batch 的规范化 digest 相同；
+- 所有 source 仍可安全打开且为 regular 文件；
+- Library 为 ACTIVE；
+- Profile 版本可用；
+- 所有路径安全检查通过；
+- Batch 内部和 namespace 中没有 target 冲突。
+
+原子流程：
+
+1. 重新解析 Batch 并校验 expected digest。
+2. 重新安全打开全部 source，并保存 apply-time identity。
+3. 重新执行通用路径、Profile 和冲突检查。
+4. 构建完整候选 namespace 变更。
+5. 开启 SQLite 写事务。
+6. 再次检查目标冲突。
+7. 创建最小 applied Batch provenance 记录。
+8. 创建全部 managed Directory 和 ProjectionFile。
+9. 写一条批次 operation log。
+10. namespace version 增加 1。
+11. 提交事务。
+12. 更新内存索引并失效 FUSE 缓存。
+
+步骤 5 至 11 必须处于同一事务。实现不得通过重复调用各自提交事务的 `projection add` 来模拟原子批次。
+
+成功结果返回稳定 Batch ID：
+
+```json
+{
+  "schema": "scrapefs.projection-batch-result/v1",
+  "batch_id": "batch-42",
+  "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "namespace_version": 43
+}
+```
+
+同一 Batch 可以在目标尚未存在时再次 apply；digest 不是幂等键。已存在的目标必须返回冲突，不得静默视为成功。
+
+## 6. Applied Batch Provenance
+
+只有成功 apply 的 Batch 才持久化：
 
 ```text
-scrapes
+projection batch provenance
 ├── id
 ├── library_id
 ├── profile_name
 ├── profile_version
-├── current_revision
-├── applied_revision
+├── digest
 ├── status
-├── validated_namespace_version
-├── confirmed_by_uid
-├── confirmed_by_gid
-├── confirmed_at
-├── last_error
-├── created_at
-└── updated_at
+├── applied_by_uid
+├── applied_by_gid
+├── applied_at
+├── undone_by_uid
+├── undone_by_gid
+└── undone_at
 ```
 
 状态：
 
 ```text
-draft
-ready
 applied
 undone
-discarded
 ```
 
-Schema 错误或权限错误导致 submit 失败且不创建 Scrape。可以审阅和修正的路径冲突、Profile warning 或源文件状态保存在 draft revision 中。没有 blocking error 时状态为 ready。
+基础 namespace migration 已发布 `scrapes`、`nodes.origin_scrape_id` 和 `operation_log.scrape_id` 名称。第一版可以扩展这些 legacy storage 名称保存 Batch provenance，避免重写已发布 migration。它们是内部存储名称，不属于 CLI 或 JSON Schema。
 
-## 5. Revision
+Batch 不保存外部 Agent 的 prompt、对话、metadata response 或未应用 JSON。ProjectionFile 自身保存 source identity，operation log 保存批次路径快照。
 
-每次 `submit` 创建 revision 1。`scrape revise` 使用完整替换 Plan 创建新的不可变 revision：
-
-```bash
-scrapefs scrape revise scrape-42 --file corrected.json
-```
+## 7. Show、List 和 Undo
 
 ```text
-scrape_revisions
-├── scrape_id
-├── revision
-├── plan
-├── source_snapshots
-├── validation_result
-├── warnings
-├── created_by_uid
-└── created_at
+scrapefs projection batch list
+scrapefs projection batch show batch-42
+scrapefs projection batch undo batch-42
 ```
 
-CLI 展示 revision 后，apply 必须携带 expected revision。当前 revision 已变化时，daemon 拒绝 apply 并要求重新审阅。
-
-状态转换：
-
-```text
-无 -> draft
-无 -> ready
-draft -> ready
-draft/ready -> draft
-draft/ready -> discarded
-ready -> applied
-applied -> undone
-```
-
-applied、undone 或 discarded Scrape 不能 revise。
-
-## 6. Validate、Diff 和 Export
-
-```text
-scrapefs scrape show scrape-42
-scrapefs scrape validate scrape-42
-scrapefs scrape diff scrape-42
-scrapefs scrape diff scrape-42 --against namespace
-scrapefs scrape export scrape-42
-```
-
-`validate` 重新检查 Library、Profile、源文件身份、路径安全和命名空间冲突，并使用相同 Plan 创建包含新 source snapshot 和 validation result 的不可变 revision。它不修改已有 revision。
-
-`diff --against namespace` 显示：
-
-- 将创建的 Projection；
-- 将创建或复用的 managed Directory；
-- 已存在路径；
-- 路径冲突；
-- Profile warning；
-- ignored source。
-
-`export` 只输出可再次提交的当前 `scrapefs.scrape/v1` Plan。daemon 保存的 source snapshot、validation result 和 namespace diff 通过 `show --json` 和 `diff --json` 查看，不能作为再次提交时绕过校验的依据。
-
-所有面向自动化的命令必须支持机器可读 JSON 输出。非 TTY 或显式机器可读模式不得提示输入或自动 apply。
-
-## 7. Apply
-
-apply 前必须确认：
-
-- 调用者有控制权限；
-- Scrape 状态为 ready；
-- expected revision 等于当前 revision；
-- 所有源文件身份仍匹配；
-- Library 为 ACTIVE；
-- Profile 版本可用；
-- 所有路径安全检查通过；
-- 目标路径不存在冲突。
-
-原子流程：
-
-1. 读取 ready Scrape 和 expected revision。
-2. 重新安全打开并校验全部源文件。
-3. 重新执行通用路径和 Profile 校验。
-4. 构建完整候选 namespace 变更。
-5. 开启 SQLite 写事务。
-6. 再次检查路径冲突。
-7. 创建全部 Directory 和 ProjectionFile。
-8. 写一条批次 operation log。
-9. Scrape 状态改为 applied。
-10. 保存 applied revision 和确认者 UID/GID。
-11. namespace version 增加 1。
-12. 提交事务。
-13. 更新内存索引并失效 FUSE 缓存。
-
-步骤 5 至 12 必须处于同一事务。Plan 实现不得通过重复调用各自提交事务的 direct Projection 操作来模拟原子批次。
-
-重复 apply 已 applied Scrape 返回 `AlreadyApplied`。
-
-## 8. Undo
+`show` 只展示已 applied 或 undone Batch 的 provenance、创建的 Projection 和 operation-log 快照，不提供待处理 Plan。
 
 undo 在单个 SQLite 事务中：
 
-1. 删除 `origin_scrape_id` 匹配的 ProjectionFile；
+1. 删除 legacy `origin_scrape_id` 指向该 Batch 的 ProjectionFile；
 2. 向 LibraryRoot 清理空的 managed Directory；
 3. 写 operation log；
-4. Scrape 状态改为 undone；
+4. 将 Batch 状态改为 undone，并保存调用者 UID/GID；
 5. namespace version 增加 1。
 
 undo 不删除通过 FUSE 创建的 OverlayFile。CLI 必须列出阻止目录清理或仍位于原目标目录中的 OverlayFile。
 
-重复 undo 已 undone Scrape 返回 `AlreadyUndone`。
+重复 undo 已 undone Batch 返回 `AlreadyUndone`。
+
+## 8. 与 Direct Projection 的关系
+
+Issue #8 实现一次创建一个 Projection 的 direct operation。Direct 和 Batch 必须共享：
+
+- source 安全打开与身份提取；
+- Library 解析；
+- 通用和 Profile 路径校验；
+- 冲突分类；
+- 候选 Projection 构建。
+
+Direct operation 自己提交单 Projection 事务。Batch operation 持有一个调用者事务并创建全部 entry，不调用 independently committing direct operation。
 
 ## 9. Overlay Artifact
 
-Plan applied 后，外部 Agent 可以通过普通 FUSE 操作创建 artifact：
+Batch apply 后，外部 Agent 可以通过普通 FUSE 操作创建 artifact：
 
 ```bash
 printf '%s' "$NFO" > \
@@ -261,21 +253,20 @@ cp poster.jpg \
 - 虚拟 UID/GID 来自 FUSE 调用者；
 - mode 经过普通 umask 和 Library 权限规则处理；
 - backing object 使用 daemon 私有权限；
-- Scrape undo 不自动删除 OverlayFile；
+- batch undo 不自动删除 OverlayFile；
 - ScrapeFS 不区分文件由人工、脚本或 Agent 创建。
 
 ## 10. Agent Skill 契约
 
 外部 Agent Skill 应当说明：
 
-- 支持的媒体、字幕和本地元数据格式；
+- 支持的媒体、字幕和本地 metadata 格式；
 - 源目录枚举和 sample 忽略规则；
-- `ffprobe` 和元数据查询方式；
+- `ffprobe` 和 metadata 查询方式；
 - Plex/Jellyfin Profile 命名规则；
-- `scrapefs.scrape/v1` 生成规则；
-- submit、show、diff、revise、validate、apply 和 undo 工作流；
-- 用户确认边界；
+- `scrapefs.projection-batch/v1` 生成规则；
+- validate、用户确认、apply、show 和 undo 工作流；
 - apply 后通过 FUSE 创建 OverlayFile 的方式；
-- `ESTALE`、路径冲突和部分 artifact 失败的恢复方式。
+- source 变化、路径冲突和部分 artifact 失败的恢复方式。
 
-Skill 不是 daemon 插件。Skill 更新不能改变 ScrapeFS 的权限模型、Plan Schema 或路径安全规则。
+Skill 不是 daemon 插件。Skill 更新不能改变 ScrapeFS 的权限模型、Batch Schema 或路径安全规则。

@@ -7,7 +7,7 @@
 第一版控制面使用两个身份角色：
 
 1. **管理员**：root 或配置的管理员 UID，可管理 Library 和 daemon。
-2. **控制用户**：属于 `scrapefs-control` 组，可选择源路径、创建 Projection、执行 Scrape、apply/undo、查看 status/doctor。
+2. **控制用户**：属于 `scrapefs-control` 组，可选择源路径、创建 Projection、validate/apply/undo Projection Batch、查看 status/doctor。
 
 推荐 socket：
 
@@ -30,10 +30,9 @@ daemon 必须通过 Unix peer credentials 获取调用者身份。
 
 递归删除前不得存在：
 
-- draft 或 ready Scrape；
 - 进行中的命名空间写事务。
 
-管理员必须先 discard 未应用 Scrape，并等待在途写事务结束，再执行 recursive remove。
+管理员必须等待在途 Batch apply、undo 或其他命名空间写事务结束，再执行 recursive remove。
 
 recursive remove 必须在单个 SQLite 事务中：
 
@@ -126,16 +125,11 @@ scrapefs projection mv
 scrapefs projection rm
 scrapefs projection rebind
 
-scrapefs scrape submit
-scrapefs scrape list
-scrapefs scrape show
-scrapefs scrape diff
-scrapefs scrape revise
-scrapefs scrape validate
-scrapefs scrape apply
-scrapefs scrape undo
-scrapefs scrape discard
-scrapefs scrape export
+scrapefs projection batch validate
+scrapefs projection batch apply
+scrapefs projection batch list
+scrapefs projection batch show
+scrapefs projection batch undo
 
 scrapefs gc
 ```
@@ -146,7 +140,7 @@ daemon：
 scrapefsd
 ```
 
-所有供自动化调用的命令必须支持机器可读 JSON 输出。`scrape submit` 和 `scrape revise` 使用 `--file <path>` 读取 UTF-8 JSON，并使用 `--file -` 从 stdin 读取。非 TTY 或显式机器可读模式不得提示输入或自动 apply。
+所有供自动化调用的命令必须支持机器可读 JSON 输出。`projection batch validate` 和 `projection batch apply` 使用 `--file <path>` 读取 UTF-8 JSON，并使用 `--file -` 从 stdin 读取。非 TTY 或显式机器可读模式不得提示输入或自动 apply。
 
 ## 8. 第一版配置
 

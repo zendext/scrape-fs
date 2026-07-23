@@ -12,8 +12,8 @@ ScrapeFS 是一个面向 Linux 的外部 Agent 辅助媒体整理与虚拟目录
 
 - **Library**：通过 FUSE 挂载点提供的虚拟媒体库，例如 `jellyfin` 或 `plex`。
 - **Projection**：外部源文件到 Library 虚拟路径之间的只读映射。
+- **Projection Batch**：一次原子创建和撤销多个 Projection 的外部 JSON 输入。
 - **OverlayFile**：由 ScrapeFS 管理的可写文件，例如 NFO、海报和下载的字幕。
-- **Scrape**：由外部工具提交、经 ScrapeFS 校验并可原子应用的 Projection Plan。
 - **Profile**：面向特定播放器的确定性目录和命名规则。
 
 `Node` 仅是虚拟文件系统目录项的内部实现术语，不属于用户 API。
@@ -59,17 +59,18 @@ scrapefs projection add \
 
 ## 外部 Agent Skill
 
-需要识别媒体时，外部 Agent Skill 读取源目录、执行媒体探测和元数据查询，然后提交显式 Plan：
+需要识别媒体时，外部 Agent Skill 读取源目录、执行媒体探测和 metadata 查询，然后生成显式 Batch：
 
 ```bash
-scrapefs scrape submit --file /tmp/dune.scrape.json
-scrapefs scrape diff scrape-42 --against namespace
-scrapefs scrape apply scrape-42 --revision 1
+scrapefs projection batch validate --file /tmp/dune.batch.json
+scrapefs projection batch apply \
+  --file /tmp/dune.batch.json \
+  --expected-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
-`scrapefsd` 不运行模型，也不向 Agent 暴露文件读取、`ffprobe` 或网络工具。它只安全打开 Plan 中显式列出的源文件，执行路径和冲突校验，并原子创建 Projection。NFO 和海报由外部 Agent 在 apply 后通过普通 FUSE 文件操作创建。
+`scrapefsd` 不运行模型，也不向 Agent 暴露文件读取、`ffprobe` 或网络工具。Validate 无状态检查 Batch；apply 重新安全打开源文件、执行路径和冲突校验，并原子创建全部 Projection。NFO 和海报由外部 Agent 在 apply 后通过普通 FUSE 文件操作创建。
 
-早期规范中的 `scrapefs scrape <source> --library <name>` 假设 daemon 会主动枚举和识别媒体。该命令从目标 v1 CLI 中移除；`Scrape` 现在表示外部生成 Plan 的审阅、revision、apply 和 undo 生命周期。
+早期规范中的 `scrapefs scrape <source> --library <name>` 假设 daemon 会主动枚举和识别媒体。该命令从目标 v1 CLI 中移除。ScrapeFS 也不持久化未应用 Plan、draft 或 revision；外部 Agent 保存工作上下文，daemon 只保存成功 apply 后用于审计和 undo 的最小 Batch provenance。
 
 ## 第一版边界
 
@@ -80,7 +81,7 @@ scrapefs scrape apply scrape-42 --revision 1
 - 电影、标准 `SxxEyy` 剧集和外挂字幕；
 - 只读源文件 Projection；
 - 可写 OverlayFile；
-- 版本化 JSON Scrape Plan；
+- 版本化 JSON Projection Batch；
 - 面向人工和外部 Agent Skill 的机器可读 CLI。
 
 第一版不包含内置模型 provider、daemon-side Agent session、torrent 管理、下载器集成、GUI、可写 Projection、完整 POSIX 文件系统、动态 Profile 插件或跨主机路径转换。
@@ -115,7 +116,7 @@ gofmt -w .
 - [第一版用例](docs/zh-CN/use-cases.md)
 - [系统架构](docs/zh-CN/architecture.md)
 - [Projection 模型](docs/zh-CN/projection.md)
-- [Scrape Plan 与外部 Agent 工作流](docs/zh-CN/scrape.md)
+- [Projection Batch 与外部 Agent 工作流](docs/zh-CN/scrape.md)
 - [文件系统与对象存储](docs/zh-CN/filesystem.md)
 - [运行与 CLI](docs/zh-CN/operations.md)
 - [第一版验收标准](docs/zh-CN/acceptance.md)

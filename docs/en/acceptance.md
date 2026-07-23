@@ -13,20 +13,19 @@
 - `projection rm` does not delete the source.
 - Removing a Projection cleans empty managed directories.
 
-## 2. Scrape
+## 2. Projection Batch
 
-- `scrape submit` accepts only a versioned UTF-8 JSON plan.
-- Unknown fields, invalid types, and empty entries are rejected.
+- A batch accepts only versioned UTF-8 JSON.
+- Unknown fields, invalid types, empty entries, duplicate sources, and duplicate targets are rejected.
 - Each entry explicitly contains an absolute source and Library-relative target.
-- The daemon does not enumerate directories, read source contents, run commands, or access the network on behalf of a plan.
-- Submit and revise safely open and snapshot every source.
-- Revise creates an immutable revision from a complete replacement plan.
-- Apply matches the revision the user just confirmed.
-- A changed revision invalidates the old confirmation request.
-- Apply revalidates every source identity, Profile, path, and conflict.
-- Apply leaves no partial Projection batch.
-- Failed apply leaves Scrape ready.
-- Applied Scrape cannot apply again.
+- The daemon does not enumerate directories, read source contents, run commands, or access the network on behalf of a batch.
+- Validate safely opens every source and returns the diff, warnings, digest, and namespace version.
+- Validate writes nothing to SQLite and creates no pending batch, snapshot, or revision.
+- The digest uses `sha256:<64 lowercase hex>`, is independent of JSON whitespace and object-field order, and preserves `entries` array order.
+- Apply requires the expected digest and revalidates every source, Profile, path, and conflict.
+- Apply creates provenance and every Projection in one transaction without partial results.
+- Failed apply leaves no batch provenance.
+- Successful apply returns a stable batch ID.
 - Undo runs in one transaction.
 - Undo does not remove OverlayFiles.
 
@@ -61,9 +60,9 @@
 
 - `scrapefsd` embeds no model provider, Agent session, or tool-calling loop.
 - An external Agent uses only the invoking user's existing host-filesystem, control CLI, and FUSE permissions.
-- The external Agent submits an explicit source-to-target plan using `scrapefs.scrape/v1`.
+- The external Agent submits an explicit source-to-target batch using `scrapefs.projection-batch/v1`.
 - Automation commands provide machine-readable JSON, and non-TTY mode does not prompt or apply automatically.
-- After the plan is applied, the external Agent creates OverlayFiles through ordinary FUSE operations.
+- After the batch is applied, the external Agent creates OverlayFiles through ordinary FUSE operations.
 - ScrapeFS does not change OverlayFile semantics based on whether a person, script, or Agent created the file.
 
 ## 6. Library
@@ -101,8 +100,8 @@ The skill should cover:
 - sample-file exclusion;
 - Plex and Jellyfin;
 - reading existing NFO files;
-- generating `scrapefs.scrape/v1`;
-- plan revise, diff, validate, apply, and undo;
+- generating `scrapefs.projection-batch/v1`;
+- batch validate, user confirmation, apply, show, and undo;
 - creating NFO files and artwork through FUSE after apply.
 
 The skill may reject or require manual handling for:
@@ -115,4 +114,4 @@ The skill may reject or require manual handling for:
 - music and image libraries;
 - remote network sources.
 
-These format capabilities belong to the skill and do not change the ScrapeFS plan schema. ScrapeFS requires only that a Projection source in the plan is a safely openable local regular file.
+These format capabilities belong to the skill and do not change the ScrapeFS batch schema. ScrapeFS requires only that a Projection source in the batch is a safely openable local regular file.

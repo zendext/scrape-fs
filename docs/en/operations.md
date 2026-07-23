@@ -9,7 +9,7 @@
 The first-version control plane uses two identity roles:
 
 1. **Administrator**: root or a configured administrator UID; manages Libraries and the daemon.
-2. **Control user**: a member of `scrapefs-control`; selects source paths, creates Projections, runs Scrapes, applies/undoes them, and uses status/doctor.
+2. **Control user**: a member of `scrapefs-control`; selects source paths, creates Projections, validates/applies/undoes Projection batches, and uses status/doctor.
 
 Recommended socket:
 
@@ -32,10 +32,9 @@ Ordinary removal of a non-empty Library returns `ENOTEMPTY`.
 
 Recursive removal is rejected while the Library has:
 
-- draft or ready Scrapes;
 - namespace-write transactions in progress.
 
-The administrator discards unapplied Scrapes and waits for in-flight writes before recursive removal.
+The administrator waits for in-flight batch apply, undo, or other namespace writes before recursive removal.
 
 Recursive removal uses one SQLite transaction to:
 
@@ -128,16 +127,11 @@ scrapefs projection mv
 scrapefs projection rm
 scrapefs projection rebind
 
-scrapefs scrape submit
-scrapefs scrape list
-scrapefs scrape show
-scrapefs scrape diff
-scrapefs scrape revise
-scrapefs scrape validate
-scrapefs scrape apply
-scrapefs scrape undo
-scrapefs scrape discard
-scrapefs scrape export
+scrapefs projection batch validate
+scrapefs projection batch apply
+scrapefs projection batch list
+scrapefs projection batch show
+scrapefs projection batch undo
 
 scrapefs gc
 ```
@@ -148,7 +142,7 @@ Daemon:
 scrapefsd
 ```
 
-Every automation-facing command supports machine-readable JSON output. `scrape submit` and `scrape revise` read UTF-8 JSON through `--file <path>` and read stdin through `--file -`. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically.
+Every automation-facing command supports machine-readable JSON output. `projection batch validate` and `projection batch apply` read UTF-8 JSON through `--file <path>` and read stdin through `--file -`. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically.
 
 ## 8. First-Version Configuration
 
