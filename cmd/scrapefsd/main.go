@@ -56,6 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 				ctx,
 				configuration.Control.SocketPath,
 				configuration.Control.SocketMode,
+				configuration.Control.AdministratorUID,
 				projectionbatch.NewService(namespace.NewRepository(database)),
 			)
 		},

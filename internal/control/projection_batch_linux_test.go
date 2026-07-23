@@ -48,11 +48,12 @@ func TestProjectionBatchClientServerRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
 	go func() {
-		serverDone <- Serve(
+		serverDone <- serveWithLimits(
 			ctx,
 			socketPath,
 			0o660,
 			projectionbatch.NewService(repository),
+			defaultServerLimits(),
 		)
 	}()
 	waitForSocket(t, socketPath)
@@ -140,11 +141,12 @@ func TestProjectionBatchClientReturnsMachineReadableRemoteError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
 	go func() {
-		serverDone <- Serve(
+		serverDone <- serveWithLimits(
 			ctx,
 			socketPath,
 			0o600,
 			projectionbatch.NewService(namespace.NewRepository(opened)),
+			defaultServerLimits(),
 		)
 	}()
 	waitForSocket(t, socketPath)

@@ -76,6 +76,12 @@ type serverLimits struct {
 	acceptRetryDelay time.Duration
 }
 
+type serverOptions struct {
+	limits           serverLimits
+	security         serverSecurity
+	readPeerIdentity peerIdentityReader
+}
+
 func NewClient(socketPath string) *Client {
 	return &Client{socketPath: socketPath}
 }
@@ -206,15 +212,32 @@ func Serve(
 	ctx context.Context,
 	socketPath string,
 	mode fs.FileMode,
+	administratorUID uint32,
 	service BatchService,
 ) error {
-	return serveWithLimits(ctx, socketPath, mode, service, serverLimits{
+	controlGroupID, err := resolveGroupID(ControlGroupName, systemGroupLookup)
+	if err != nil {
+		return err
+	}
+	return serveWithOptions(ctx, socketPath, mode, service, serverOptions{
+		limits: defaultServerLimits(),
+		security: serverSecurity{
+			daemonUID:        uint32(os.Geteuid()),
+			administratorUID: administratorUID,
+			controlGroupID:   controlGroupID,
+		},
+		readPeerIdentity: readPeerIdentity,
+	})
+}
+
+func defaultServerLimits() serverLimits {
+	return serverLimits{
 		maxConnections:   defaultMaxConnections,
 		maxRequestBytes:  defaultMaxRequestBytes,
 		readTimeout:      defaultReadTimeout,
 		writeTimeout:     defaultWriteTimeout,
 		acceptRetryDelay: defaultAcceptRetryDelay,
-	})
+	}
 }
 
 func serveWithLimits(
@@ -224,15 +247,38 @@ func serveWithLimits(
 	service BatchService,
 	limits serverLimits,
 ) error {
+	return serveWithOptions(ctx, socketPath, mode, service, serverOptions{
+		limits: limits,
+		security: serverSecurity{
+			daemonUID:        uint32(os.Geteuid()),
+			administratorUID: uint32(os.Geteuid()),
+			controlGroupID:   uint32(os.Getegid()),
+		},
+		readPeerIdentity: readPeerIdentity,
+	})
+}
+
+func serveWithOptions(
+	ctx context.Context,
+	socketPath string,
+	mode fs.FileMode,
+	service BatchService,
+	options serverOptions,
+) error {
 	if service == nil {
 		return fmt.Errorf("Projection Batch control service must not be nil")
 	}
-	if err := validateServerLimits(limits); err != nil {
+	if err := validateServerLimits(options.limits); err != nil {
 		return err
 	}
-	if err := prepareSocketPath(socketPath); err != nil {
+	if options.readPeerIdentity == nil {
+		return fmt.Errorf("control peer identity reader must not be nil")
+	}
+	prepared, err := prepareSocketPath(socketPath, options.security)
+	if err != nil {
 		return err
 	}
+	defer prepared.Close()
 
 	address := &net.UnixAddr{Name: socketPath, Net: "unix"}
 	listener, err := net.ListenUnix("unix", address)
@@ -241,8 +287,8 @@ func serveWithLimits(
 	}
 	listener.SetUnlinkOnClose(true)
 	defer listener.Close()
-	if err := os.Chmod(socketPath, mode.Perm()); err != nil {
-		return fmt.Errorf("set ScrapeFS control socket mode: %w", err)
+	if err := prepared.setMetadata(mode); err != nil {
+		return err
 	}
 
 	stopped := make(chan struct{})
@@ -257,7 +303,7 @@ func serveWithLimits(
 
 	var handlers sync.WaitGroup
 	defer handlers.Wait()
-	slots := make(chan struct{}, limits.maxConnections)
+	slots := make(chan struct{}, options.limits.maxConnections)
 	for {
 		select {
 		case slots <- struct{}{}:
@@ -271,7 +317,7 @@ func serveWithLimits(
 				return nil
 			}
 			if retryableAcceptError(err) {
-				timer := time.NewTimer(limits.acceptRetryDelay)
+				timer := time.NewTimer(options.limits.acceptRetryDelay)
 				select {
 				case <-ctx.Done():
 					timer.Stop()
@@ -288,7 +334,7 @@ func serveWithLimits(
 			defer func() {
 				<-slots
 			}()
-			handleConnection(ctx, connection, service, limits)
+			handleConnection(ctx, connection, service, options)
 		}()
 	}
 }
@@ -315,31 +361,11 @@ func retryableAcceptError(err error) bool {
 	return errors.As(err, &networkError) && networkError.Temporary()
 }
 
-func prepareSocketPath(socketPath string) error {
-	info, err := os.Lstat(socketPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect ScrapeFS control socket %q: %w", socketPath, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf(
-			"ScrapeFS control socket path %q exists and is not a socket",
-			socketPath,
-		)
-	}
-	if err := os.Remove(socketPath); err != nil {
-		return fmt.Errorf("remove stale ScrapeFS control socket %q: %w", socketPath, err)
-	}
-	return nil
-}
-
 func handleConnection(
 	ctx context.Context,
 	connection *net.UnixConn,
 	service BatchService,
-	limits serverLimits,
+	options serverOptions,
 ) {
 	defer connection.Close()
 	finished := make(chan struct{})
@@ -353,27 +379,27 @@ func handleConnection(
 	defer close(finished)
 	respond := func(result any, err error) {
 		if deadlineErr := connection.SetWriteDeadline(
-			time.Now().Add(limits.writeTimeout),
+			time.Now().Add(options.limits.writeTimeout),
 		); deadlineErr != nil {
 			return
 		}
 		writeResponse(connection, result, err)
 	}
 
-	credentials, err := peerCredentials(connection)
+	identity, err := options.readPeerIdentity(connection)
 	if err != nil {
 		respond(nil, err)
 		return
 	}
 
 	var request request
-	if err := connection.SetReadDeadline(time.Now().Add(limits.readTimeout)); err != nil {
+	if err := connection.SetReadDeadline(time.Now().Add(options.limits.readTimeout)); err != nil {
 		respond(nil, fmt.Errorf("set control request deadline: %w", err))
 		return
 	}
 	limited := &io.LimitedReader{
 		R: connection,
-		N: limits.maxRequestBytes + 1,
+		N: options.limits.maxRequestBytes + 1,
 	}
 	decoder := json.NewDecoder(limited)
 	decoder.DisallowUnknownFields()
@@ -381,7 +407,7 @@ func handleConnection(
 		if limited.N == 0 {
 			err = fmt.Errorf(
 				"control request exceeds %d bytes",
-				limits.maxRequestBytes,
+				options.limits.maxRequestBytes,
 			)
 		} else {
 			err = fmt.Errorf("decode control request: %w", err)
@@ -400,7 +426,7 @@ func handleConnection(
 	if limited.N == 0 {
 		respond(nil, fmt.Errorf(
 			"control request exceeds %d bytes",
-			limits.maxRequestBytes,
+			options.limits.maxRequestBytes,
 		))
 		return
 	}
@@ -415,12 +441,20 @@ func handleConnection(
 		)
 		return
 	}
+	if requiredCommandRole(request.Command) == commandRoleUnknown {
+		respond(nil, fmt.Errorf("unsupported control command %q", request.Command))
+		return
+	}
+	if err := options.security.authorize(request.Command, identity); err != nil {
+		respond(nil, err)
+		return
+	}
 
-	actorID := int64(credentials.Uid)
+	actorID := int64(identity.UID)
 	actor := namespace.Actor{Kind: namespace.ActorControl, ID: &actorID}
 	caller := projectionbatch.Caller{
-		UID: credentials.Uid,
-		GID: credentials.Gid,
+		UID: identity.UID,
+		GID: identity.GID,
 	}
 	var result any
 	switch request.Command {
@@ -449,28 +483,6 @@ func handleConnection(
 	respond(result, err)
 }
 
-func peerCredentials(connection *net.UnixConn) (*unix.Ucred, error) {
-	raw, err := connection.SyscallConn()
-	if err != nil {
-		return nil, fmt.Errorf("access control connection descriptor: %w", err)
-	}
-	var credentials *unix.Ucred
-	var credentialErr error
-	if err := raw.Control(func(fd uintptr) {
-		credentials, credentialErr = unix.GetsockoptUcred(
-			int(fd),
-			unix.SOL_SOCKET,
-			unix.SO_PEERCRED,
-		)
-	}); err != nil {
-		return nil, fmt.Errorf("inspect control peer credentials: %w", err)
-	}
-	if credentialErr != nil {
-		return nil, fmt.Errorf("read control peer credentials: %w", credentialErr)
-	}
-	return credentials, nil
-}
-
 func writeResponse(connection io.Writer, result any, err error) {
 	response := response{Schema: responseSchema}
 	if err != nil {
@@ -494,6 +506,8 @@ func writeResponse(connection io.Writer, result any, err error) {
 
 func classifyError(err error) string {
 	switch {
+	case errors.Is(err, ErrPermissionDenied):
+		return "PermissionDenied"
 	case errors.Is(err, projectionbatch.ErrInvalidBatch):
 		return "InvalidBatch"
 	case errors.Is(err, projectionbatch.ErrDigestMismatch):
