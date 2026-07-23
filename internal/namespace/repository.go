@@ -40,6 +40,92 @@ func (repository *Repository) GlobalRoot(ctx context.Context) (Node, error) {
 	return node, nil
 }
 
+func (repository *Repository) Node(ctx context.Context, id int64) (Node, error) {
+	if id <= 0 {
+		return Node{}, ErrNotFound
+	}
+
+	var node Node
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var err error
+		node, err = queryNode(ctx, connection, "id = ?", id)
+		return err
+	})
+	if err != nil {
+		return Node{}, err
+	}
+	return node, nil
+}
+
+func (repository *Repository) Child(
+	ctx context.Context,
+	parentID int64,
+	name string,
+) (Node, error) {
+	if parentID <= 0 {
+		return Node{}, ErrNotFound
+	}
+	if err := validateName(name); err != nil {
+		return Node{}, err
+	}
+
+	var node Node
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var err error
+		node, err = queryNode(
+			ctx,
+			connection,
+			"parent_id = ? AND name = ?",
+			parentID,
+			name,
+		)
+		return err
+	})
+	if err != nil {
+		return Node{}, err
+	}
+	return node, nil
+}
+
+func (repository *Repository) Children(
+	ctx context.Context,
+	parentID int64,
+) ([]Node, error) {
+	if parentID <= 0 {
+		return nil, ErrNotFound
+	}
+
+	var children []Node
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		cursorName := ""
+		var cursorID int64
+		for {
+			child, err := queryNode(ctx, connection, `
+				parent_id = ?
+				AND (
+					name > ?
+					OR (name = ? AND id > ?)
+				)
+				ORDER BY name, id
+				LIMIT 1
+			`, parentID, cursorName, cursorName, cursorID)
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("list child nodes: %w", err)
+			}
+			children = append(children, child)
+			cursorName = child.Name
+			cursorID = child.ID
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return children, nil
+}
+
 func (repository *Repository) NamespaceVersion(ctx context.Context) (int64, error) {
 	var version int64
 	if err := repository.useConnection(ctx, func(connection *database.Connection) error {

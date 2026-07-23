@@ -12,6 +12,8 @@ import (
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/control"
 	"github.com/zendext/scrape-fs/internal/database"
+	"github.com/zendext/scrape-fs/internal/namespace"
+	"github.com/zendext/scrape-fs/internal/objectstore"
 )
 
 func TestRunHelp(t *testing.T) {
@@ -304,19 +306,19 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 	defer opened.Close()
 
 	stop := errors.New("stop control server")
-	serveControl := func(
+	unmountErr := errors.New("unmount failed")
+	var events []string
+	mount := func(
 		_ context.Context,
-		_ string,
-		_ os.FileMode,
-		_ uint32,
-		service control.BatchService,
-		libraryService control.LibraryService,
-	) error {
-		if service == nil {
-			t.Fatal("control service is nil")
+		_ config.FUSE,
+		repository *namespace.Repository,
+		store *objectstore.Store,
+	) (mountedFilesystem, error) {
+		if repository == nil {
+			t.Fatal("namespace repository is nil")
 		}
-		if libraryService == nil {
-			t.Fatal("Library control service is nil")
+		if store == nil {
+			t.Fatal("object store is nil")
 		}
 		for _, path := range []string{
 			configuration.Storage.OverlayStorePath,
@@ -331,16 +333,42 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 				t.Errorf("%s mode = %v, want directory 0700", path, info.Mode())
 			}
 		}
+		events = append(events, "mount")
+		return recordingMount{unmount: func() error {
+			events = append(events, "unmount")
+			return unmountErr
+		}}, nil
+	}
+	serveControl := func(
+		_ context.Context,
+		_ string,
+		_ os.FileMode,
+		_ uint32,
+		service control.BatchService,
+		libraryService control.LibraryService,
+	) error {
+		if service == nil {
+			t.Fatal("control service is nil")
+		}
+		if libraryService == nil {
+			t.Fatal("Library control service is nil")
+		}
+		events = append(events, "control")
 		return stop
 	}
 
-	if err := serveRuntime(
+	err = serveRuntime(
 		context.Background(),
 		configuration,
 		opened,
+		mount,
 		serveControl,
-	); !errors.Is(err, stop) {
-		t.Fatalf("serveRuntime error = %v, want control stop", err)
+	)
+	if !errors.Is(err, stop) || !errors.Is(err, unmountErr) {
+		t.Fatalf("serveRuntime error = %v, want control and unmount errors", err)
+	}
+	if got := strings.Join(events, ","); got != "mount,control,unmount" {
+		t.Fatalf("runtime events = %q, want mount,control,unmount", got)
 	}
 }
 
@@ -367,7 +395,8 @@ func TestServeRuntimeRejectsUnsafeObjectStoreBeforeControl(t *testing.T) {
 	}
 	defer opened.Close()
 
-	called := false
+	mountCalled := false
+	controlCalled := false
 	err = serveRuntime(
 		context.Background(),
 		config.Config{
@@ -376,22 +405,42 @@ func TestServeRuntimeRejectsUnsafeObjectStoreBeforeControl(t *testing.T) {
 		opened,
 		func(
 			context.Context,
+			config.FUSE,
+			*namespace.Repository,
+			*objectstore.Store,
+		) (mountedFilesystem, error) {
+			mountCalled = true
+			return recordingMount{}, nil
+		},
+		func(
+			context.Context,
 			string,
 			os.FileMode,
 			uint32,
 			control.BatchService,
 			control.LibraryService,
 		) error {
-			called = true
+			controlCalled = true
 			return nil
 		},
 	)
 	if err == nil || !strings.Contains(err.Error(), "object store") {
 		t.Fatalf("serveRuntime error = %v, want object-store error", err)
 	}
-	if called {
-		t.Fatal("control server started after object-store initialization failure")
+	if mountCalled || controlCalled {
+		t.Fatal("FUSE or control started after object-store initialization failure")
 	}
+}
+
+type recordingMount struct {
+	unmount func() error
+}
+
+func (mounted recordingMount) Unmount() error {
+	if mounted.unmount == nil {
+		return nil
+	}
+	return mounted.unmount()
 }
 
 func TestRunServesControlUntilContextCancellationAndClosesDatabase(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/control"
 	"github.com/zendext/scrape-fs/internal/database"
+	fusefs "github.com/zendext/scrape-fs/internal/fuse"
 	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/objectstore"
@@ -50,7 +51,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 			configuration config.Config,
 			opened databaseCloser,
 		) error {
-			return serveRuntime(ctx, configuration, opened, control.Serve)
+			return serveRuntime(
+				ctx,
+				configuration,
+				opened,
+				mountFilesystem,
+				control.Serve,
+			)
 		},
 	)
 }
@@ -61,6 +68,15 @@ type databaseCloser interface {
 }
 type databaseOpener func(string) (databaseCloser, error)
 type daemonServer func(context.Context, config.Config, databaseCloser) error
+type mountedFilesystem interface {
+	Unmount() error
+}
+type filesystemMounter func(
+	context.Context,
+	config.FUSE,
+	*namespace.Repository,
+	*objectstore.Store,
+) (mountedFilesystem, error)
 type controlServer func(
 	context.Context,
 	string,
@@ -74,6 +90,7 @@ func serveRuntime(
 	ctx context.Context,
 	configuration config.Config,
 	opened databaseCloser,
+	mount filesystemMounter,
 	serveControl controlServer,
 ) (err error) {
 	database, ok := opened.(*database.DB)
@@ -89,7 +106,11 @@ func serveRuntime(
 	}()
 
 	repository := namespace.NewRepository(database)
-	return serveControl(
+	mounted, err := mount(ctx, configuration.FUSE, repository, store)
+	if err != nil {
+		return err
+	}
+	serveErr := serveControl(
 		ctx,
 		configuration.Control.SocketPath,
 		configuration.Control.SocketMode,
@@ -97,6 +118,16 @@ func serveRuntime(
 		projectionbatch.NewService(repository),
 		library.NewService(repository),
 	)
+	return errors.Join(serveErr, mounted.Unmount())
+}
+
+func mountFilesystem(
+	ctx context.Context,
+	configuration config.FUSE,
+	repository *namespace.Repository,
+	store *objectstore.Store,
+) (mountedFilesystem, error) {
+	return fusefs.Mount(ctx, configuration, repository, store)
 }
 
 func runWithLoader(args []string, stdout, stderr io.Writer, load configLoader) int {
@@ -181,7 +212,7 @@ func runWithServerDependencies(
 	if serveErr != nil {
 		fmt.Fprintf(
 			stderr,
-			"scrapefsd: serve control requests: %v\n",
+			"scrapefsd: serve daemon: %v\n",
 			errors.Join(serveErr, closeErr),
 		)
 		return 1

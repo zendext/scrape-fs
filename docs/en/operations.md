@@ -91,6 +91,11 @@ This lock establishes exclusive ownership of the full ScrapeFS runtime on the ho
 
 Unknown FUSE filesystems are never unmounted.
 
+The daemon mounts through the retained mountpoint directory descriptor rather
+than resolving the configured path again. This descriptor-anchored direct
+`mount(2)` requires root or `CAP_SYS_ADMIN`; startup does not fall back to an
+unanchored `fusermount` path.
+
 ## 5. Normal Shutdown
 
 1. Stop accepting new control requests and namespace-write transactions.

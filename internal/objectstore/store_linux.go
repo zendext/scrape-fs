@@ -227,6 +227,25 @@ func (store *Store) OpenObject(
 	return handle, nil
 }
 
+func (store *Store) StatObject(
+	ctx context.Context,
+	objectID int64,
+) (_ unix.Stat_t, err error) {
+	file, err := store.OpenObject(ctx, objectID, unix.O_RDONLY)
+	if err != nil {
+		return unix.Stat_t{}, err
+	}
+	defer func() {
+		err = errors.Join(err, file.Close())
+	}()
+
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return unix.Stat_t{}, fmt.Errorf("stat live object %d: %w", objectID, err)
+	}
+	return stat, nil
+}
+
 func (store *Store) DeleteObject(objectID int64) error {
 	store.coordinator.Lock()
 	defer store.coordinator.Unlock()

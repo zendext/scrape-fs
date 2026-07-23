@@ -479,8 +479,44 @@ func TestOpenObjectReturnsEIOForMissingLiveObjectWithoutReplacement(t *testing.T
 	if !errors.Is(err, unix.EIO) {
 		t.Fatalf("OpenObject error = %v, want EIO", err)
 	}
+	if _, err := fixture.store.StatObject(
+		context.Background(),
+		objectID,
+	); !errors.Is(err, unix.EIO) {
+		t.Fatalf("StatObject error = %v, want EIO", err)
+	}
 	if _, err := os.Stat(livePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("live object stat error = %v, want not exist", err)
+	}
+}
+
+func TestStatObjectReturnsLiveFileMetadata(t *testing.T) {
+	fixture := newFixture(t)
+	content := []byte("poster contents")
+	handle, _, err := fixture.store.Create(
+		context.Background(),
+		overlayOperation("library/poster.jpg"),
+		overlayRequest(fixture.libraryRootID, "poster.jpg"),
+		bytes.NewReader(content),
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer handle.Close()
+
+	var want unix.Stat_t
+	if err := unix.Fstat(int(handle.Fd()), &want); err != nil {
+		t.Fatalf("Fstat created handle: %v", err)
+	}
+	got, err := fixture.store.StatObject(context.Background(), handle.ObjectID)
+	if err != nil {
+		t.Fatalf("StatObject: %v", err)
+	}
+	if got.Size != int64(len(content)) ||
+		got.Atim != want.Atim ||
+		got.Mtim != want.Mtim ||
+		got.Ctim != want.Ctim {
+		t.Errorf("StatObject = %#v, want metadata %#v", got, want)
 	}
 }
 
