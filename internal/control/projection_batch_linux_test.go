@@ -127,6 +127,260 @@ func TestProjectionBatchClientServerRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLibraryClientServerRoundTripUsesPeerOwnershipAndDefaultModes(t *testing.T) {
+	root := controlSocketTempDir(t)
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer opened.Close()
+	repository := namespace.NewRepository(opened)
+
+	socketPath := filepath.Join(root, "control.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
+	go func() {
+		serverDone <- serveWithOptions(
+			ctx,
+			socketPath,
+			0o660,
+			projectionbatch.NewService(repository),
+			serverOptions{
+				limits: defaultServerLimits(),
+				security: serverSecurity{
+					daemonUID:        uint32(os.Geteuid()),
+					administratorUID: uint32(os.Geteuid()),
+					controlGroupID:   uint32(os.Getegid()),
+				},
+				readPeerIdentity: readPeerIdentity,
+				ready:            ready,
+				libraryService:   library.NewService(repository),
+			},
+		)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-serverDone; err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	})
+	waitForServerReady(t, ready)
+
+	client := NewClient(socketPath)
+	created, err := client.CreateLibrary(
+		context.Background(),
+		"media",
+		library.ProfileIdentifier{Name: "jellyfin", Version: 1},
+	)
+	if err != nil {
+		t.Fatalf("CreateLibrary: %v", err)
+	}
+	if created.Schema != LibraryResultSchema ||
+		created.Library.Name != "media" ||
+		created.Library.ProfileName != "jellyfin" ||
+		created.Library.ProfileVersion != 1 ||
+		created.Library.UID != uint32(os.Geteuid()) ||
+		created.Library.GID != uint32(os.Getegid()) ||
+		created.Library.RootMode != library.DefaultModes.Root ||
+		created.Library.DirectoryMode != library.DefaultModes.Directory ||
+		created.Library.ProjectionMode != library.DefaultModes.Projection ||
+		created.Library.OverlayMode != library.DefaultModes.Overlay {
+		t.Errorf("CreateLibrary result = %#v", created)
+	}
+
+	listed, err := client.ListLibraries(context.Background())
+	if err != nil {
+		t.Fatalf("ListLibraries: %v", err)
+	}
+	if listed.Schema != LibraryListSchema ||
+		len(listed.Libraries) != 1 ||
+		listed.Libraries[0] != created.Library {
+		t.Errorf("ListLibraries result = %#v, created = %#v", listed, created)
+	}
+}
+
+func TestLibraryClientReturnsStableDomainErrors(t *testing.T) {
+	root := controlSocketTempDir(t)
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer opened.Close()
+	repository := namespace.NewRepository(opened)
+
+	socketPath := filepath.Join(root, "control.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
+	go func() {
+		serverDone <- serveWithOptions(
+			ctx,
+			socketPath,
+			0o660,
+			projectionbatch.NewService(repository),
+			serverOptions{
+				limits: defaultServerLimits(),
+				security: serverSecurity{
+					daemonUID:        uint32(os.Geteuid()),
+					administratorUID: uint32(os.Geteuid()),
+					controlGroupID:   uint32(os.Getegid()),
+				},
+				readPeerIdentity: readPeerIdentity,
+				ready:            ready,
+				libraryService:   library.NewService(repository),
+			},
+		)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-serverDone; err != nil {
+			t.Errorf("Serve: %v", err)
+		}
+	})
+	waitForServerReady(t, ready)
+
+	client := NewClient(socketPath)
+	if _, err := client.CreateLibrary(
+		context.Background(),
+		"media",
+		library.ProfileIdentifier{Name: "jellyfin", Version: 1},
+	); err != nil {
+		t.Fatalf("first CreateLibrary: %v", err)
+	}
+	tests := []struct {
+		name    string
+		library string
+		profile library.ProfileIdentifier
+		code    string
+	}{
+		{
+			name:    "duplicate",
+			library: "media",
+			profile: library.ProfileIdentifier{Name: "jellyfin", Version: 1},
+			code:    "LibraryExists",
+		},
+		{
+			name:    "missing profile",
+			library: "other",
+			profile: library.ProfileIdentifier{Name: "jellyfin", Version: 2},
+			code:    "ProfileNotFound",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := client.CreateLibrary(
+				context.Background(),
+				test.library,
+				test.profile,
+			)
+			var remote *RemoteError
+			if !errors.As(err, &remote) {
+				t.Fatalf("CreateLibrary error = %v, want RemoteError", err)
+			}
+			if remote.Code != test.code {
+				t.Errorf("RemoteError code = %q, want %q", remote.Code, test.code)
+			}
+		})
+	}
+}
+
+func TestLibraryListPersistsAcrossControlServerRestart(t *testing.T) {
+	root := controlSocketTempDir(t)
+	databasePath := filepath.Join(root, "state", "scrapefs.db")
+	databaseOptions := database.Options{
+		LockPath: filepath.Join(root, "run", "scrapefsd.lock"),
+	}
+	socketPath := filepath.Join(root, "control.sock")
+
+	startServer := func(t *testing.T, opened *database.DB) (context.CancelFunc, <-chan error) {
+		t.Helper()
+		repository := namespace.NewRepository(opened)
+		ctx, cancel := context.WithCancel(context.Background())
+		serverDone := make(chan error, 1)
+		ready := make(chan struct{})
+		go func() {
+			serverDone <- serveWithOptions(
+				ctx,
+				socketPath,
+				0o660,
+				projectionbatch.NewService(repository),
+				serverOptions{
+					limits: defaultServerLimits(),
+					security: serverSecurity{
+						daemonUID:        uint32(os.Geteuid()),
+						administratorUID: uint32(os.Geteuid()),
+						controlGroupID:   uint32(os.Getegid()),
+					},
+					readPeerIdentity: readPeerIdentity,
+					ready:            ready,
+					libraryService:   library.NewService(repository),
+				},
+			)
+		}()
+		waitForServerReady(t, ready)
+		return cancel, serverDone
+	}
+	stopServer := func(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+		t.Helper()
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("Serve: %v", err)
+		}
+	}
+
+	first, err := database.OpenWithOptions(
+		context.Background(),
+		databasePath,
+		databaseOptions,
+	)
+	if err != nil {
+		t.Fatalf("first OpenWithOptions: %v", err)
+	}
+	cancel, done := startServer(t, first)
+	if _, err := NewClient(socketPath).CreateLibrary(
+		context.Background(),
+		"persisted",
+		library.ProfileIdentifier{Name: "plex", Version: 1},
+	); err != nil {
+		t.Fatalf("CreateLibrary: %v", err)
+	}
+	stopServer(t, cancel, done)
+	if err := first.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+
+	second, err := database.OpenWithOptions(
+		context.Background(),
+		databasePath,
+		databaseOptions,
+	)
+	if err != nil {
+		t.Fatalf("second OpenWithOptions: %v", err)
+	}
+	defer second.Close()
+	cancel, done = startServer(t, second)
+	defer stopServer(t, cancel, done)
+
+	listed, err := NewClient(socketPath).ListLibraries(context.Background())
+	if err != nil {
+		t.Fatalf("ListLibraries after restart: %v", err)
+	}
+	if len(listed.Libraries) != 1 ||
+		listed.Libraries[0].Name != "persisted" ||
+		listed.Libraries[0].ProfileName != "plex" {
+		t.Errorf("ListLibraries after restart = %#v", listed)
+	}
+}
+
 func TestProjectionBatchClientReturnsMachineReadableRemoteError(t *testing.T) {
 	root := controlSocketTempDir(t)
 	opened, err := database.OpenWithOptions(

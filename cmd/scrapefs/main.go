@@ -7,21 +7,36 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/alecthomas/kong"
 	"github.com/zendext/scrape-fs/internal/buildinfo"
 	"github.com/zendext/scrape-fs/internal/control"
+	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/projection"
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
 )
 
 type cli struct {
+	Library    libraryCLI       `cmd:"" help:"Manage Libraries."`
 	Projection projectionCLI    `cmd:"" help:"Manage Projections."`
 	Socket     string           `help:"Path to the ScrapeFS control socket." default:"${default_socket}"`
 	Version    kong.VersionFlag `help:"Print version and exit."`
 }
+
+type libraryCLI struct {
+	Add  libraryAddCLI  `cmd:"" help:"Create a Library."`
+	List libraryListCLI `cmd:"" help:"List Libraries."`
+}
+
+type libraryAddCLI struct {
+	Name    string `arg:"" name:"name" help:"Library name."`
+	Profile string `help:"Built-in Profile identifier in name@version form." required:""`
+}
+
+type libraryListCLI struct{}
 
 type projectionCLI struct {
 	Batch projectionBatchCLI `cmd:"" help:"Validate, apply, inspect, and undo Projection Batches."`
@@ -55,7 +70,13 @@ type projectionBatchUndoCLI struct {
 	BatchID string `arg:"" name:"batch-id" help:"Stable Projection Batch ID."`
 }
 
-type batchService interface {
+type controlService interface {
+	CreateLibrary(
+		context.Context,
+		string,
+		library.ProfileIdentifier,
+	) (control.LibraryResult, error)
+	ListLibraries(context.Context) (control.LibraryListResult, error)
 	Validate(context.Context, []byte) (projectionbatch.ValidationResult, error)
 	Apply(context.Context, projectionbatch.ApplyRequest) (projectionbatch.ApplyResult, error)
 	List(context.Context) (projectionbatch.ListResult, error)
@@ -92,7 +113,7 @@ func runWithBatchService(
 	stdin io.Reader,
 	stdout io.Writer,
 	stderr io.Writer,
-	service batchService,
+	service controlService,
 	caller projectionbatch.Caller,
 ) int {
 	commandLine := cli{}
@@ -144,6 +165,24 @@ func runWithBatchService(
 	actor := namespace.Actor{Kind: namespace.ActorControl, ID: &actorID}
 	var result any
 	switch {
+	case strings.HasPrefix(command, "library add"):
+		profile, err := parseProfileIdentifier(commandLine.Library.Add.Profile)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+		result, err = service.CreateLibrary(
+			ctx,
+			commandLine.Library.Add.Name,
+			profile,
+		)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case strings.HasPrefix(command, "library list"):
+		result, err = service.ListLibraries(ctx)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
 	case strings.HasPrefix(command, "projection batch validate"):
 		data, err := readBatch(commandLine.Projection.Batch.Validate.File, stdin)
 		if err != nil {
@@ -201,6 +240,24 @@ func runWithBatchService(
 	return 0
 }
 
+func parseProfileIdentifier(value string) (library.ProfileIdentifier, error) {
+	if strings.Count(value, "@") != 1 {
+		return library.ProfileIdentifier{}, fmt.Errorf(
+			"%w: Profile must use name@version form",
+			namespace.ErrInvalidLibrary,
+		)
+	}
+	name, versionText, _ := strings.Cut(value, "@")
+	version, err := strconv.ParseInt(versionText, 10, 64)
+	if name == "" || err != nil || version <= 0 {
+		return library.ProfileIdentifier{}, fmt.Errorf(
+			"%w: Profile must use name@version form with a positive version",
+			namespace.ErrInvalidLibrary,
+		)
+	}
+	return library.ProfileIdentifier{Name: name, Version: version}, nil
+}
+
 func readBatch(path string, stdin io.Reader) ([]byte, error) {
 	if path == "-" {
 		data, err := io.ReadAll(stdin)
@@ -250,6 +307,10 @@ func errorCode(err error) string {
 		return "LibraryNotFound"
 	case errors.Is(err, namespace.ErrProfileNotFound):
 		return "ProfileNotFound"
+	case errors.Is(err, library.ErrAlreadyExists):
+		return "LibraryExists"
+	case errors.Is(err, namespace.ErrInvalidLibrary):
+		return "InvalidLibrary"
 	case errors.Is(err, namespace.ErrInvalidPath):
 		return "InvalidPath"
 	case errors.Is(err, projection.ErrUnsafeSource):

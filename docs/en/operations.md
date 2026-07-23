@@ -9,7 +9,7 @@
 The first-version control plane uses two identity roles:
 
 1. **Administrator**: root or a configured administrator UID; manages Libraries and the daemon.
-2. **Control user**: a member of `scrapefs-control`; selects source paths, creates Projections, validates/applies/undoes Projection batches, and uses status/doctor.
+2. **Control user**: a member of `scrapefs-control`; lists Libraries, selects source paths, creates Projections, validates/applies/undoes Projection batches, and uses status/doctor.
 
 Recommended socket:
 
@@ -22,7 +22,7 @@ mode: 0660
 
 The daemon resolves the fixed `scrapefs-control` group when the control server starts. A missing group or invalid numeric GID prevents the socket from being created.
 
-The daemon obtains the caller's effective UID/GID through `SO_PEERCRED` and supplementary groups through `SO_PEERGROUPS`. Client-supplied identity is ignored. Root and `control.administrator_uid` may use administrator and control-user commands. Other callers must have the `scrapefs-control` GID as an effective or supplementary group for Projection, Projection Batch, status, and doctor commands. Unauthorized requests return the stable `PermissionDenied` error before the business service is invoked.
+The daemon obtains the caller's effective UID/GID through `SO_PEERCRED` and supplementary groups through `SO_PEERGROUPS`. Client-supplied identity is ignored. Root and `control.administrator_uid` may use administrator and control-user commands. Other callers must have the `scrapefs-control` GID as an effective or supplementary group for Library listing, Projection, Projection Batch, status, and doctor commands. Library creation and other Library mutations require an administrator. Unauthorized requests return the stable `PermissionDenied` error before the business service is invoked.
 
 The socket is owned by the daemon effective UID and the `scrapefs-control` GID. `control.socket_mode` must grant read and write permission to both owner and group; the default remains `0660`. When ordinary mode bits do not already provide access, a configured non-root administrator that is not the daemon UID receives a named user ACL with read/write permission on the socket, and the daemon-owned parent receives named traverse ACL entries for that administrator and `scrapefs-control`. A parent initially using `0700` therefore does not block authorized callers. Existing unrelated parent ACL entries and their effective permissions are retained. Because a matching named-user ACL takes precedence over every group entry, startup fails when any unrelated named-user entry lacks the permission required by the control role; the daemon does not broaden or remove that entry. The configured administrator's own entry may be repaired to its documented access. A filesystem that cannot persist a required POSIX access ACL fails startup rather than silently making an authorized role unreachable.
 
@@ -121,7 +121,7 @@ Player users are not members of `scrapefs`. After mount, `allow_other` exposes t
 scrapefs status
 scrapefs doctor
 
-scrapefs library add
+scrapefs library add <name> --profile <name>@<version>
 scrapefs library list
 scrapefs library rename
 scrapefs library set-profile
@@ -148,7 +148,9 @@ Daemon:
 scrapefsd
 ```
 
-Every implemented Projection Batch command writes machine-readable JSON. `projection batch validate` and `projection batch apply` read UTF-8 JSON through `--file <path>` and read stdin through `--file -`. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically. The CLI connects to `/run/scrapefs/scrapefs.sock` by default and accepts global `--socket <path>` for a configured override.
+Every implemented Library and Projection Batch command writes machine-readable JSON. `library add` creates an ACTIVE Library with the invoking administrator's peer UID/GID and the fixed v1 modes `0775` for the LibraryRoot and directories, `0444` for Projections, and `0664` for OverlayFiles. Only the built-in `jellyfin@1` and `plex@1` Profiles are accepted. `library list` returns ACTIVE Libraries in deterministic name order and is available to administrators and control users.
+
+`projection batch validate` and `projection batch apply` read UTF-8 JSON through `--file <path>` and read stdin through `--file -`. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically. The CLI connects to `/run/scrapefs/scrapefs.sock` by default and accepts global `--socket <path>` for a configured override.
 
 ## 8. First-Version Configuration
 

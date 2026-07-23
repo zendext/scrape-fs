@@ -2,12 +2,15 @@ package library
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 
 	"github.com/zendext/scrape-fs/internal/namespace"
 )
 
 var ErrProfileNotFound = namespace.ErrProfileNotFound
+var ErrAlreadyExists = errors.New("library already exists")
 
 type ProfileIdentifier struct {
 	Name    string
@@ -79,6 +82,9 @@ func (service *Service) Create(
 		return err
 	})
 	if err != nil {
+		if errors.Is(err, namespace.ErrConflict) {
+			return namespace.Library{}, fmt.Errorf("%w: %w", ErrAlreadyExists, err)
+		}
 		return namespace.Library{}, err
 	}
 	return created, nil

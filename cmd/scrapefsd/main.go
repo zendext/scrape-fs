@@ -14,6 +14,7 @@ import (
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/control"
 	"github.com/zendext/scrape-fs/internal/database"
+	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
 )
@@ -52,12 +53,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 			if !ok {
 				return fmt.Errorf("unsupported database implementation %T", opened)
 			}
+			repository := namespace.NewRepository(database)
 			return control.Serve(
 				ctx,
 				configuration.Control.SocketPath,
 				configuration.Control.SocketMode,
 				configuration.Control.AdministratorUID,
-				projectionbatch.NewService(namespace.NewRepository(database)),
+				projectionbatch.NewService(repository),
+				library.NewService(repository),
 			)
 		},
 	)
