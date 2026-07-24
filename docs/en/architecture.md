@@ -160,6 +160,8 @@ overlay_file_mode    = 0664
 
 LibraryRoot is managed only through the control API. FUSE requests to create entries under GlobalRoot, or to rename, unlink, remove, chmod, or chown a LibraryRoot, return `EPERM`.
 
+Renaming an ACTIVE Library updates the Library record and LibraryRoot name in one transaction, preserves their stable IDs, writes one operation-log entry, and increments namespace version once. Validation or uniqueness failures roll back both names and the audit record.
+
 When a Library changes Profile:
 
 - existing Projection paths remain unchanged;

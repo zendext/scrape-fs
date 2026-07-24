@@ -563,7 +563,7 @@ func (repository *Repository) update(
 		return 0, rollback(err)
 	}
 
-	if !namespaceTransaction.changed {
+	if !namespaceTransaction.changed && !namespaceTransaction.audited {
 		var version int64
 		if err := transaction.QueryRowContext(
 			ctx,
@@ -578,13 +578,20 @@ func (repository *Repository) update(
 	}
 
 	var version int64
-	if err := transaction.QueryRowContext(ctx, `
-		UPDATE namespace_state
-		SET version = version + 1
-		WHERE singleton = 1
-		RETURNING version
-	`).Scan(&version); err != nil {
-		return 0, rollback(fmt.Errorf("increment namespace version: %w", err))
+	if namespaceTransaction.changed {
+		if err := transaction.QueryRowContext(ctx, `
+			UPDATE namespace_state
+			SET version = version + 1
+			WHERE singleton = 1
+			RETURNING version
+		`).Scan(&version); err != nil {
+			return 0, rollback(fmt.Errorf("increment namespace version: %w", err))
+		}
+	} else if err := transaction.QueryRowContext(
+		ctx,
+		"SELECT version FROM namespace_state WHERE singleton = 1",
+	).Scan(&version); err != nil {
+		return 0, rollback(fmt.Errorf("read namespace version: %w", err))
 	}
 
 	scrapeID := operation.ScrapeID
@@ -630,6 +637,7 @@ type Transaction struct {
 	transaction       *database.Transaction
 	now               func() time.Time
 	changed           bool
+	audited           bool
 	operationScrapeID *int64
 }
 
@@ -639,6 +647,35 @@ func (transaction *Transaction) GlobalRoot(ctx context.Context) (Node, error) {
 
 func (transaction *Transaction) NamespaceVersion(ctx context.Context) (int64, error) {
 	return namespaceVersion(ctx, transaction.transaction)
+}
+
+func (transaction *Transaction) ValidatePreparedLibrary(
+	ctx context.Context,
+	prepared Library,
+) error {
+	if prepared.ID <= 0 {
+		return fmt.Errorf("%w: invalid prepared Library", ErrInvalidLibrary)
+	}
+	current, err := queryLibrary(
+		ctx,
+		transaction.transaction,
+		"libraries.id = ? AND libraries.status = 'ACTIVE'",
+		prepared.ID,
+	)
+	if errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("%w: %q", ErrLibraryNotFound, prepared.Name)
+	}
+	if err != nil {
+		return fmt.Errorf("revalidate prepared Library %q: %w", prepared.Name, err)
+	}
+	if current != prepared {
+		return fmt.Errorf(
+			"%w: Library %q changed after preparation",
+			ErrConflict,
+			prepared.Name,
+		)
+	}
+	return nil
 }
 
 func (transaction *Transaction) Lookup(
@@ -754,6 +791,160 @@ func (transaction *Transaction) CreateLibrary(
 		return Library{}, fmt.Errorf("read created Library: %w", err)
 	}
 	return library, nil
+}
+
+func (transaction *Transaction) RenameLibrary(
+	ctx context.Context,
+	name string,
+	newName string,
+) (Library, error) {
+	if err := validateName(name); err != nil {
+		return Library{}, fmt.Errorf("%w: invalid name: %v", ErrInvalidLibrary, err)
+	}
+	if err := validateName(newName); err != nil {
+		return Library{}, fmt.Errorf("%w: invalid new name: %v", ErrInvalidLibrary, err)
+	}
+
+	library, err := queryLibrary(
+		ctx,
+		transaction.transaction,
+		"libraries.status = 'ACTIVE' AND libraries.name = ?",
+		name,
+	)
+	if errors.Is(err, ErrNotFound) {
+		return Library{}, fmt.Errorf("%w: %q", ErrLibraryNotFound, name)
+	}
+	if err != nil {
+		return Library{}, fmt.Errorf("read Library %q for rename: %w", name, err)
+	}
+	if name == newName {
+		return library, nil
+	}
+
+	now := transaction.now().UTC().UnixNano()
+	result, err := transaction.transaction.ExecContext(ctx, `
+		UPDATE nodes
+		SET name = ?, virtual_ctime_ns = ?, updated_at = ?
+		WHERE id = ?
+		  AND parent_id = 1
+		  AND kind = 'LIBRARY_ROOT'
+	`, newName, now, now, library.RootNodeID)
+	if err != nil {
+		return Library{}, classifyLibraryMutationError("rename LibraryRoot", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return Library{}, fmt.Errorf("read renamed LibraryRoot count: %w", err)
+	}
+	if updated != 1 {
+		return Library{}, fmt.Errorf(
+			"%w: Library %d root disappeared during rename",
+			ErrInvalidLibrary,
+			library.ID,
+		)
+	}
+
+	result, err = transaction.transaction.ExecContext(ctx, `
+		UPDATE libraries
+		SET name = ?, updated_at = ?
+		WHERE id = ?
+		  AND status = 'ACTIVE'
+		  AND root_node_id = ?
+	`, newName, now, library.ID, library.RootNodeID)
+	if err != nil {
+		return Library{}, classifyLibraryMutationError("rename Library", err)
+	}
+	updated, err = result.RowsAffected()
+	if err != nil {
+		return Library{}, fmt.Errorf("read renamed Library count: %w", err)
+	}
+	if updated != 1 {
+		return Library{}, fmt.Errorf(
+			"%w: Library %d disappeared during rename",
+			ErrInvalidLibrary,
+			library.ID,
+		)
+	}
+	if err := transaction.touchDirectory(ctx, 1, now); err != nil {
+		return Library{}, err
+	}
+
+	renamed, err := queryLibrary(
+		ctx,
+		transaction.transaction,
+		"libraries.id = ?",
+		library.ID,
+	)
+	if err != nil {
+		return Library{}, fmt.Errorf("read renamed Library: %w", err)
+	}
+	transaction.changed = true
+	return renamed, nil
+}
+
+func (transaction *Transaction) SetLibraryProfile(
+	ctx context.Context,
+	name string,
+	profileName string,
+	profileVersion int64,
+) (Library, error) {
+	if err := validateName(name); err != nil {
+		return Library{}, fmt.Errorf("%w: invalid name: %v", ErrInvalidLibrary, err)
+	}
+	if err := validateProfile(profileName, profileVersion); err != nil {
+		return Library{}, err
+	}
+
+	library, err := queryLibrary(
+		ctx,
+		transaction.transaction,
+		"libraries.status = 'ACTIVE' AND libraries.name = ?",
+		name,
+	)
+	if errors.Is(err, ErrNotFound) {
+		return Library{}, fmt.Errorf("%w: %q", ErrLibraryNotFound, name)
+	}
+	if err != nil {
+		return Library{}, fmt.Errorf("read Library %q for Profile change: %w", name, err)
+	}
+	if library.ProfileName == profileName && library.ProfileVersion == profileVersion {
+		return library, nil
+	}
+
+	now := transaction.now().UTC().UnixNano()
+	result, err := transaction.transaction.ExecContext(ctx, `
+		UPDATE libraries
+		SET profile_name = ?, profile_version = ?, updated_at = ?
+		WHERE id = ?
+		  AND status = 'ACTIVE'
+		  AND root_node_id = ?
+	`, profileName, profileVersion, now, library.ID, library.RootNodeID)
+	if err != nil {
+		return Library{}, classifyLibraryMutationError("change Library Profile", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return Library{}, fmt.Errorf("read changed Library Profile count: %w", err)
+	}
+	if updated != 1 {
+		return Library{}, fmt.Errorf(
+			"%w: Library %d disappeared during Profile change",
+			ErrInvalidLibrary,
+			library.ID,
+		)
+	}
+
+	changed, err := queryLibrary(
+		ctx,
+		transaction.transaction,
+		"libraries.id = ?",
+		library.ID,
+	)
+	if err != nil {
+		return Library{}, fmt.Errorf("read changed Library Profile: %w", err)
+	}
+	transaction.audited = true
+	return changed, nil
 }
 
 func (transaction *Transaction) CreateNode(
@@ -1562,11 +1753,8 @@ func validateCreateLibrary(request CreateLibrary) error {
 	if err := validateName(request.Name); err != nil {
 		return fmt.Errorf("%w: invalid name: %v", ErrInvalidLibrary, err)
 	}
-	if strings.TrimSpace(request.ProfileName) == "" {
-		return fmt.Errorf("%w: Profile name must not be empty", ErrInvalidLibrary)
-	}
-	if request.ProfileVersion <= 0 {
-		return fmt.Errorf("%w: Profile version must be positive", ErrInvalidLibrary)
+	if err := validateProfile(request.ProfileName, request.ProfileVersion); err != nil {
+		return err
 	}
 	if !request.Creator.valid() {
 		return fmt.Errorf("%w: invalid creator", ErrInvalidLibrary)
@@ -1596,18 +1784,28 @@ func validateCreateLibrary(request CreateLibrary) error {
 			ErrInvalidLibrary,
 		)
 	}
+	return nil
+}
+
+func validateProfile(name string, version int64) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("%w: Profile name must not be empty", ErrInvalidLibrary)
+	}
+	if version <= 0 {
+		return fmt.Errorf("%w: Profile version must be positive", ErrInvalidLibrary)
+	}
 	switch {
-	case request.ProfileName == "jellyfin" && request.ProfileVersion == 1,
-		request.ProfileName == "plex" && request.ProfileVersion == 1:
+	case name == "jellyfin" && version == 1,
+		name == "plex" && version == 1:
+		return nil
 	default:
 		return fmt.Errorf(
 			"%w: %s@%d",
 			ErrProfileNotFound,
-			request.ProfileName,
-			request.ProfileVersion,
+			name,
+			version,
 		)
 	}
-	return nil
 }
 
 func classifyMutationError(action string, err error) error {

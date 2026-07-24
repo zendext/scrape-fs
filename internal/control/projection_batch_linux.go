@@ -62,6 +62,7 @@ type request struct {
 	ExpectedDigest string `json:"expected_digest,omitempty"`
 	BatchID        string `json:"batch_id,omitempty"`
 	LibraryName    string `json:"library_name,omitempty"`
+	NewLibraryName string `json:"new_library_name,omitempty"`
 	ProfileName    string `json:"profile_name,omitempty"`
 	ProfileVersion int64  `json:"profile_version,omitempty"`
 	SourcePath     string `json:"source_path,omitempty"`
@@ -513,6 +514,37 @@ func handleConnection(
 		libraries, err = options.libraryService.List(ctx)
 		if err == nil {
 			result = libraryListResult(libraries)
+		}
+	case "library.rename":
+		if options.libraryService == nil {
+			err = fmt.Errorf("Library control service is unavailable")
+			break
+		}
+		var renamed namespace.Library
+		renamed, err = options.libraryService.Rename(ctx, library.RenameRequest{
+			Name:    request.LibraryName,
+			NewName: request.NewLibraryName,
+			Actor:   actor,
+		})
+		if err == nil {
+			result = libraryResult(renamed)
+		}
+	case "library.set-profile":
+		if options.libraryService == nil {
+			err = fmt.Errorf("Library control service is unavailable")
+			break
+		}
+		var updated namespace.Library
+		updated, err = options.libraryService.SetProfile(ctx, library.SetProfileRequest{
+			Name: request.LibraryName,
+			Profile: library.ProfileIdentifier{
+				Name:    request.ProfileName,
+				Version: request.ProfileVersion,
+			},
+			Actor: actor,
+		})
+		if err == nil {
+			result = libraryResult(updated)
 		}
 	case "projection.create":
 		if options.projectionService == nil {

@@ -326,7 +326,7 @@ func TestRunHelpListsLibraryCommands(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
 	}
-	for _, command := range []string{"add", "list"} {
+	for _, command := range []string{"add", "list", "rename", "set-profile"} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help output %q does not contain %q", stdout.String(), command)
 		}
@@ -413,6 +413,95 @@ func TestRunLibraryListWritesDeterministicResult(t *testing.T) {
 	}
 }
 
+func TestRunLibraryRenamePassesNamesAndWritesJSON(t *testing.T) {
+	service := &fakeBatchService{
+		libraryRenamed: control.LibraryResult{
+			Schema: control.LibraryResultSchema,
+			Library: control.LibrarySnapshot{
+				ID:         42,
+				Name:       "movies",
+				Status:     namespace.LibraryActive,
+				RootNodeID: 7,
+			},
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithBatchService(
+		[]string{"library", "rename", "media", "movies"},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+		service,
+		projectionbatch.Caller{UID: 1000, GID: 1001},
+	)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if service.libraryName != "media" || service.libraryNewName != "movies" {
+		t.Errorf(
+			"RenameLibrary arguments = name %q new name %q",
+			service.libraryName,
+			service.libraryNewName,
+		)
+	}
+	var result control.LibraryResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("Unmarshal stdout: %v", err)
+	}
+	if !reflect.DeepEqual(result, service.libraryRenamed) {
+		t.Errorf("stdout result = %#v, want %#v", result, service.libraryRenamed)
+	}
+}
+
+func TestRunLibrarySetProfilePassesProfileAndWritesJSON(t *testing.T) {
+	service := &fakeBatchService{
+		libraryProfileSet: control.LibraryResult{
+			Schema: control.LibraryResultSchema,
+			Library: control.LibrarySnapshot{
+				ID:             42,
+				Name:           "media",
+				Status:         namespace.LibraryActive,
+				RootNodeID:     7,
+				ProfileName:    "plex",
+				ProfileVersion: 1,
+			},
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithBatchService(
+		[]string{"library", "set-profile", "media", "--profile", "plex@1"},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+		service,
+		projectionbatch.Caller{UID: 1000, GID: 1001},
+	)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if service.libraryName != "media" ||
+		service.libraryProfile != (library.ProfileIdentifier{Name: "plex", Version: 1}) {
+		t.Errorf(
+			"SetLibraryProfile arguments = name %q profile %#v",
+			service.libraryName,
+			service.libraryProfile,
+		)
+	}
+	var result control.LibraryResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("Unmarshal stdout: %v", err)
+	}
+	if !reflect.DeepEqual(result, service.libraryProfileSet) {
+		t.Errorf("stdout result = %#v, want %#v", result, service.libraryProfileSet)
+	}
+}
+
 func TestRunLibraryAddRejectsInvalidProfileWithoutCallingService(t *testing.T) {
 	service := &fakeBatchService{}
 	var stdout bytes.Buffer
@@ -453,10 +542,15 @@ type fakeBatchService struct {
 	applyRequest            projectionbatch.ApplyRequest
 	undoRequest             projectionbatch.UndoRequest
 	libraryCreated          control.LibraryResult
+	libraryRenamed          control.LibraryResult
+	libraryProfileSet       control.LibraryResult
 	librariesListed         control.LibraryListResult
 	libraryName             string
+	libraryNewName          string
 	libraryProfile          library.ProfileIdentifier
 	libraryCreateCalls      int
+	libraryRenameCalls      int
+	libraryProfileCalls     int
 	projectionCreated       control.ProjectionResult
 	projectionsListed       control.ProjectionListResult
 	projectionCreateRequest projection.CreateRequest
@@ -478,6 +572,28 @@ func (service *fakeBatchService) ListLibraries(
 	context.Context,
 ) (control.LibraryListResult, error) {
 	return service.librariesListed, service.err
+}
+
+func (service *fakeBatchService) RenameLibrary(
+	_ context.Context,
+	name string,
+	newName string,
+) (control.LibraryResult, error) {
+	service.libraryRenameCalls++
+	service.libraryName = name
+	service.libraryNewName = newName
+	return service.libraryRenamed, service.err
+}
+
+func (service *fakeBatchService) SetLibraryProfile(
+	_ context.Context,
+	name string,
+	profile library.ProfileIdentifier,
+) (control.LibraryResult, error) {
+	service.libraryProfileCalls++
+	service.libraryName = name
+	service.libraryProfile = profile
+	return service.libraryProfileSet, service.err
 }
 
 func (service *fakeBatchService) CreateProjection(

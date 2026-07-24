@@ -182,7 +182,15 @@ func (service *Service) Apply(
 	if err != nil {
 		return ApplyResult{}, err
 	}
+	return service.applyPrepared(ctx, request, parsed, candidates)
+}
 
+func (service *Service) applyPrepared(
+	ctx context.Context,
+	request ApplyRequest,
+	parsed Parsed,
+	candidates []projection.Candidate,
+) (ApplyResult, error) {
 	paths := make([]string, len(candidates))
 	kinds := make([]namespace.NodeKind, len(candidates))
 	for index, candidate := range candidates {
@@ -199,6 +207,12 @@ func (service *Service) Apply(
 			NodeKinds: kinds,
 		},
 	}, func(transaction *namespace.Transaction) error {
+		if err := transaction.ValidatePreparedLibrary(
+			ctx,
+			candidates[0].Library,
+		); err != nil {
+			return err
+		}
 		for index, entry := range parsed.Document.Entries {
 			if err := transaction.CheckTargetAvailable(
 				ctx,

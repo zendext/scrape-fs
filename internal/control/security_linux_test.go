@@ -261,6 +261,75 @@ func TestServeRejectsControlUserLibraryCreationBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestServeRejectsControlUserLibraryLifecycleMutationsBeforeDispatch(t *testing.T) {
+	libraryService := &countingLibraryService{}
+	socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")
+	controlGroupID := uint32(os.Getegid())
+	ctx, cancel := context.WithCancel(context.Background())
+	serverDone := make(chan error, 1)
+	ready := make(chan struct{})
+	go func() {
+		serverDone <- serveWithOptions(
+			ctx,
+			socketPath,
+			0o660,
+			staticBatchService{},
+			serverOptions{
+				limits: defaultServerLimits(),
+				security: serverSecurity{
+					daemonUID:        uint32(os.Geteuid()),
+					administratorUID: 42,
+					controlGroupID:   controlGroupID,
+				},
+				readPeerIdentity: func(*net.UnixConn) (peerIdentity, error) {
+					return peerIdentity{
+						UID: differentUint32(42),
+						GID: controlGroupID,
+					}, nil
+				},
+				ready:          ready,
+				libraryService: libraryService,
+			},
+		)
+	}()
+	defer func() {
+		cancel()
+		if err := <-serverDone; err != nil {
+			t.Errorf("serveWithOptions: %v", err)
+		}
+	}()
+	waitForServerReady(t, ready)
+
+	client := NewClient(socketPath)
+	calls := []func() error{
+		func() error {
+			_, err := client.RenameLibrary(context.Background(), "media", "movies")
+			return err
+		},
+		func() error {
+			_, err := client.SetLibraryProfile(
+				context.Background(),
+				"media",
+				library.ProfileIdentifier{Name: "plex", Version: 1},
+			)
+			return err
+		},
+	}
+	for _, call := range calls {
+		err := call()
+		var remote *RemoteError
+		if !errors.As(err, &remote) {
+			t.Fatalf("Library lifecycle error = %v, want RemoteError", err)
+		}
+		if remote.Code != "PermissionDenied" {
+			t.Errorf("RemoteError code = %q, want PermissionDenied", remote.Code)
+		}
+	}
+	if libraryService.Calls() != 0 {
+		t.Errorf("Library service calls = %d, want 0", libraryService.Calls())
+	}
+}
+
 func TestServeAllowsControlGroupRequest(t *testing.T) {
 	service := &countingBatchService{}
 	socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")
@@ -1065,6 +1134,26 @@ func (service *countingLibraryService) List(
 	defer service.mu.Unlock()
 	service.calls++
 	return []namespace.Library{}, nil
+}
+
+func (service *countingLibraryService) Rename(
+	context.Context,
+	library.RenameRequest,
+) (namespace.Library, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.calls++
+	return namespace.Library{}, nil
+}
+
+func (service *countingLibraryService) SetProfile(
+	context.Context,
+	library.SetProfileRequest,
+) (namespace.Library, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.calls++
+	return namespace.Library{}, nil
 }
 
 func (service *countingBatchService) Calls() int {

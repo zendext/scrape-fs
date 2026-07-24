@@ -193,14 +193,41 @@ func TestLibraryClientServerRoundTripUsesPeerOwnershipAndDefaultModes(t *testing
 		t.Errorf("CreateLibrary result = %#v", created)
 	}
 
+	renamed, err := client.RenameLibrary(context.Background(), "media", "movies")
+	if err != nil {
+		t.Fatalf("RenameLibrary: %v", err)
+	}
+	if renamed.Schema != LibraryResultSchema ||
+		renamed.Library.ID != created.Library.ID ||
+		renamed.Library.RootNodeID != created.Library.RootNodeID ||
+		renamed.Library.Name != "movies" {
+		t.Errorf("RenameLibrary result = %#v, created = %#v", renamed, created)
+	}
+
+	profileChanged, err := client.SetLibraryProfile(
+		context.Background(),
+		"movies",
+		library.ProfileIdentifier{Name: "plex", Version: 1},
+	)
+	if err != nil {
+		t.Fatalf("SetLibraryProfile: %v", err)
+	}
+	if profileChanged.Schema != LibraryResultSchema ||
+		profileChanged.Library.ID != created.Library.ID ||
+		profileChanged.Library.RootNodeID != created.Library.RootNodeID ||
+		profileChanged.Library.ProfileName != "plex" ||
+		profileChanged.Library.ProfileVersion != 1 {
+		t.Errorf("SetLibraryProfile result = %#v", profileChanged)
+	}
+
 	listed, err := client.ListLibraries(context.Background())
 	if err != nil {
 		t.Fatalf("ListLibraries: %v", err)
 	}
 	if listed.Schema != LibraryListSchema ||
 		len(listed.Libraries) != 1 ||
-		listed.Libraries[0] != created.Library {
-		t.Errorf("ListLibraries result = %#v, created = %#v", listed, created)
+		listed.Libraries[0] != profileChanged.Library {
+		t.Errorf("ListLibraries result = %#v, changed = %#v", listed, profileChanged)
 	}
 }
 
@@ -256,35 +283,65 @@ func TestLibraryClientReturnsStableDomainErrors(t *testing.T) {
 	); err != nil {
 		t.Fatalf("first CreateLibrary: %v", err)
 	}
+	if _, err := client.CreateLibrary(
+		context.Background(),
+		"other",
+		library.ProfileIdentifier{Name: "plex", Version: 1},
+	); err != nil {
+		t.Fatalf("second CreateLibrary: %v", err)
+	}
 	tests := []struct {
-		name    string
-		library string
-		profile library.ProfileIdentifier
-		code    string
+		name string
+		call func() error
+		code string
 	}{
 		{
-			name:    "duplicate",
-			library: "media",
-			profile: library.ProfileIdentifier{Name: "jellyfin", Version: 1},
-			code:    "LibraryExists",
+			name: "duplicate create",
+			call: func() error {
+				_, err := client.CreateLibrary(
+					context.Background(),
+					"media",
+					library.ProfileIdentifier{Name: "jellyfin", Version: 1},
+				)
+				return err
+			},
+			code: "LibraryExists",
 		},
 		{
-			name:    "missing profile",
-			library: "other",
-			profile: library.ProfileIdentifier{Name: "jellyfin", Version: 2},
-			code:    "ProfileNotFound",
+			name: "missing profile",
+			call: func() error {
+				_, err := client.SetLibraryProfile(
+					context.Background(),
+					"media",
+					library.ProfileIdentifier{Name: "jellyfin", Version: 2},
+				)
+				return err
+			},
+			code: "ProfileNotFound",
+		},
+		{
+			name: "rename conflict",
+			call: func() error {
+				_, err := client.RenameLibrary(context.Background(), "media", "other")
+				return err
+			},
+			code: "LibraryExists",
+		},
+		{
+			name: "missing Library",
+			call: func() error {
+				_, err := client.RenameLibrary(context.Background(), "missing", "renamed")
+				return err
+			},
+			code: "LibraryNotFound",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := client.CreateLibrary(
-				context.Background(),
-				test.library,
-				test.profile,
-			)
+			err := test.call()
 			var remote *RemoteError
 			if !errors.As(err, &remote) {
-				t.Fatalf("CreateLibrary error = %v, want RemoteError", err)
+				t.Fatalf("Library mutation error = %v, want RemoteError", err)
 			}
 			if remote.Code != test.code {
 				t.Errorf("RemoteError code = %q, want %q", remote.Code, test.code)
@@ -353,6 +410,20 @@ func TestLibraryListPersistsAcrossControlServerRestart(t *testing.T) {
 	); err != nil {
 		t.Fatalf("CreateLibrary: %v", err)
 	}
+	if _, err := NewClient(socketPath).RenameLibrary(
+		context.Background(),
+		"persisted",
+		"renamed",
+	); err != nil {
+		t.Fatalf("RenameLibrary: %v", err)
+	}
+	if _, err := NewClient(socketPath).SetLibraryProfile(
+		context.Background(),
+		"renamed",
+		library.ProfileIdentifier{Name: "jellyfin", Version: 1},
+	); err != nil {
+		t.Fatalf("SetLibraryProfile: %v", err)
+	}
 	stopServer(t, cancel, done)
 	if err := first.Close(); err != nil {
 		t.Fatalf("first Close: %v", err)
@@ -375,8 +446,8 @@ func TestLibraryListPersistsAcrossControlServerRestart(t *testing.T) {
 		t.Fatalf("ListLibraries after restart: %v", err)
 	}
 	if len(listed.Libraries) != 1 ||
-		listed.Libraries[0].Name != "persisted" ||
-		listed.Libraries[0].ProfileName != "plex" {
+		listed.Libraries[0].Name != "renamed" ||
+		listed.Libraries[0].ProfileName != "jellyfin" {
 		t.Errorf("ListLibraries after restart = %#v", listed)
 	}
 }

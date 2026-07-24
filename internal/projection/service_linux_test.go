@@ -153,6 +153,47 @@ func TestServiceCreateProjectionConflictLeavesNamespaceAndSourceUnchanged(t *tes
 	assertSourceUnchanged(t, secondSource, secondContent, before)
 }
 
+func TestServiceCreateRejectsPreparedCandidateAfterLibraryRename(t *testing.T) {
+	opened := openTestDatabase(t)
+	repository := namespace.NewRepository(opened)
+	libraryRecord := createTestLibrary(t, repository)
+	service := NewService(repository)
+	ctx := context.Background()
+	sourcePath := regularSource(t)
+	request := CreateRequest{
+		SourcePath: sourcePath,
+		Target:     "media:/Movies/Dune.mkv",
+		Actor:      namespace.Actor{Kind: namespace.ActorSystem},
+	}
+	candidate, err := service.Prepare(ctx, request)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if _, err := library.NewService(repository).Rename(ctx, library.RenameRequest{
+		Name:    "media",
+		NewName: "movies",
+		Actor:   namespace.Actor{Kind: namespace.ActorSystem},
+	}); err != nil {
+		t.Fatalf("Rename Library: %v", err)
+	}
+
+	if _, err := service.createPrepared(ctx, request, candidate); !errors.Is(
+		err,
+		namespace.ErrConflict,
+	) {
+		t.Fatalf("createPrepared error = %v, want ErrConflict", err)
+	}
+	if _, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Movies/Dune.mkv",
+	); !errors.Is(err, namespace.ErrNotFound) {
+		t.Fatalf("Lookup stale Projection error = %v, want ErrNotFound", err)
+	}
+	assertNamespaceState(t, opened, 2, 2)
+	assertPlaceholderScrapesEmpty(t, opened)
+}
+
 func TestServiceCreateProjectionRollsBackAfterNamespaceMutationFailure(t *testing.T) {
 	opened := openTestDatabase(t)
 	repository := namespace.NewRepository(opened)

@@ -187,6 +187,49 @@ func TestServiceApplyRevalidatesConflictsAfterValidate(t *testing.T) {
 	assertBatchDatabaseState(t, opened, 5, 0, 0, 2, 2)
 }
 
+func TestServiceApplyRejectsPreparedCandidatesAfterProfileChange(t *testing.T) {
+	opened := openBatchTestDatabase(t)
+	repository := namespace.NewRepository(opened)
+	createBatchTestLibrary(t, repository)
+	source, _ := createBatchSources(t)
+	if _, err := library.NewService(repository).SetProfile(
+		context.Background(),
+		library.SetProfileRequest{
+			Name:    "media",
+			Profile: library.ProfileIdentifier{Name: "plex", Version: 1},
+			Actor:   namespace.Actor{Kind: namespace.ActorSystem},
+		},
+	); err != nil {
+		t.Fatalf("SetProfile to plex: %v", err)
+	}
+	data := singleEntryBatchJSON(t, source, "Movies/Dune?.mkv")
+	parsed := mustParse(t, data)
+	service := NewService(repository)
+	ctx := context.Background()
+	_, candidates, _, err := service.prepareParsed(ctx, parsed)
+	if err != nil {
+		t.Fatalf("prepareParsed: %v", err)
+	}
+	if _, err := library.NewService(repository).SetProfile(ctx, library.SetProfileRequest{
+		Name:    "media",
+		Profile: library.ProfileIdentifier{Name: "jellyfin", Version: 1},
+		Actor:   namespace.Actor{Kind: namespace.ActorSystem},
+	}); err != nil {
+		t.Fatalf("SetProfile to jellyfin: %v", err)
+	}
+
+	_, err = service.applyPrepared(ctx, ApplyRequest{
+		Data:           data,
+		ExpectedDigest: parsed.Digest,
+		Actor:          namespace.Actor{Kind: namespace.ActorSystem},
+		Caller:         Caller{UID: 1, GID: 2},
+	}, parsed, candidates)
+	if !errors.Is(err, namespace.ErrConflict) {
+		t.Fatalf("applyPrepared error = %v, want ErrConflict", err)
+	}
+	assertBatchDatabaseState(t, opened, 2, 0, 0, 1, 3)
+}
+
 func TestServiceApplyDoesNotTreatDigestAsIdempotencyKey(t *testing.T) {
 	opened := openBatchTestDatabase(t)
 	repository := namespace.NewRepository(opened)
