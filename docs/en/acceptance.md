@@ -102,9 +102,10 @@
 - Administrators and control users can run status/doctor; other callers are rejected before business checks.
 - The CLI calls only the control socket and does not read SQLite or the object store directly.
 
-## 9. First-Version Agent Skill Scope
+## 9. First-Version Agent Skill
 
-The skill should cover:
+The repository provides the installable and executable
+`organize-scrapefs-media` Skill, covering:
 
 - single-file movies;
 - one movie per directory;
@@ -118,7 +119,18 @@ The skill should cover:
 - batch validate, user confirmation, apply, show, and undo;
 - creating NFO files and artwork through FUSE after apply.
 
-The skill may reject or require manual handling for:
+In addition:
+
+- plan and validate never apply or prompt in TTY or non-TTY use;
+- apply first performs fresh validation and requires the user to explicitly
+  return the exact validation digest;
+- representative Plex and Jellyfin fixtures pass the real Projection Batch
+  parser and validation service;
+- a clean-copy installation runs without hidden repository dependencies;
+- the Skill stores no daemon-side session, pending plan, provider credential,
+  or privileged read capability.
+
+The Skill rejects or requires manual handling for:
 
 - BDMV and DVD;
 - anime absolute episode numbering;

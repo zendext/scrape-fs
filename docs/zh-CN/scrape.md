@@ -63,11 +63,11 @@ scrapefs projection batch validate --file -
   "entries": [
     {
       "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.2021.REMUX.mkv",
-      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).mkv"
+      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021) [tmdbid-438631].mkv"
     },
     {
       "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.zh.ass",
-      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).zh.ass"
+      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021) [tmdbid-438631].zh.ass"
     }
   ]
 }
@@ -258,17 +258,147 @@ cp poster.jpg \
 - batch undo 不自动删除 OverlayFile；
 - ScrapeFS 不区分文件由人工、脚本或 Agent 创建。
 
-## 10. Agent Skill 契约
+## 10. Agent Skill 包
 
-外部 Agent Skill 应当说明：
+仓库包含可安装的 [`organize-scrapefs-media`](../../skills/organize-scrapefs-media/SKILL.md)
+Skill。它使用标准库 Python 工具执行确定性的源文件枚举、sample 排除、
+`ffprobe` 探测、NFO 读取、Plex/Jellyfin 命名、Batch 生成、CLI 编排和
+FUSE artifact 写入。
 
-- 支持的媒体、字幕和本地 metadata 格式；
-- 源目录枚举和 sample 忽略规则；
-- `ffprobe` 和 metadata 查询方式；
-- Plex/Jellyfin Profile 命名规则；
-- `scrapefs.projection-batch/v1` 生成规则；
-- validate、用户确认、apply、show 和 undo 工作流；
-- apply 后通过 FUSE 创建 OverlayFile 的方式；
-- source 变化、路径冲突和部分 artifact 失败的恢复方式。
+Skill 不是 daemon plugin。它不包含模型 provider、Agent session、共享
+credential、daemon-side pending state 或提权读取能力。metadata provider
+及模型选择仍属于调用 Agent；确定性工具只接受 Agent 已解析的本地 metadata
+JSON。
 
-Skill 不是 daemon 插件。Skill 更新不能改变 ScrapeFS 的权限模型、Batch Schema 或路径安全规则。
+### 10.1 安装与前置条件
+
+第一版要求：
+
+- Linux；
+- Python 3.9 或更高版本；
+- `ffprobe`；
+- `scrapefs`；
+- 已 ready 的 `scrapefsd`；
+- 一个 ACTIVE `jellyfin@1` 或 `plex@1` Library；
+- 调用用户对 source、control socket 和 FUSE mount 的普通权限。
+
+从仓库根目录安装到 Codex Skill 目录：
+
+```bash
+destination="${CODEX_HOME:-$HOME/.codex}/skills/organize-scrapefs-media"
+test ! -e "$destination"
+mkdir -p "$(dirname "$destination")"
+cp -R skills/organize-scrapefs-media "$destination"
+python3 "$destination/scripts/scrapefs_media.py" --help
+SKILL_DIR="$destination"
+```
+
+安装不会修改 daemon 配置，也不安装 model/provider credential。不得使用
+`sudo` 或另一个身份绕过调用用户的 source 权限。
+
+### 10.2 支持范围
+
+Skill 支持：
+
+- 单文件电影；
+- 一个目录中的一部非 sample 电影；
+- 每个文件恰好包含一个标准 `SxxEyy` 的剧集；
+- 同一季中的多个独立剧集文件；
+- 与媒体 basename 对应的常规外挂字幕；
+- `movie.nfo`、`tvshow.nfo` 和 episode basename NFO；
+- `poster`、`folder`、`cover` 或 `movie` artwork 候选；
+- Plex 和 Jellyfin 的确定性 movie/show/season/episode 命名。
+
+包含完整 `sample` token 或位于 `sample`/`samples` 目录中的文件被忽略。
+所有选中的视频都由调用用户直接执行 `ffprobe`，且必须至少包含一个 video
+stream。源 NFO 和 artwork 不进入 Batch；它们在 apply 后通过 FUSE 创建为
+OverlayFile。没有 NFO 时，Skill 可以根据已解析 metadata 生成最小 NFO。
+
+BDMV/DVD、动画绝对集数、多集单文件、edition 自动判断、复杂 extras、
+music/image-only、remote URL、symlink、非 regular source 和有歧义的多视频
+布局必须返回显式 `manual` 结果，不得静默忽略非 sample 视频。
+
+### 10.3 Plan 与 Metadata 边界
+
+先通过 `library list` 读取实际 Profile，再生成本地 Batch 和 artifact manifest：
+
+```bash
+scrapefs library list
+
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" plan \
+  --source /srv/downloads/Dune.2021 \
+  --library media \
+  --profile jellyfin \
+  --batch /tmp/dune.batch.json \
+  --artifacts /tmp/dune.artifacts.json
+```
+
+`plan` 不连接 control socket，不 apply，也不查询网络 provider。现有 NFO
+优先于 filename inference；Agent 显式提供的 metadata JSON 优先于 NFO：
+
+```json
+{
+  "kind": "movie",
+  "title": "Dune: Part One",
+  "year": 2021,
+  "provider_ids": {
+    "tmdb": "438631"
+  }
+}
+```
+
+`status: manual` 时必须停止并展示全部 code、message 和 path。解决歧义后，
+使用 `--metadata <file>` 重新生成，不得修改或放宽 Batch Schema。
+
+### 10.4 Validate、Digest 确认与 Apply
+
+```bash
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" validate \
+  --batch /tmp/dune.batch.json
+```
+
+Agent 必须向用户展示完整 validation JSON，包括 entries、warnings、
+namespace version 和 digest，然后停止并要求用户原样返回完整
+`sha256:<64 位小写十六进制>` digest。`yes`、`looks good`、Agent 自己复制到
+消息中的 digest 或推测出的意图都不是确认。
+
+`plan` 和 `validate` 在 TTY 与非 TTY 下都不会 apply，也不会提示输入。Skill
+不提供 plan/validate/apply 合并命令。只有用户显式返回精确 digest 后才可执行：
+
+```bash
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" apply \
+  --batch /tmp/dune.batch.json \
+  --confirm-digest sha256:<用户确认的精确值>
+```
+
+`apply` 先重新 validate，逐字节比较 fresh digest 和 `--confirm-digest`，匹配后
+才调用 `projection batch apply --expected-digest`。digest 变化、source 变化、
+target conflict、权限或其他 validate/apply 错误必须停止流程，展示新结果并重新
+请求确认；不得自动重试或自动 apply。
+
+### 10.5 Artifact、Show 与 Undo
+
+Batch digest 只确认 Projection Batch，不绑定 artifact manifest。apply 成功且
+artifact 列表已展示后，通过挂载点创建 OverlayFile：
+
+```bash
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" artifacts \
+  --manifest /tmp/dune.artifacts.json \
+  --mountpoint /mnt/scrapefs
+```
+
+工具使用调用用户权限在目标目录创建临时 OverlayFile、执行 fsync，并通过
+no-replace rename 发布。已存在文件不会被覆盖。每个 artifact 独立报告；
+NFO 或 artwork 部分失败不会回滚已成功的 Batch 或其他 artifact，修复原因后
+只重试失败项。
+
+```bash
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" show batch-42
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" undo batch-42
+```
+
+undo 只删除仍存在的 batch-owned Projection。NFO、artwork 和其他 OverlayFile
+继续保留，必须根据 undo 结果由用户通过普通 FUSE 操作处理。
+
+Issue #39 负责共享 status、doctor 和 runtime diagnostics；本 Skill 不复制或
+替代这些命令。
