@@ -729,6 +729,13 @@ func (transaction *Transaction) GlobalRoot(ctx context.Context) (Node, error) {
 	return globalRoot(ctx, transaction.transaction)
 }
 
+func (transaction *Transaction) Node(ctx context.Context, id int64) (Node, error) {
+	if id <= 0 {
+		return Node{}, ErrNotFound
+	}
+	return queryNode(ctx, transaction.transaction, "id = ?", id)
+}
+
 func (transaction *Transaction) NamespaceVersion(ctx context.Context) (int64, error) {
 	return namespaceVersion(ctx, transaction.transaction)
 }
@@ -1234,6 +1241,256 @@ func (transaction *Transaction) RemoveOverlay(
 		return Node{}, ErrReadOnly
 	}
 	return transaction.removeNode(ctx, node)
+}
+
+func (transaction *Transaction) MoveProjection(
+	ctx context.Context,
+	request MoveProjectionNode,
+) (Node, error) {
+	if request.OldParentID <= 0 ||
+		request.NewParentID <= 0 ||
+		request.ExpectedID <= 0 {
+		return Node{}, fmt.Errorf("%w: invalid Projection identity", ErrInvalidOperation)
+	}
+	if err := validateName(request.OldName); err != nil {
+		return Node{}, fmt.Errorf("%w: invalid old name: %v", ErrInvalidOperation, err)
+	}
+	if err := validateName(request.NewName); err != nil {
+		return Node{}, fmt.Errorf("%w: invalid new name: %v", ErrInvalidOperation, err)
+	}
+
+	oldParent, err := queryNode(ctx, transaction.transaction, "id = ?", request.OldParentID)
+	if err != nil {
+		return Node{}, err
+	}
+	newParent, err := queryNode(ctx, transaction.transaction, "id = ?", request.NewParentID)
+	if err != nil {
+		return Node{}, err
+	}
+	if oldParent.Kind == GlobalRoot || newParent.Kind == GlobalRoot {
+		return Node{}, ErrProtected
+	}
+	if !directoryKind(oldParent.Kind) || !directoryKind(newParent.Kind) {
+		return Node{}, ErrNotDirectory
+	}
+	oldRootID, err := libraryRootID(ctx, transaction.transaction, oldParent.ID)
+	if err != nil {
+		return Node{}, err
+	}
+	newRootID, err := libraryRootID(ctx, transaction.transaction, newParent.ID)
+	if err != nil {
+		return Node{}, err
+	}
+	if oldRootID != newRootID {
+		return Node{}, ErrCrossLibrary
+	}
+
+	source, err := queryNode(
+		ctx,
+		transaction.transaction,
+		"parent_id = ? AND name = ?",
+		request.OldParentID,
+		request.OldName,
+	)
+	if err != nil {
+		return Node{}, err
+	}
+	if source.ID != request.ExpectedID {
+		return Node{}, ErrNotFound
+	}
+	if source.Kind != ProjectionFile {
+		return Node{}, ErrReadOnly
+	}
+	if source.OriginScrapeID != nil {
+		return Node{}, ErrBatchOwnedProjection
+	}
+	if request.OldParentID == request.NewParentID && request.OldName == request.NewName {
+		return source, nil
+	}
+	if _, err := queryNode(
+		ctx,
+		transaction.transaction,
+		"parent_id = ? AND name = ?",
+		request.NewParentID,
+		request.NewName,
+	); err == nil {
+		return Node{}, ErrConflict
+	} else if !errors.Is(err, ErrNotFound) {
+		return Node{}, err
+	}
+
+	now := transaction.now().UTC().UnixNano()
+	result, err := transaction.transaction.ExecContext(ctx, `
+		UPDATE nodes
+		SET
+			parent_id = ?,
+			name = ?,
+			virtual_ctime_ns = ?,
+			updated_at = ?
+		WHERE id = ?
+		  AND parent_id = ?
+		  AND name = ?
+		  AND kind = 'PROJECTION_FILE'
+	`,
+		request.NewParentID,
+		request.NewName,
+		now,
+		now,
+		source.ID,
+		request.OldParentID,
+		request.OldName,
+	)
+	if err != nil {
+		return Node{}, classifyMutationError("move Projection", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return Node{}, fmt.Errorf("read moved Projection count: %w", err)
+	}
+	if updated != 1 {
+		return Node{}, ErrNotFound
+	}
+	if err := transaction.touchDirectory(ctx, oldParent.ID, now); err != nil {
+		return Node{}, err
+	}
+	if newParent.ID != oldParent.ID {
+		if err := transaction.touchDirectory(ctx, newParent.ID, now); err != nil {
+			return Node{}, err
+		}
+	}
+	moved, err := queryNode(ctx, transaction.transaction, "id = ?", source.ID)
+	if err != nil {
+		return Node{}, fmt.Errorf("read moved Projection: %w", err)
+	}
+	transaction.changed = true
+	return moved, nil
+}
+
+func (transaction *Transaction) RemoveProjection(
+	ctx context.Context,
+	request RemoveProjectionNode,
+) (Node, error) {
+	if request.ParentID <= 0 || request.ExpectedID <= 0 {
+		return Node{}, fmt.Errorf("%w: invalid Projection identity", ErrInvalidOperation)
+	}
+	node, err := transaction.childForMutation(ctx, request.ParentID, request.Name)
+	if err != nil {
+		return Node{}, err
+	}
+	if node.ID != request.ExpectedID {
+		return Node{}, ErrNotFound
+	}
+	if node.Kind != ProjectionFile {
+		return Node{}, ErrReadOnly
+	}
+	if node.OriginScrapeID != nil {
+		return Node{}, ErrBatchOwnedProjection
+	}
+	return transaction.removeNode(ctx, node)
+}
+
+func (transaction *Transaction) RebindProjection(
+	ctx context.Context,
+	request RebindProjectionNode,
+) (Node, error) {
+	if request.ParentID <= 0 || request.ExpectedID <= 0 {
+		return Node{}, fmt.Errorf("%w: invalid Projection identity", ErrInvalidOperation)
+	}
+	if err := validateName(request.Name); err != nil {
+		return Node{}, fmt.Errorf("%w: invalid Projection name: %v", ErrInvalidOperation, err)
+	}
+	if err := validateProjectionSource(request.ExpectedSource); err != nil {
+		return Node{}, err
+	}
+	if err := validateProjectionSource(request.Source); err != nil {
+		return Node{}, err
+	}
+	node, err := queryNode(
+		ctx,
+		transaction.transaction,
+		"id = ? AND parent_id = ? AND name = ?",
+		request.ExpectedID,
+		request.ParentID,
+		request.Name,
+	)
+	if err != nil {
+		return Node{}, err
+	}
+	if node.Kind != ProjectionFile || node.Source == nil {
+		return Node{}, ErrReadOnly
+	}
+	if node.OriginScrapeID != nil {
+		return Node{}, ErrBatchOwnedProjection
+	}
+	if *node.Source != request.ExpectedSource {
+		return Node{}, ErrConflict
+	}
+
+	now := transaction.now().UTC().UnixNano()
+	result, err := transaction.transaction.ExecContext(ctx, `
+		UPDATE nodes
+		SET
+			source_path = ?,
+			source_device_id = ?,
+			source_inode = ?,
+			cached_size = ?,
+			cached_atime_ns = ?,
+			cached_mtime_ns = ?,
+			cached_source_ctime_ns = ?,
+			verified_at_ns = ?,
+			virtual_ctime_ns = ?,
+			updated_at = ?
+		WHERE id = ?
+		  AND parent_id = ?
+		  AND name = ?
+		  AND kind = 'PROJECTION_FILE'
+		  AND source_path = ?
+		  AND source_device_id = ?
+		  AND source_inode = ?
+		  AND cached_size = ?
+		  AND cached_atime_ns = ?
+		  AND cached_mtime_ns = ?
+		  AND cached_source_ctime_ns = ?
+		  AND verified_at_ns = ?
+	`,
+		request.Source.Path,
+		request.Source.DeviceID,
+		request.Source.Inode,
+		request.Source.Size,
+		request.Source.AtimeNS,
+		request.Source.MtimeNS,
+		request.Source.SourceCtimeNS,
+		request.Source.VerifiedAtNS,
+		now,
+		now,
+		request.ExpectedID,
+		request.ParentID,
+		request.Name,
+		request.ExpectedSource.Path,
+		request.ExpectedSource.DeviceID,
+		request.ExpectedSource.Inode,
+		request.ExpectedSource.Size,
+		request.ExpectedSource.AtimeNS,
+		request.ExpectedSource.MtimeNS,
+		request.ExpectedSource.SourceCtimeNS,
+		request.ExpectedSource.VerifiedAtNS,
+	)
+	if err != nil {
+		return Node{}, classifyMutationError("rebind Projection", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return Node{}, fmt.Errorf("read rebound Projection count: %w", err)
+	}
+	if updated != 1 {
+		return Node{}, ErrConflict
+	}
+	rebound, err := queryNode(ctx, transaction.transaction, "id = ?", request.ExpectedID)
+	if err != nil {
+		return Node{}, fmt.Errorf("read rebound Projection: %w", err)
+	}
+	transaction.audited = true
+	return rebound, nil
 }
 
 func (transaction *Transaction) Rename(
@@ -2091,11 +2348,8 @@ func validateCreateNode(request CreateNode) error {
 		if request.Attributes.Mode.Perm()&0o222 != 0 {
 			return fmt.Errorf("%w: ProjectionFile mode must be read-only", ErrInvalidNode)
 		}
-		if !strings.HasPrefix(request.Source.Path, "/") ||
-			request.Source.DeviceID < 0 ||
-			request.Source.Inode < 0 ||
-			request.Source.Size < 0 {
-			return fmt.Errorf("%w: invalid ProjectionFile source", ErrInvalidNode)
+		if err := validateProjectionSource(*request.Source); err != nil {
+			return err
 		}
 	case OverlayFile:
 		if request.Source != nil || request.ObjectID == nil || request.ManagedDirectory {
@@ -2112,6 +2366,16 @@ func validateCreateNode(request CreateNode) error {
 		if request.Source != nil || request.ObjectID != nil {
 			return fmt.Errorf("%w: invalid Directory fields", ErrInvalidNode)
 		}
+	}
+	return nil
+}
+
+func validateProjectionSource(source ProjectionSource) error {
+	if !strings.HasPrefix(source.Path, "/") ||
+		source.DeviceID < 0 ||
+		source.Inode < 0 ||
+		source.Size < 0 {
+		return fmt.Errorf("%w: invalid ProjectionFile source", ErrInvalidNode)
 	}
 	return nil
 }

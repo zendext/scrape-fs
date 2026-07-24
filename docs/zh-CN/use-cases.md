@@ -506,17 +506,19 @@ scrapefs projection rebind \
 ### 主流程
 
 1. daemon 安全打开新源文件。
-2. CLI 展示旧、新路径和身份。
-3. 用户显式确认。
-4. daemon 更新 source path、身份和缓存属性。
-5. daemon 更新虚拟 ctime、写 operation log 并失效属性缓存。
-6. 新 open 从新源文件读取。
+2. CLI 返回旧、新路径和 identity，以及 confirmation digest。
+3. 用户通过使用 `--confirm <digest>` 重复命令进行显式确认。
+4. daemon 重新打开 source，并拒绝已变化的 Projection 或 source。
+5. daemon 更新 source path、身份和缓存属性。
+6. daemon 更新虚拟 ctime、写 operation log 并失效属性缓存。
+7. 新 open 从新源文件读取。
 
 ### 备选流程
 
 - 新源文件不存在：返回 `ENOENT`。
 - 新路径包含 symlink：拒绝。
-- 用户取消：不修改 Projection。
+- 未提交 confirmation：只返回 preview，不修改 Projection。
+- confirmation 已过期：返回 `ConfirmationMismatch`，不修改 Projection。
 
 ### 结果
 

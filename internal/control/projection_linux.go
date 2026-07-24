@@ -9,13 +9,17 @@ import (
 )
 
 const (
-	ProjectionResultSchema = "scrapefs.projection-result/v1"
-	ProjectionListSchema   = "scrapefs.projection-list/v1"
+	ProjectionResultSchema       = "scrapefs.projection-result/v1"
+	ProjectionListSchema         = "scrapefs.projection-list/v1"
+	ProjectionRebindResultSchema = "scrapefs.projection-rebind-result/v1"
 )
 
 type ProjectionService interface {
 	Create(context.Context, projection.CreateRequest) (namespace.Node, error)
 	List(context.Context, projection.ListRequest) ([]namespace.Projection, error)
+	Move(context.Context, projection.MoveRequest) (namespace.Projection, error)
+	Remove(context.Context, projection.RemoveRequest) (namespace.Projection, error)
+	Rebind(context.Context, projection.RebindRequest) (projection.RebindResult, error)
 }
 
 type ProjectionResult struct {
@@ -46,6 +50,22 @@ type ProjectionSourceSnapshot struct {
 	VerifiedAtNS  int64  `json:"verified_at_ns"`
 }
 
+type ProjectionRebindStatus string
+
+const (
+	ProjectionRebindConfirmationRequired ProjectionRebindStatus = "confirmation_required"
+	ProjectionRebindApplied              ProjectionRebindStatus = "applied"
+)
+
+type ProjectionRebindResult struct {
+	Schema             string                   `json:"schema"`
+	Status             ProjectionRebindStatus   `json:"status"`
+	ConfirmationDigest string                   `json:"confirmation_digest"`
+	Projection         ProjectionSnapshot       `json:"projection"`
+	PreviousSource     ProjectionSourceSnapshot `json:"previous_source"`
+	ProposedSource     ProjectionSourceSnapshot `json:"proposed_source"`
+}
+
 func (client *Client) CreateProjection(
 	ctx context.Context,
 	create projection.CreateRequest,
@@ -73,6 +93,48 @@ func (client *Client) ListProjections(
 	return result, err
 }
 
+func (client *Client) MoveProjection(
+	ctx context.Context,
+	move projection.MoveRequest,
+) (ProjectionResult, error) {
+	var result ProjectionResult
+	err := client.call(ctx, request{
+		Schema:    requestSchema,
+		Command:   "projection.move",
+		Target:    move.Target,
+		NewTarget: move.NewTarget,
+	}, &result)
+	return result, err
+}
+
+func (client *Client) RemoveProjection(
+	ctx context.Context,
+	remove projection.RemoveRequest,
+) (ProjectionResult, error) {
+	var result ProjectionResult
+	err := client.call(ctx, request{
+		Schema:  requestSchema,
+		Command: "projection.remove",
+		Target:  remove.Target,
+	}, &result)
+	return result, err
+}
+
+func (client *Client) RebindProjection(
+	ctx context.Context,
+	rebind projection.RebindRequest,
+) (ProjectionRebindResult, error) {
+	var result ProjectionRebindResult
+	err := client.call(ctx, request{
+		Schema:             requestSchema,
+		Command:            "projection.rebind",
+		Target:             rebind.Target,
+		SourcePath:         rebind.SourcePath,
+		ConfirmationDigest: rebind.ConfirmationDigest,
+	}, &result)
+	return result, err
+}
+
 func projectionResult(node namespace.Node, target string) ProjectionResult {
 	libraryName, _, _ := strings.Cut(target, ":/")
 	return ProjectionResult{
@@ -82,6 +144,28 @@ func projectionResult(node namespace.Node, target string) ProjectionResult {
 			Target:      strings.TrimPrefix(target, libraryName+":/"),
 			Node:        node,
 		}),
+	}
+}
+
+func projectionRecordResult(record namespace.Projection) ProjectionResult {
+	return ProjectionResult{
+		Schema:     ProjectionResultSchema,
+		Projection: snapshotProjection(record),
+	}
+}
+
+func projectionRebindResult(result projection.RebindResult) ProjectionRebindResult {
+	status := ProjectionRebindConfirmationRequired
+	if result.Applied {
+		status = ProjectionRebindApplied
+	}
+	return ProjectionRebindResult{
+		Schema:             ProjectionRebindResultSchema,
+		Status:             status,
+		ConfirmationDigest: result.ConfirmationDigest,
+		Projection:         snapshotProjection(result.Projection),
+		PreviousSource:     snapshotProjectionSource(result.PreviousSource),
+		ProposedSource:     snapshotProjectionSource(result.ProposedSource),
 	}
 }
 
@@ -99,21 +183,25 @@ func projectionListResult(records []namespace.Projection) ProjectionListResult {
 func snapshotProjection(record namespace.Projection) ProjectionSnapshot {
 	source := ProjectionSourceSnapshot{}
 	if record.Node.Source != nil {
-		source = ProjectionSourceSnapshot{
-			Path:          record.Node.Source.Path,
-			DeviceID:      record.Node.Source.DeviceID,
-			Inode:         record.Node.Source.Inode,
-			Size:          record.Node.Source.Size,
-			AtimeNS:       record.Node.Source.AtimeNS,
-			MtimeNS:       record.Node.Source.MtimeNS,
-			SourceCtimeNS: record.Node.Source.SourceCtimeNS,
-			VerifiedAtNS:  record.Node.Source.VerifiedAtNS,
-		}
+		source = snapshotProjectionSource(*record.Node.Source)
 	}
 	return ProjectionSnapshot{
 		ID:      record.Node.ID,
 		Library: record.LibraryName,
 		Target:  record.LibraryName + ":/" + record.Target,
 		Source:  source,
+	}
+}
+
+func snapshotProjectionSource(source namespace.ProjectionSource) ProjectionSourceSnapshot {
+	return ProjectionSourceSnapshot{
+		Path:          source.Path,
+		DeviceID:      source.DeviceID,
+		Inode:         source.Inode,
+		Size:          source.Size,
+		AtimeNS:       source.AtimeNS,
+		MtimeNS:       source.MtimeNS,
+		SourceCtimeNS: source.SourceCtimeNS,
+		VerifiedAtNS:  source.VerifiedAtNS,
 	}
 }

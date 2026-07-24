@@ -249,6 +249,13 @@ func TestRunGarbageCollectWritesDeterministicJSON(t *testing.T) {
 	}
 }
 
+func TestErrorCodeReturnsBatchOwnedProjection(t *testing.T) {
+	t.Parallel()
+	if got := errorCode(projection.ErrBatchOwnedProjection); got != "BatchOwnedProjection" {
+		t.Errorf("errorCode = %q, want BatchOwnedProjection", got)
+	}
+}
+
 func TestRunHelpListsProjectionBatchCommands(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -274,7 +281,7 @@ func TestRunHelpListsProjectionCommands(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
 	}
-	for _, command := range []string{"add", "list", "batch"} {
+	for _, command := range []string{"add", "list", "mv", "rm", "rebind", "batch"} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help output %q does not contain %q", stdout.String(), command)
 		}
@@ -354,6 +361,150 @@ func TestRunProjectionListPassesOptionalLibraryScope(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result, service.projectionsListed) {
 		t.Errorf("stdout result = %#v, want %#v", result, service.projectionsListed)
+	}
+}
+
+func TestRunProjectionLifecyclePassesRequestsAndWritesJSON(t *testing.T) {
+	service := &fakeBatchService{
+		projectionMoved: control.ProjectionResult{
+			Schema: control.ProjectionResultSchema,
+			Projection: control.ProjectionSnapshot{
+				ID:      42,
+				Library: "media",
+				Target:  "media:/Films/Dune.mkv",
+			},
+		},
+		projectionRemoved: control.ProjectionResult{
+			Schema: control.ProjectionResultSchema,
+			Projection: control.ProjectionSnapshot{
+				ID:      42,
+				Library: "media",
+				Target:  "media:/Films/Dune.mkv",
+			},
+		},
+		projectionRebound: control.ProjectionRebindResult{
+			Schema:             control.ProjectionRebindResultSchema,
+			Status:             control.ProjectionRebindApplied,
+			ConfirmationDigest: "sha256:confirmed",
+			Projection: control.ProjectionSnapshot{
+				ID:      42,
+				Library: "media",
+				Target:  "media:/Films/Dune.mkv",
+			},
+		},
+	}
+	caller := projectionbatch.Caller{UID: 1000, GID: 1001}
+	tests := []struct {
+		name string
+		args []string
+		want any
+	}{
+		{
+			name: "move",
+			args: []string{
+				"projection", "mv",
+				"media:/Movies/Dune.mkv",
+				"media:/Films/Dune.mkv",
+			},
+			want: service.projectionMoved,
+		},
+		{
+			name: "remove",
+			args: []string{"projection", "rm", "media:/Films/Dune.mkv"},
+			want: service.projectionRemoved,
+		},
+		{
+			name: "rebind",
+			args: []string{
+				"projection", "rebind",
+				"media:/Films/Dune.mkv",
+				"--source", "/srv/new/Dune.mkv",
+				"--confirm", "sha256:confirmed",
+			},
+			want: service.projectionRebound,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := runWithBatchService(
+				test.args,
+				strings.NewReader(""),
+				&stdout,
+				&stderr,
+				service,
+				caller,
+			)
+			if exitCode != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+			}
+			var decoded any
+			if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
+				t.Fatalf("Unmarshal stdout: %v", err)
+			}
+			wantJSON, err := json.Marshal(test.want)
+			if err != nil {
+				t.Fatalf("Marshal want: %v", err)
+			}
+			var wantDecoded any
+			if err := json.Unmarshal(wantJSON, &wantDecoded); err != nil {
+				t.Fatalf("Unmarshal want: %v", err)
+			}
+			if !reflect.DeepEqual(decoded, wantDecoded) {
+				t.Errorf("stdout = %#v, want %#v", decoded, wantDecoded)
+			}
+		})
+	}
+	if service.projectionMoveRequest.Target != "media:/Movies/Dune.mkv" ||
+		service.projectionMoveRequest.NewTarget != "media:/Films/Dune.mkv" ||
+		service.projectionMoveRequest.Actor.Kind != namespace.ActorControl ||
+		service.projectionMoveRequest.Actor.ID == nil ||
+		*service.projectionMoveRequest.Actor.ID != int64(caller.UID) {
+		t.Errorf("MoveProjection request = %#v", service.projectionMoveRequest)
+	}
+	if service.projectionRemoveRequest.Target != "media:/Films/Dune.mkv" ||
+		service.projectionRemoveRequest.Actor.Kind != namespace.ActorControl {
+		t.Errorf("RemoveProjection request = %#v", service.projectionRemoveRequest)
+	}
+	if service.projectionRebindRequest.Target != "media:/Films/Dune.mkv" ||
+		service.projectionRebindRequest.SourcePath != "/srv/new/Dune.mkv" ||
+		service.projectionRebindRequest.ConfirmationDigest != "sha256:confirmed" ||
+		service.projectionRebindRequest.Actor.Kind != namespace.ActorControl {
+		t.Errorf("RebindProjection request = %#v", service.projectionRebindRequest)
+	}
+}
+
+func TestRunProjectionRebindPreviewOmitsConfirmation(t *testing.T) {
+	service := &fakeBatchService{
+		projectionRebound: control.ProjectionRebindResult{
+			Schema:             control.ProjectionRebindResultSchema,
+			Status:             control.ProjectionRebindConfirmationRequired,
+			ConfirmationDigest: "sha256:preview",
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithBatchService(
+		[]string{
+			"projection", "rebind",
+			"media:/Movies/Dune.mkv",
+			"--source", "/srv/new/Dune.mkv",
+		},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+		service,
+		projectionbatch.Caller{UID: 1000, GID: 1001},
+	)
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if service.projectionRebindRequest.ConfirmationDigest != "" {
+		t.Errorf(
+			"RebindProjection confirmation = %q, want empty",
+			service.projectionRebindRequest.ConfirmationDigest,
+		)
 	}
 }
 
@@ -593,8 +744,14 @@ type fakeBatchService struct {
 	libraryProfileCalls     int
 	projectionCreated       control.ProjectionResult
 	projectionsListed       control.ProjectionListResult
+	projectionMoved         control.ProjectionResult
+	projectionRemoved       control.ProjectionResult
+	projectionRebound       control.ProjectionRebindResult
 	projectionCreateRequest projection.CreateRequest
 	projectionLibrary       string
+	projectionMoveRequest   projection.MoveRequest
+	projectionRemoveRequest projection.RemoveRequest
+	projectionRebindRequest projection.RebindRequest
 	gcResult                objectstore.GCResult
 	gcCalls                 int
 }
@@ -652,6 +809,30 @@ func (service *fakeBatchService) ListProjections(
 ) (control.ProjectionListResult, error) {
 	service.projectionLibrary = libraryName
 	return service.projectionsListed, service.err
+}
+
+func (service *fakeBatchService) MoveProjection(
+	_ context.Context,
+	request projection.MoveRequest,
+) (control.ProjectionResult, error) {
+	service.projectionMoveRequest = request
+	return service.projectionMoved, service.err
+}
+
+func (service *fakeBatchService) RemoveProjection(
+	_ context.Context,
+	request projection.RemoveRequest,
+) (control.ProjectionResult, error) {
+	service.projectionRemoveRequest = request
+	return service.projectionRemoved, service.err
+}
+
+func (service *fakeBatchService) RebindProjection(
+	_ context.Context,
+	request projection.RebindRequest,
+) (control.ProjectionRebindResult, error) {
+	service.projectionRebindRequest = request
+	return service.projectionRebound, service.err
 }
 
 func (service *fakeBatchService) Validate(

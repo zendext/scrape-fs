@@ -53,9 +53,12 @@ type librarySetProfileCLI struct {
 }
 
 type projectionCLI struct {
-	Add   projectionAddCLI   `cmd:"" help:"Create a direct Projection."`
-	List  projectionListCLI  `cmd:"" help:"List Projections."`
-	Batch projectionBatchCLI `cmd:"" help:"Validate, apply, inspect, and undo Projection Batches."`
+	Add    projectionAddCLI    `cmd:"" help:"Create a direct Projection."`
+	List   projectionListCLI   `cmd:"" help:"List Projections."`
+	Mv     projectionMoveCLI   `cmd:"" help:"Move a Projection within one Library."`
+	Rm     projectionRemoveCLI `cmd:"" help:"Remove a Projection."`
+	Rebind projectionRebindCLI `cmd:"" help:"Preview or confirm a Projection source rebind."`
+	Batch  projectionBatchCLI  `cmd:"" help:"Validate, apply, inspect, and undo Projection Batches."`
 }
 
 type projectionAddCLI struct {
@@ -65,6 +68,21 @@ type projectionAddCLI struct {
 
 type projectionListCLI struct {
 	Library string `help:"Limit results to this Library."`
+}
+
+type projectionMoveCLI struct {
+	Target    string `arg:"" name:"target" help:"Existing virtual target."`
+	NewTarget string `arg:"" name:"new-target" help:"Missing virtual target in the same Library."`
+}
+
+type projectionRemoveCLI struct {
+	Target string `arg:"" name:"target" help:"Existing virtual target."`
+}
+
+type projectionRebindCLI struct {
+	Target  string `arg:"" name:"target" help:"Existing virtual target."`
+	Source  string `help:"Absolute replacement source file path." required:""`
+	Confirm string `help:"Apply the exact confirmation digest returned by a preview."`
 }
 
 type projectionBatchCLI struct {
@@ -115,6 +133,18 @@ type controlService interface {
 		projection.CreateRequest,
 	) (control.ProjectionResult, error)
 	ListProjections(context.Context, string) (control.ProjectionListResult, error)
+	MoveProjection(
+		context.Context,
+		projection.MoveRequest,
+	) (control.ProjectionResult, error)
+	RemoveProjection(
+		context.Context,
+		projection.RemoveRequest,
+	) (control.ProjectionResult, error)
+	RebindProjection(
+		context.Context,
+		projection.RebindRequest,
+	) (control.ProjectionRebindResult, error)
 	Validate(context.Context, []byte) (projectionbatch.ValidationResult, error)
 	Apply(context.Context, projectionbatch.ApplyRequest) (projectionbatch.ApplyResult, error)
 	List(context.Context) (projectionbatch.ListResult, error)
@@ -255,6 +285,33 @@ func runWithBatchService(
 		}
 	case strings.HasPrefix(command, "projection list"):
 		result, err = service.ListProjections(ctx, commandLine.Projection.List.Library)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case strings.HasPrefix(command, "projection mv"):
+		result, err = service.MoveProjection(ctx, projection.MoveRequest{
+			Target:    commandLine.Projection.Mv.Target,
+			NewTarget: commandLine.Projection.Mv.NewTarget,
+			Actor:     actor,
+		})
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case strings.HasPrefix(command, "projection rm"):
+		result, err = service.RemoveProjection(ctx, projection.RemoveRequest{
+			Target: commandLine.Projection.Rm.Target,
+			Actor:  actor,
+		})
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case strings.HasPrefix(command, "projection rebind"):
+		result, err = service.RebindProjection(ctx, projection.RebindRequest{
+			Target:             commandLine.Projection.Rebind.Target,
+			SourcePath:         commandLine.Projection.Rebind.Source,
+			ConfirmationDigest: commandLine.Projection.Rebind.Confirm,
+			Actor:              actor,
+		})
 		if err != nil {
 			return writeCommandError(stderr, err)
 		}
@@ -403,6 +460,14 @@ func errorCode(err error) string {
 		return "SourceNotRegular"
 	case errors.Is(err, namespace.ErrConflict):
 		return "TargetConflict"
+	case errors.Is(err, namespace.ErrCrossLibrary):
+		return "CrossLibrary"
+	case errors.Is(err, projection.ErrProjectionNotFound):
+		return "ProjectionNotFound"
+	case errors.Is(err, projection.ErrConfirmationMismatch):
+		return "ConfirmationMismatch"
+	case errors.Is(err, projection.ErrBatchOwnedProjection):
+		return "BatchOwnedProjection"
 	case errors.Is(err, projectionbatch.ErrBatchNotFound):
 		return "BatchNotFound"
 	case errors.Is(err, projectionbatch.ErrAlreadyUndone):

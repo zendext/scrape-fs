@@ -56,17 +56,19 @@ func (err *RemoteError) ErrorCode() string {
 }
 
 type request struct {
-	Schema         string `json:"schema"`
-	Command        string `json:"command"`
-	Batch          []byte `json:"batch,omitempty"`
-	ExpectedDigest string `json:"expected_digest,omitempty"`
-	BatchID        string `json:"batch_id,omitempty"`
-	LibraryName    string `json:"library_name,omitempty"`
-	NewLibraryName string `json:"new_library_name,omitempty"`
-	ProfileName    string `json:"profile_name,omitempty"`
-	ProfileVersion int64  `json:"profile_version,omitempty"`
-	SourcePath     string `json:"source_path,omitempty"`
-	Target         string `json:"target,omitempty"`
+	Schema             string `json:"schema"`
+	Command            string `json:"command"`
+	Batch              []byte `json:"batch,omitempty"`
+	ExpectedDigest     string `json:"expected_digest,omitempty"`
+	BatchID            string `json:"batch_id,omitempty"`
+	LibraryName        string `json:"library_name,omitempty"`
+	NewLibraryName     string `json:"new_library_name,omitempty"`
+	ProfileName        string `json:"profile_name,omitempty"`
+	ProfileVersion     int64  `json:"profile_version,omitempty"`
+	SourcePath         string `json:"source_path,omitempty"`
+	Target             string `json:"target,omitempty"`
+	NewTarget          string `json:"new_target,omitempty"`
+	ConfirmationDigest string `json:"confirmation_digest,omitempty"`
 }
 
 type response struct {
@@ -578,6 +580,48 @@ func handleConnection(
 		if err == nil {
 			result = projectionListResult(projections)
 		}
+	case "projection.move":
+		if options.projectionService == nil {
+			err = fmt.Errorf("Projection control service is unavailable")
+			break
+		}
+		var moved namespace.Projection
+		moved, err = options.projectionService.Move(ctx, projection.MoveRequest{
+			Target:    request.Target,
+			NewTarget: request.NewTarget,
+			Actor:     actor,
+		})
+		if err == nil {
+			result = projectionRecordResult(moved)
+		}
+	case "projection.remove":
+		if options.projectionService == nil {
+			err = fmt.Errorf("Projection control service is unavailable")
+			break
+		}
+		var removed namespace.Projection
+		removed, err = options.projectionService.Remove(ctx, projection.RemoveRequest{
+			Target: request.Target,
+			Actor:  actor,
+		})
+		if err == nil {
+			result = projectionRecordResult(removed)
+		}
+	case "projection.rebind":
+		if options.projectionService == nil {
+			err = fmt.Errorf("Projection control service is unavailable")
+			break
+		}
+		var rebound projection.RebindResult
+		rebound, err = options.projectionService.Rebind(ctx, projection.RebindRequest{
+			Target:             request.Target,
+			SourcePath:         request.SourcePath,
+			ConfirmationDigest: request.ConfirmationDigest,
+			Actor:              actor,
+		})
+		if err == nil {
+			result = projectionRebindResult(rebound)
+		}
 	case "projection.batch.validate":
 		result, err = service.Validate(ctx, request.Batch)
 	case "projection.batch.apply":
@@ -662,6 +706,14 @@ func classifyError(err error) string {
 		return "SourceNotRegular"
 	case errors.Is(err, namespace.ErrConflict):
 		return "TargetConflict"
+	case errors.Is(err, namespace.ErrCrossLibrary):
+		return "CrossLibrary"
+	case errors.Is(err, projection.ErrProjectionNotFound):
+		return "ProjectionNotFound"
+	case errors.Is(err, projection.ErrConfirmationMismatch):
+		return "ConfirmationMismatch"
+	case errors.Is(err, projection.ErrBatchOwnedProjection):
+		return "BatchOwnedProjection"
 	case errors.Is(err, projectionbatch.ErrBatchNotFound):
 		return "BatchNotFound"
 	case errors.Is(err, projectionbatch.ErrAlreadyUndone):

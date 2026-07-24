@@ -6,22 +6,23 @@ import (
 )
 
 var (
-	ErrConflict         = errors.New("namespace conflict")
-	ErrInvalidLibrary   = errors.New("invalid library")
-	ErrLibraryNotFound  = errors.New("library not found")
-	ErrInvalidObject    = errors.New("invalid backing object")
-	ErrProfileNotFound  = errors.New("profile not found")
-	ErrInvalidNode      = errors.New("invalid namespace node")
-	ErrInvalidOperation = errors.New("invalid namespace operation")
-	ErrInvalidPath      = errors.New("invalid relative namespace path")
-	ErrInvalidRoot      = errors.New("invalid library root")
-	ErrNotFound         = errors.New("namespace node not found")
-	ErrNotEmpty         = errors.New("directory not empty")
-	ErrCrossLibrary     = errors.New("cross-library operation")
-	ErrProtected        = errors.New("protected namespace node")
-	ErrReadOnly         = errors.New("read-only namespace node")
-	ErrIsDirectory      = errors.New("target is a directory")
-	ErrNotDirectory     = errors.New("target is not a directory")
+	ErrConflict             = errors.New("namespace conflict")
+	ErrInvalidLibrary       = errors.New("invalid library")
+	ErrLibraryNotFound      = errors.New("library not found")
+	ErrInvalidObject        = errors.New("invalid backing object")
+	ErrProfileNotFound      = errors.New("profile not found")
+	ErrInvalidNode          = errors.New("invalid namespace node")
+	ErrInvalidOperation     = errors.New("invalid namespace operation")
+	ErrInvalidPath          = errors.New("invalid relative namespace path")
+	ErrInvalidRoot          = errors.New("invalid library root")
+	ErrNotFound             = errors.New("namespace node not found")
+	ErrNotEmpty             = errors.New("directory not empty")
+	ErrCrossLibrary         = errors.New("cross-library operation")
+	ErrProtected            = errors.New("protected namespace node")
+	ErrReadOnly             = errors.New("read-only namespace node")
+	ErrBatchOwnedProjection = errors.New("projection is owned by a Projection Batch")
+	ErrIsDirectory          = errors.New("target is a directory")
+	ErrNotDirectory         = errors.New("target is not a directory")
 )
 
 type NodeKind string
@@ -170,6 +171,28 @@ type RenameNode struct {
 type RenameResult struct {
 	Node     Node
 	Replaced *Node
+}
+
+type MoveProjectionNode struct {
+	OldParentID int64
+	OldName     string
+	NewParentID int64
+	NewName     string
+	ExpectedID  int64
+}
+
+type RemoveProjectionNode struct {
+	ParentID   int64
+	Name       string
+	ExpectedID int64
+}
+
+type RebindProjectionNode struct {
+	ParentID       int64
+	Name           string
+	ExpectedID     int64
+	ExpectedSource ProjectionSource
+	Source         ProjectionSource
 }
 
 type SetAttributes struct {

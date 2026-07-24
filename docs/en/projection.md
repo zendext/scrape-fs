@@ -54,7 +54,21 @@ scrapefs projection list --library jellyfin
 
 `projection list` returns `scrapefs.projection-list/v1` JSON. Results are deterministically ordered by Library name, relative target within the Library, and node ID, and include Projections created directly or by a batch. A missing requested Library returns `LibraryNotFound`. Listing reads only the persisted namespace and cached source metadata; it does not reopen sources, so a currently unavailable source does not remove its Projection from the result.
 
-After `projection rm`, ScrapeFS should remove empty managed directories toward LibraryRoot. Directories created by users or players are retained.
+Move or remove a Projection without touching its source:
+
+```bash
+scrapefs projection mv \
+  "jellyfin:/Movies/Dune/Dune.mkv" \
+  "jellyfin:/Films/Dune.mkv"
+
+scrapefs projection rm "jellyfin:/Films/Dune.mkv"
+```
+
+Move accepts only a missing target in the same Library. It preserves the stable node ID and source metadata, creates missing managed target directories in the same transaction, writes one operation-log entry, and increments namespace version once. Cross-Library move returns `CrossLibrary`; any existing node at the target returns `TargetConflict`.
+
+Remove deletes only the Projection node. It prunes empty managed directories toward LibraryRoot while retaining user-created and non-empty directories, writes one operation-log entry, and increments namespace version once. A failed move or remove leaves the namespace, version, operation log, and every source file unchanged. Both commands return `scrapefs.projection-result/v1`.
+
+Move, remove, and rebind are direct-Projection operations. They reject a Projection whose `origin_scrape_id` identifies a Projection Batch with the stable `BatchOwnedProjection` error. Rejection leaves Batch provenance and later show/undo behavior intact.
 
 ## 2. Source-Path Safety
 
@@ -130,17 +144,27 @@ scrapefs projection rebind \
   --source /mnt/new-disk/Dune.mkv
 ```
 
+The first invocation is a preview. It returns `scrapefs.projection-rebind-result/v1` with status `confirmation_required`, the previous and proposed source metadata, and a digest bound to the stable node ID, target, both source paths, and both strict identities. Apply exactly that preview with:
+
+```bash
+scrapefs projection rebind \
+  "jellyfin:/Movies/Dune (2021)/Dune (2021).mkv" \
+  --source /mnt/new-disk/Dune.mkv \
+  --confirm sha256:<digest>
+```
+
 Rebind:
 
 1. safely opens the new source;
-2. displays the old and new paths and identities;
-3. requires explicit confirmation;
-4. updates path, identity, cached attributes, and `verified_at_ns`;
-5. updates virtual ctime;
-6. writes the operation log;
-7. invalidates the inode attribute cache.
+2. returns the old and new paths, identities, and explicit confirmation digest;
+3. reopens and revalidates the source when the digest is submitted;
+4. rejects a changed Projection or source with `ConfirmationMismatch`;
+5. updates path, identity, cached attributes, and `verified_at_ns`;
+6. updates virtual ctime;
+7. writes the operation log;
+8. invalidates the inode attribute cache.
 
-Rebind does not increment namespace version.
+Preview and failed confirmation do not mutate state. Successful rebind preserves the node ID and target, writes one audit entry, and does not increment namespace version.
 
 ## 5. Attributes
 

@@ -52,7 +52,21 @@ scrapefs projection list --library jellyfin
 
 `projection list` 返回 `scrapefs.projection-list/v1` JSON。结果必须按 Library 名、Library 内相对 target 和 node ID 确定性排序，并同时包含 direct 与 Batch 创建的 Projection。指定的 Library 不存在时返回 `LibraryNotFound`。列表只读取持久化 namespace 和缓存 source metadata，不重新打开源文件，因此源文件当前不可用不会使 Projection 从列表消失。
 
-`projection rm` 删除 ProjectionFile 后，应向 LibraryRoot 清理空的 managed Directory。用户或播放器创建的目录不得自动删除。
+可以在不接触源文件的情况下移动或删除 Projection：
+
+```bash
+scrapefs projection mv \
+  "jellyfin:/Movies/Dune/Dune.mkv" \
+  "jellyfin:/Films/Dune.mkv"
+
+scrapefs projection rm "jellyfin:/Films/Dune.mkv"
+```
+
+Move 只接受同一 Library 内不存在的目标。它保留稳定 node ID 和 source metadata，在同一事务中创建缺失的 managed 目标目录，写一条 operation log，并使 namespace version 增加 1。跨 Library move 返回 `CrossLibrary`；目标存在任何节点时返回 `TargetConflict`。
+
+Remove 只删除 Projection 节点。它向 LibraryRoot 清理空的 managed Directory，同时保留用户创建和非空目录；写一条 operation log，并使 namespace version 增加 1。Move 或 remove 失败时，namespace、version、operation log 和所有源文件都保持不变。两个命令均返回 `scrapefs.projection-result/v1`。
+
+Move、remove 和 rebind 都是 direct Projection 操作。`origin_scrape_id` 指向 Projection Batch 的节点必须返回稳定错误 `BatchOwnedProjection`。拒绝操作后 Batch provenance 和后续 show/undo 行为保持完整。
 
 ## 2. 源路径安全
 
@@ -128,17 +142,27 @@ scrapefs projection rebind \
   --source /mnt/new-disk/Dune.mkv
 ```
 
+首次调用只执行 preview，返回 `scrapefs.projection-rebind-result/v1`，status 为 `confirmation_required`，其中包含新旧 source metadata，以及绑定稳定 node ID、target、两个 source path 和两个严格 identity 的 digest。使用以下命令应用该精确 preview：
+
+```bash
+scrapefs projection rebind \
+  "jellyfin:/Movies/Dune (2021)/Dune (2021).mkv" \
+  --source /mnt/new-disk/Dune.mkv \
+  --confirm sha256:<digest>
+```
+
 rebind 必须：
 
 1. 安全打开新源文件。
-2. 显示旧路径、旧身份和新路径、新身份。
-3. 要求显式确认。
-4. 更新路径、身份、缓存属性和 `verified_at_ns`。
-5. 更新虚拟 ctime。
-6. 写 operation log。
-7. 失效 inode attribute cache。
+2. 返回新旧路径、identity 和显式 confirmation digest。
+3. 提交 digest 时重新打开并重新校验 source。
+4. Projection 或 source 已变化时返回 `ConfirmationMismatch`。
+5. 更新路径、身份、缓存属性和 `verified_at_ns`。
+6. 更新虚拟 ctime。
+7. 写 operation log。
+8. 失效 inode attribute cache。
 
-rebind 不增加 namespace version。
+Preview 和确认失败不得修改状态。成功 rebind 保留 node ID 和 target，写一条 audit 记录，但不增加 namespace version。
 
 ## 5. 文件属性
 
