@@ -175,6 +175,7 @@ func TestTransactionRenameAppliesDocumentedMatrix(t *testing.T) {
 	sourceObjectID := insertStagingObject(t, opened, 10)
 	targetObjectID := insertStagingObject(t, opened, 20)
 
+	var source Node
 	if _, err := repository.Update(
 		ctx,
 		Operation{
@@ -186,17 +187,19 @@ func TestTransactionRenameAppliesDocumentedMatrix(t *testing.T) {
 			},
 		},
 		func(transaction *Transaction) error {
-			if _, err := transaction.CreateOverlay(ctx, sourceObjectID, CreateOverlay{
+			var err error
+			source, err = transaction.CreateOverlay(ctx, sourceObjectID, CreateOverlay{
 				ParentID: firstRootID,
 				Name:     "source",
 				Creator:  Actor{Kind: ActorSystem},
 				Attributes: Attributes{
 					Mode: 0o664,
 				},
-			}); err != nil {
+			})
+			if err != nil {
 				return err
 			}
-			_, err := transaction.CreateOverlay(ctx, targetObjectID, CreateOverlay{
+			_, err = transaction.CreateOverlay(ctx, targetObjectID, CreateOverlay{
 				ParentID: firstRootID,
 				Name:     "target",
 				Creator:  Actor{Kind: ActorSystem},
@@ -224,10 +227,12 @@ func TestTransactionRenameAppliesDocumentedMatrix(t *testing.T) {
 		func(transaction *Transaction) error {
 			var err error
 			result, err = transaction.Rename(ctx, RenameNode{
-				OldParentID: firstRootID,
-				OldName:     "source",
-				NewParentID: firstRootID,
-				NewName:     "target",
+				OldParentID:        firstRootID,
+				OldName:            "source",
+				NewParentID:        firstRootID,
+				NewName:            "target",
+				ExpectedSourceID:   source.ID,
+				ExpectedSourceKind: source.Kind,
 			})
 			return err
 		},
@@ -248,10 +253,12 @@ func TestTransactionRenameAppliesDocumentedMatrix(t *testing.T) {
 		testOperation("node.rename"),
 		func(transaction *Transaction) error {
 			_, err := transaction.Rename(ctx, RenameNode{
-				OldParentID: firstRootID,
-				OldName:     "target",
-				NewParentID: secondRootID,
-				NewName:     "target",
+				OldParentID:        firstRootID,
+				OldName:            "target",
+				NewParentID:        secondRootID,
+				NewName:            "target",
+				ExpectedSourceID:   result.Node.ID,
+				ExpectedSourceKind: result.Node.Kind,
 			})
 			return err
 		},
@@ -304,15 +311,221 @@ func TestTransactionRenameRejectsDirectoryDescendantMove(t *testing.T) {
 		testOperation("directory.rename"),
 		func(transaction *Transaction) error {
 			_, err := transaction.Rename(ctx, RenameNode{
-				OldParentID: rootID,
-				OldName:     parent.Name,
-				NewParentID: child.ID,
-				NewName:     parent.Name,
+				OldParentID:        rootID,
+				OldName:            parent.Name,
+				NewParentID:        child.ID,
+				NewName:            parent.Name,
+				ExpectedSourceID:   parent.ID,
+				ExpectedSourceKind: parent.Kind,
 			})
 			return err
 		},
 	); !errors.Is(err, ErrInvalidOperation) {
 		t.Fatalf("descendant Rename error = %v, want ErrInvalidOperation", err)
+	}
+}
+
+func TestTransactionRenameRejectsStaleWritableSourceReplacedByProjection(t *testing.T) {
+	opened := openTestDatabase(t)
+	repository := NewRepository(opened)
+	ctx := context.Background()
+	rootID := createTestLibraryRoot(t, repository)
+	objectID := insertStagingObject(t, opened, 10)
+
+	var observed Node
+	if _, err := repository.Update(
+		ctx,
+		testOperation("overlay.create"),
+		func(transaction *Transaction) error {
+			var err error
+			observed, err = transaction.CreateOverlay(ctx, objectID, CreateOverlay{
+				ParentID: rootID,
+				Name:     "source",
+				Creator:  Actor{Kind: ActorSystem},
+				Attributes: Attributes{
+					Mode: 0o664,
+				},
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("create observed Overlay: %v", err)
+	}
+
+	var replacement Node
+	if _, err := repository.Update(
+		ctx,
+		Operation{
+			Name:  "source.replace",
+			Actor: Actor{Kind: ActorSystem},
+			Details: OperationDetails{
+				Paths:     []string{"library/source", "library/source"},
+				NodeKinds: []NodeKind{OverlayFile, ProjectionFile},
+			},
+		},
+		func(transaction *Transaction) error {
+			if _, err := transaction.RemoveOverlay(ctx, rootID, "source"); err != nil {
+				return err
+			}
+			var err error
+			replacement, err = transaction.CreateNode(ctx, CreateNode{
+				ParentID: rootID,
+				Name:     "source",
+				Kind:     ProjectionFile,
+				Source: &ProjectionSource{
+					Path:          "/source.mkv",
+					DeviceID:      1,
+					Inode:         2,
+					Size:          3,
+					AtimeNS:       4,
+					MtimeNS:       5,
+					SourceCtimeNS: 6,
+					VerifiedAtNS:  7,
+				},
+				Creator: Actor{Kind: ActorSystem},
+				Attributes: Attributes{
+					Mode: 0o444,
+				},
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("replace observed Overlay with Projection: %v", err)
+	}
+	assertVersionAndLogCount(t, opened, 3, 3)
+
+	if _, err := repository.Update(
+		ctx,
+		Operation{
+			Name:  "node.rename",
+			Actor: Actor{Kind: ActorSystem},
+			Details: OperationDetails{
+				Paths:     []string{"library/source", "library/renamed"},
+				NodeKinds: []NodeKind{OverlayFile, OverlayFile},
+			},
+		},
+		func(transaction *Transaction) error {
+			_, err := transaction.Rename(ctx, RenameNode{
+				OldParentID:        rootID,
+				OldName:            "source",
+				NewParentID:        rootID,
+				NewName:            "renamed",
+				ExpectedSourceID:   observed.ID,
+				ExpectedSourceKind: observed.Kind,
+			})
+			return err
+		},
+	); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("stale Rename error = %v, want ErrReadOnly", err)
+	}
+	assertVersionAndLogCount(t, opened, 3, 3)
+
+	source, err := repository.Child(ctx, rootID, "source")
+	if err != nil {
+		t.Fatalf("read replacement source: %v", err)
+	}
+	if source.ID != replacement.ID || source.Kind != ProjectionFile {
+		t.Errorf("source after rejected Rename = %#v, want replacement %#v", source, replacement)
+	}
+	if _, err := repository.Child(ctx, rootID, "renamed"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("renamed target error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestTransactionRenameRejectsStaleSourceIdentityWithSameKind(t *testing.T) {
+	opened := openTestDatabase(t)
+	repository := NewRepository(opened)
+	ctx := context.Background()
+	rootID := createTestLibraryRoot(t, repository)
+	firstObjectID := insertStagingObject(t, opened, 10)
+	secondObjectID := insertStagingObject(t, opened, 20)
+
+	var observed Node
+	if _, err := repository.Update(
+		ctx,
+		testOperation("overlay.create"),
+		func(transaction *Transaction) error {
+			var err error
+			observed, err = transaction.CreateOverlay(ctx, firstObjectID, CreateOverlay{
+				ParentID: rootID,
+				Name:     "source",
+				Creator:  Actor{Kind: ActorSystem},
+				Attributes: Attributes{
+					Mode: 0o664,
+				},
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("create observed Overlay: %v", err)
+	}
+
+	var replacement Node
+	if _, err := repository.Update(
+		ctx,
+		Operation{
+			Name:  "source.replace",
+			Actor: Actor{Kind: ActorSystem},
+			Details: OperationDetails{
+				Paths:     []string{"library/source", "library/source"},
+				NodeKinds: []NodeKind{OverlayFile, OverlayFile},
+			},
+		},
+		func(transaction *Transaction) error {
+			if _, err := transaction.RemoveOverlay(ctx, rootID, "source"); err != nil {
+				return err
+			}
+			var err error
+			replacement, err = transaction.CreateOverlay(ctx, secondObjectID, CreateOverlay{
+				ParentID: rootID,
+				Name:     "source",
+				Creator:  Actor{Kind: ActorSystem},
+				Attributes: Attributes{
+					Mode: 0o664,
+				},
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("replace observed Overlay: %v", err)
+	}
+	assertVersionAndLogCount(t, opened, 3, 3)
+
+	if _, err := repository.Update(
+		ctx,
+		Operation{
+			Name:  "node.rename",
+			Actor: Actor{Kind: ActorSystem},
+			Details: OperationDetails{
+				Paths:     []string{"library/source", "library/renamed"},
+				NodeKinds: []NodeKind{OverlayFile, OverlayFile},
+			},
+		},
+		func(transaction *Transaction) error {
+			_, err := transaction.Rename(ctx, RenameNode{
+				OldParentID:        rootID,
+				OldName:            "source",
+				NewParentID:        rootID,
+				NewName:            "renamed",
+				ExpectedSourceID:   observed.ID,
+				ExpectedSourceKind: observed.Kind,
+			})
+			return err
+		},
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale same-kind Rename error = %v, want ErrNotFound", err)
+	}
+	assertVersionAndLogCount(t, opened, 3, 3)
+
+	source, err := repository.Child(ctx, rootID, "source")
+	if err != nil {
+		t.Fatalf("read replacement source: %v", err)
+	}
+	if source.ID != replacement.ID || source.Kind != OverlayFile {
+		t.Errorf("source after rejected Rename = %#v, want replacement %#v", source, replacement)
+	}
+	if _, err := repository.Child(ctx, rootID, "renamed"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("renamed target error = %v, want ErrNotFound", err)
 	}
 }
 

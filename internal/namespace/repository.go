@@ -1243,6 +1243,12 @@ func (transaction *Transaction) Rename(
 	if request.OldParentID <= 0 || request.NewParentID <= 0 {
 		return RenameResult{}, fmt.Errorf("%w: parent IDs must be positive", ErrInvalidOperation)
 	}
+	if request.ExpectedSourceID <= 0 ||
+		!request.ExpectedSourceKind.valid() ||
+		request.ExpectedSourceKind == GlobalRoot ||
+		request.ExpectedSourceKind == LibraryRoot {
+		return RenameResult{}, fmt.Errorf("%w: invalid expected source", ErrInvalidOperation)
+	}
 	if err := validateName(request.OldName); err != nil {
 		return RenameResult{}, fmt.Errorf("%w: invalid old name: %v", ErrInvalidOperation, err)
 	}
@@ -1285,6 +1291,14 @@ func (transaction *Transaction) Rename(
 	)
 	if err != nil {
 		return RenameResult{}, err
+	}
+	if source.ID != request.ExpectedSourceID ||
+		source.Kind != request.ExpectedSourceKind {
+		if source.Kind == ProjectionFile &&
+			request.ExpectedSourceKind != ProjectionFile {
+			return RenameResult{}, ErrReadOnly
+		}
+		return RenameResult{}, ErrNotFound
 	}
 	if source.Kind == GlobalRoot || source.Kind == LibraryRoot {
 		return RenameResult{}, ErrProtected
@@ -2106,8 +2120,7 @@ func validateSetAttributes(request SetAttributes) error {
 		request.UID == nil &&
 		request.GID == nil &&
 		request.AtimeNS == nil &&
-		request.MtimeNS == nil &&
-		!request.TouchCtime {
+		request.MtimeNS == nil {
 		return fmt.Errorf("%w: no attributes were provided", ErrInvalidNode)
 	}
 	if request.Mode != nil && *request.Mode != request.Mode.Perm() {

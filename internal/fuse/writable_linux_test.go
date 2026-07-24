@@ -250,20 +250,57 @@ func TestWritableFuseDirectoryAndOverlayLifecycle(t *testing.T) {
 	if _, err := fixture.repository.Child(context.Background(), movies.record.ID, "cover.jpg"); !errors.Is(err, namespace.ErrNotFound) {
 		t.Errorf("unlinked path error = %v, want ErrNotFound", err)
 	}
-	result, errno := handle.Read(ctx, make([]byte, 10), 0)
+	if written, errno := handle.Write(ctx, []byte("X"), 0); errno != 0 || written != 1 {
+		t.Fatalf("Write active unlinked handle = %d/%v, want 1/OK", written, errno)
+	}
+	var unlinkedAttr gofuse.AttrOut
+	if errno := fileNode.Setattr(ctx, handle, &gofuse.SetAttrIn{
+		SetAttrInCommon: gofuse.SetAttrInCommon{
+			Valid: gofuse.FATTR_MODE |
+				gofuse.FATTR_UID |
+				gofuse.FATTR_GID |
+				gofuse.FATTR_SIZE |
+				gofuse.FATTR_ATIME |
+				gofuse.FATTR_MTIME,
+			Mode:      0o604,
+			Owner:     gofuse.Owner{Uid: 3000, Gid: 3001},
+			Size:      6,
+			Atime:     21,
+			Atimensec: 22,
+			Mtime:     23,
+			Mtimensec: 24,
+		},
+	}, &unlinkedAttr); errno != 0 {
+		t.Fatalf("Setattr active unlinked handle errno = %v", errno)
+	}
+	if unlinkedAttr.Size != 6 ||
+		unlinkedAttr.Mode != syscall.S_IFREG|0o604 ||
+		unlinkedAttr.Uid != 3000 ||
+		unlinkedAttr.Gid != 3001 ||
+		unlinkedAttr.Atime != 21 ||
+		unlinkedAttr.Atimensec != 22 ||
+		unlinkedAttr.Mtime != 23 ||
+		unlinkedAttr.Mtimensec != 24 {
+		t.Errorf("active unlinked setattr attrs = %#v", unlinkedAttr.Attr)
+	}
+	result, errno := handle.Read(ctx, make([]byte, 6), 0)
 	if errno != 0 {
 		t.Fatalf("Read active unlinked handle errno = %v", errno)
 	}
-	content, status := result.Bytes(make([]byte, 10))
+	content, status := result.Bytes(make([]byte, 6))
 	result.Done()
-	if status != gofuse.OK || string(content) != "poster-ART" {
+	if status != gofuse.OK || string(content) != "Xoster" {
 		t.Errorf("active handle content = %q/%v", content, status)
 	}
-	var unlinkedAttr gofuse.AttrOut
 	if errno := fileNode.Getattr(ctx, handle, &unlinkedAttr); errno != 0 {
 		t.Fatalf("Getattr active unlinked handle errno = %v", errno)
 	}
-	if unlinkedAttr.Size != 10 || unlinkedAttr.Mode != syscall.S_IFREG|0o600 {
+	if unlinkedAttr.Size != 6 ||
+		unlinkedAttr.Mode != syscall.S_IFREG|0o604 ||
+		unlinkedAttr.Uid != 3000 ||
+		unlinkedAttr.Gid != 3001 ||
+		unlinkedAttr.Mtime != 23 ||
+		unlinkedAttr.Mtimensec != 24 {
 		t.Errorf("active unlinked attrs = %#v", unlinkedAttr.Attr)
 	}
 	if errno := fixture.libraryRoot.Rmdir(ctx, "Movies"); errno != 0 {
@@ -365,18 +402,62 @@ func TestWritableFuseRenameAndFailureMatrix(t *testing.T) {
 	}
 
 	sourceNode, sourceHandle := create("source", "source")
-	_, targetHandle := create("target", "target")
+	targetNode, targetHandle := create("target", "target")
 	if errno := movies.Rename(ctx, "source", movies, "target", 0); errno != 0 {
 		t.Fatalf("Overlay replacement Rename errno = %v", errno)
 	}
-	result, errno := targetHandle.Read(ctx, make([]byte, 6), 0)
+	if written, errno := targetHandle.Write(ctx, []byte("OLD"), 0); errno != 0 || written != 3 {
+		t.Fatalf("Write replaced active handle = %d/%v, want 3/OK", written, errno)
+	}
+	var replacedAttr gofuse.AttrOut
+	if errno := targetNode.Setattr(ctx, targetHandle, &gofuse.SetAttrIn{
+		SetAttrInCommon: gofuse.SetAttrInCommon{
+			Valid: gofuse.FATTR_MODE |
+				gofuse.FATTR_UID |
+				gofuse.FATTR_GID |
+				gofuse.FATTR_SIZE |
+				gofuse.FATTR_ATIME |
+				gofuse.FATTR_MTIME,
+			Mode:      0o602,
+			Owner:     gofuse.Owner{Uid: 4000, Gid: 4001},
+			Size:      4,
+			Atime:     31,
+			Atimensec: 32,
+			Mtime:     33,
+			Mtimensec: 34,
+		},
+	}, &replacedAttr); errno != 0 {
+		t.Fatalf("Setattr replaced active handle errno = %v", errno)
+	}
+	if replacedAttr.Size != 4 ||
+		replacedAttr.Mode != syscall.S_IFREG|0o602 ||
+		replacedAttr.Uid != 4000 ||
+		replacedAttr.Gid != 4001 ||
+		replacedAttr.Atime != 31 ||
+		replacedAttr.Atimensec != 32 ||
+		replacedAttr.Mtime != 33 ||
+		replacedAttr.Mtimensec != 34 {
+		t.Errorf("replaced active setattr attrs = %#v", replacedAttr.Attr)
+	}
+	result, errno := targetHandle.Read(ctx, make([]byte, 4), 0)
 	if errno != 0 {
 		t.Fatalf("Read replaced active handle errno = %v", errno)
 	}
-	content, status := result.Bytes(make([]byte, 6))
+	content, status := result.Bytes(make([]byte, 4))
 	result.Done()
-	if status != gofuse.OK || string(content) != "target" {
+	if status != gofuse.OK || string(content) != "OLDg" {
 		t.Errorf("replaced active handle = %q/%v", content, status)
+	}
+	if errno := targetNode.Getattr(ctx, targetHandle, &replacedAttr); errno != 0 {
+		t.Fatalf("Getattr replaced active handle errno = %v", errno)
+	}
+	if replacedAttr.Size != 4 ||
+		replacedAttr.Mode != syscall.S_IFREG|0o602 ||
+		replacedAttr.Uid != 4000 ||
+		replacedAttr.Gid != 4001 ||
+		replacedAttr.Mtime != 33 ||
+		replacedAttr.Mtimensec != 34 {
+		t.Errorf("replaced active attrs = %#v", replacedAttr.Attr)
 	}
 	reopened, _, errno := sourceNode.Open(ctx, unix.O_RDONLY)
 	if errno != 0 {

@@ -278,6 +278,7 @@ func (current *node) Setattr(
 		}
 	}
 
+	requestHandle, handleBased := file.(*overlayHandle)
 	objectChanged := false
 	if current.record.Kind == namespace.OverlayFile &&
 		(hasSize || hasAtime || hasMtime) {
@@ -312,20 +313,29 @@ func (current *node) Setattr(
 		objectChanged = true
 	}
 
-	metadataChanged := attributes.Mode != nil ||
+	virtualChanged := attributes.Mode != nil ||
 		attributes.UID != nil ||
-		attributes.GID != nil ||
-		attributes.AtimeNS != nil ||
-		attributes.MtimeNS != nil ||
+		attributes.GID != nil
+	directoryTimesChanged := attributes.AtimeNS != nil ||
+		attributes.MtimeNS != nil
+	metadataChanged := virtualChanged ||
+		directoryTimesChanged ||
 		objectChanged
-	if metadataChanged {
-		attributes.TouchCtime = objectChanged
+	persistMetadata := (current.record.Kind == namespace.Directory &&
+		(virtualChanged || directoryTimesChanged)) ||
+		(current.record.Kind == namespace.OverlayFile && virtualChanged)
+	if persistMetadata {
 		record, err := current.writer.SetAttributes(ctx, attributes)
 		if err != nil {
-			return errorNumber(err)
-		}
-		if handle, ok := file.(*overlayHandle); ok {
-			handle.updateRecord(record)
+			if current.record.Kind == namespace.OverlayFile &&
+				handleBased &&
+				errors.Is(err, namespace.ErrNotFound) {
+				requestHandle.updateVirtualAttributes(attributes)
+			} else {
+				return errorNumber(err)
+			}
+		} else if handleBased {
+			requestHandle.updateRecord(record)
 		}
 	}
 	if errno := current.Getattr(ctx, file, out); errno != 0 {
@@ -604,11 +614,13 @@ func (current *node) Rename(
 	if _, err := current.writer.Update(ctx, operation, func(transaction *namespace.Transaction) error {
 		var err error
 		result, err = transaction.Rename(ctx, namespace.RenameNode{
-			OldParentID: current.record.ID,
-			OldName:     name,
-			NewParentID: targetParent.record.ID,
-			NewName:     newName,
-			NoReplace:   flags == unix.RENAME_NOREPLACE,
+			OldParentID:        current.record.ID,
+			OldName:            name,
+			NewParentID:        targetParent.record.ID,
+			NewName:            newName,
+			NoReplace:          flags == unix.RENAME_NOREPLACE,
+			ExpectedSourceID:   source.ID,
+			ExpectedSourceKind: source.Kind,
 		})
 		return err
 	}); err != nil {

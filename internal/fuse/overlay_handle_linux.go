@@ -149,6 +149,23 @@ func (handle *overlayHandle) updateRecord(record namespace.Node) {
 	handle.record = record
 }
 
+func (handle *overlayHandle) updateVirtualAttributes(
+	attributes namespace.SetAttributes,
+) {
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+	if attributes.Mode != nil {
+		handle.record.Attributes.Mode = attributes.Mode.Perm()
+	}
+	if attributes.UID != nil {
+		handle.record.Attributes.UID = *attributes.UID
+	}
+	if attributes.GID != nil {
+		handle.record.Attributes.GID = *attributes.GID
+	}
+	handle.record.VirtualCtimeNS = time.Now().UTC().UnixNano()
+}
+
 func (handle *overlayHandle) truncate(size int64) syscall.Errno {
 	handle.mu.Lock()
 	defer handle.mu.Unlock()

@@ -158,11 +158,13 @@ type CreateOverlay struct {
 }
 
 type RenameNode struct {
-	OldParentID int64
-	OldName     string
-	NewParentID int64
-	NewName     string
-	NoReplace   bool
+	OldParentID        int64
+	OldName            string
+	NewParentID        int64
+	NewName            string
+	NoReplace          bool
+	ExpectedSourceID   int64
+	ExpectedSourceKind NodeKind
 }
 
 type RenameResult struct {
@@ -171,13 +173,12 @@ type RenameResult struct {
 }
 
 type SetAttributes struct {
-	NodeID     int64
-	Mode       *fs.FileMode
-	UID        *uint32
-	GID        *uint32
-	AtimeNS    *int64
-	MtimeNS    *int64
-	TouchCtime bool
+	NodeID  int64
+	Mode    *fs.FileMode
+	UID     *uint32
+	GID     *uint32
+	AtimeNS *int64
+	MtimeNS *int64
 }
 
 type Node struct {
