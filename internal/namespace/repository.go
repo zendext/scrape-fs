@@ -1301,6 +1301,9 @@ func (transaction *Transaction) MoveProjection(
 	if source.Kind != ProjectionFile {
 		return Node{}, ErrReadOnly
 	}
+	if source.OriginScrapeID != nil {
+		return Node{}, ErrBatchOwnedProjection
+	}
 	if request.OldParentID == request.NewParentID && request.OldName == request.NewName {
 		return source, nil
 	}
@@ -1380,6 +1383,9 @@ func (transaction *Transaction) RemoveProjection(
 	if node.Kind != ProjectionFile {
 		return Node{}, ErrReadOnly
 	}
+	if node.OriginScrapeID != nil {
+		return Node{}, ErrBatchOwnedProjection
+	}
 	return transaction.removeNode(ctx, node)
 }
 
@@ -1412,6 +1418,9 @@ func (transaction *Transaction) RebindProjection(
 	}
 	if node.Kind != ProjectionFile || node.Source == nil {
 		return Node{}, ErrReadOnly
+	}
+	if node.OriginScrapeID != nil {
+		return Node{}, ErrBatchOwnedProjection
 	}
 	if *node.Source != request.ExpectedSource {
 		return Node{}, ErrConflict

@@ -298,6 +298,13 @@ func TestProjectionControlReturnsStableDomainErrors(t *testing.T) {
 	}
 }
 
+func TestProjectionBatchOwnershipErrorCodeIsStable(t *testing.T) {
+	t.Parallel()
+	if got := classifyError(projection.ErrBatchOwnedProjection); got != "BatchOwnedProjection" {
+		t.Errorf("classifyError = %q, want BatchOwnedProjection", got)
+	}
+}
+
 func TestProjectionControlRejectsUnauthorizedCreateBeforeServiceCall(t *testing.T) {
 	projectionService := &countingProjectionService{}
 	socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")

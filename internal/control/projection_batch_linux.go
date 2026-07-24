@@ -712,6 +712,8 @@ func classifyError(err error) string {
 		return "ProjectionNotFound"
 	case errors.Is(err, projection.ErrConfirmationMismatch):
 		return "ConfirmationMismatch"
+	case errors.Is(err, projection.ErrBatchOwnedProjection):
+		return "BatchOwnedProjection"
 	case errors.Is(err, projectionbatch.ErrBatchNotFound):
 		return "BatchNotFound"
 	case errors.Is(err, projectionbatch.ErrAlreadyUndone):

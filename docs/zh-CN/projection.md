@@ -66,6 +66,8 @@ Move 只接受同一 Library 内不存在的目标。它保留稳定 node ID 和
 
 Remove 只删除 Projection 节点。它向 LibraryRoot 清理空的 managed Directory，同时保留用户创建和非空目录；写一条 operation log，并使 namespace version 增加 1。Move 或 remove 失败时，namespace、version、operation log 和所有源文件都保持不变。两个命令均返回 `scrapefs.projection-result/v1`。
 
+Move、remove 和 rebind 都是 direct Projection 操作。`origin_scrape_id` 指向 Projection Batch 的节点必须返回稳定错误 `BatchOwnedProjection`。拒绝操作后 Batch provenance 和后续 show/undo 行为保持完整。
+
 ## 2. 源路径安全
 
 第一版接受绝对源路径，不使用 Source Root 或逻辑磁盘别名。

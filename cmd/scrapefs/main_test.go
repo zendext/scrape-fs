@@ -249,6 +249,13 @@ func TestRunGarbageCollectWritesDeterministicJSON(t *testing.T) {
 	}
 }
 
+func TestErrorCodeReturnsBatchOwnedProjection(t *testing.T) {
+	t.Parallel()
+	if got := errorCode(projection.ErrBatchOwnedProjection); got != "BatchOwnedProjection" {
+		t.Errorf("errorCode = %q, want BatchOwnedProjection", got)
+	}
+}
+
 func TestRunHelpListsProjectionBatchCommands(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

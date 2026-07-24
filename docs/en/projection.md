@@ -68,6 +68,8 @@ Move accepts only a missing target in the same Library. It preserves the stable 
 
 Remove deletes only the Projection node. It prunes empty managed directories toward LibraryRoot while retaining user-created and non-empty directories, writes one operation-log entry, and increments namespace version once. A failed move or remove leaves the namespace, version, operation log, and every source file unchanged. Both commands return `scrapefs.projection-result/v1`.
 
+Move, remove, and rebind are direct-Projection operations. They reject a Projection whose `origin_scrape_id` identifies a Projection Batch with the stable `BatchOwnedProjection` error. Rejection leaves Batch provenance and later show/undo behavior intact.
+
 ## 2. Source-Path Safety
 
 The first version accepts absolute source paths and has no Source Root registry or logical disk aliases.

@@ -173,6 +173,8 @@ candidate eligible for unsafe deletion.
 
 `projection rebind` without `--confirm` securely opens the proposed source and returns `scrapefs.projection-rebind-result/v1` with status `confirmation_required`, the stable Projection snapshot, complete previous and proposed cached source metadata, and a confirmation digest bound to the node ID, target, source paths, and strict identities. Repeating the command with `--confirm <digest>` reopens and revalidates the source and applies only the exact preview, returning status `applied`. A changed Projection or source returns `ConfirmationMismatch` with no mutation. Successful rebind preserves the node ID and virtual target, updates source metadata and virtual ctime, writes one audit entry, and does not increment namespace version.
 
+These three lifecycle commands apply only to direct Projections whose `origin_scrape_id` is null. A Projection created by `projection batch apply` returns `BatchOwnedProjection`; its path, source metadata, batch entry, managed directories, namespace version, and operation log remain unchanged. Batch-owned Projections continue to be managed through Batch show and undo.
+
 All Projection commands require administrator or control-user authorization. Missing targets return `ProjectionNotFound`; unsafe, missing, denied, or non-regular rebind sources use the same stable source error codes as `projection add`.
 
 `projection batch validate` and `projection batch apply` read UTF-8 JSON through `--file <path>` and read stdin through `--file -`. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically. The CLI connects to `/run/scrapefs/scrapefs.sock` by default and accepts global `--socket <path>` for a configured override.

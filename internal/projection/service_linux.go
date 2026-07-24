@@ -25,6 +25,7 @@ var (
 	ErrSourceNotRegular       = errors.New("projection source is not a regular file")
 	ErrProjectionNotFound     = errors.New("projection not found")
 	ErrConfirmationMismatch   = errors.New("projection rebind confirmation mismatch")
+	ErrBatchOwnedProjection   = namespace.ErrBatchOwnedProjection
 )
 
 type CreateRequest struct {
@@ -543,6 +544,14 @@ func (service *Service) projectionAt(
 		return namespace.Library{}, namespace.Node{}, fmt.Errorf(
 			"%w: %s:/%s",
 			ErrProjectionNotFound,
+			libraryName,
+			relativePath,
+		)
+	}
+	if node.OriginScrapeID != nil {
+		return namespace.Library{}, namespace.Node{}, fmt.Errorf(
+			"%w: %s:/%s",
+			ErrBatchOwnedProjection,
 			libraryName,
 			relativePath,
 		)
