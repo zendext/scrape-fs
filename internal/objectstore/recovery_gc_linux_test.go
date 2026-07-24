@@ -228,6 +228,79 @@ func TestGarbageCollectRechecksReferencesImmediatelyBeforeDeletion(t *testing.T)
 	assertObjectReferenceExists(t, fixture.database, objectID)
 }
 
+func TestGarbageCollectReclaimsPostRenameCreateFailureWithoutRestart(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	fixture := newFixtureWithStoreOptions(t, Options{
+		OrphanGracePeriod: time.Hour,
+		Now:               func() time.Time { return now },
+	})
+
+	referenced, _, err := fixture.store.Create(
+		context.Background(),
+		overlayOperation("library/referenced"),
+		overlayRequest(fixture.libraryRootID, "referenced"),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Create referenced: %v", err)
+	}
+	if err := referenced.Close(); err != nil {
+		t.Fatalf("Close referenced: %v", err)
+	}
+	setObjectTimes(t, fixture.database, referenced.ObjectID, now.Add(-3*time.Hour))
+	setFileTimes(t, fixture.storePath, liveDirectory, referenced.ObjectID, now.Add(-3*time.Hour))
+
+	createFailure := errors.New("fail after rename")
+	fixture.store.hooks.afterRename = func(int64) error {
+		return createFailure
+	}
+	handle, node, err := fixture.store.CreateWithFlags(
+		context.Background(),
+		overlayOperation("library/abandoned"),
+		overlayRequest(fixture.libraryRootID, "abandoned"),
+		nil,
+		0,
+	)
+	fixture.store.hooks.afterRename = nil
+	if handle != nil {
+		handle.Close()
+	}
+	if !errors.Is(err, createFailure) {
+		t.Fatalf("CreateWithFlags error = %v, want failure after rename", err)
+	}
+	if node.ID != 0 {
+		t.Errorf("created node = %#v, want zero value", node)
+	}
+	abandonedID, exists := latestObjectID(t, fixture.database)
+	if !exists || abandonedID == referenced.ObjectID {
+		t.Fatalf("abandoned object ID = %d exists=%v", abandonedID, exists)
+	}
+	state, _, liveAt, _ := readObject(t, fixture.database, abandonedID)
+	if state != stateStaging || liveAt != nil {
+		t.Fatalf("abandoned object state = %q live_at=%v, want STAGING/NULL", state, liveAt)
+	}
+	assertObjectPathExists(t, fixture.storePath, stagingDirectory, abandonedID, false)
+	assertObjectPathExists(t, fixture.storePath, liveDirectory, abandonedID, true)
+	setStagingObjectTimes(t, fixture.database, abandonedID, now.Add(-3*time.Hour))
+	setFileTimes(t, fixture.storePath, liveDirectory, abandonedID, now.Add(-3*time.Hour))
+
+	result, err := fixture.store.GarbageCollect(context.Background())
+	if err != nil {
+		t.Fatalf("GarbageCollect: %v", err)
+	}
+	if result.DeletedStaging != 1 ||
+		result.RetainedReferenced != 1 ||
+		len(result.Errors) != 0 {
+		t.Errorf("GC result = %#v", result)
+	}
+	assertObjectPathExists(t, fixture.storePath, liveDirectory, abandonedID, false)
+	if objectRecordExists(t, fixture.database, abandonedID) {
+		t.Errorf("abandoned STAGING record %d still exists", abandonedID)
+	}
+	assertObjectAndRecordExist(t, fixture, referenced.ObjectID, true)
+	assertObjectReferenceExists(t, fixture.database, referenced.ObjectID)
+}
+
 func TestGarbageCollectRetainsUntrackedObjectWithActiveHandle(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	fixture := newFixtureWithStoreOptions(t, Options{
@@ -428,6 +501,27 @@ func setObjectTimes(t *testing.T, opened *database.DB, objectID int64, at time.T
 		return transaction.Commit()
 	}); err != nil {
 		t.Fatalf("set object times: %v", err)
+	}
+}
+
+func setStagingObjectTimes(t *testing.T, opened *database.DB, objectID int64, at time.Time) {
+	t.Helper()
+	if err := opened.UseConnection(context.Background(), func(connection *database.Connection) error {
+		transaction, err := connection.BeginTx(context.Background(), nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err := transaction.ExecContext(context.Background(), `
+			UPDATE objects
+			SET created_at_ns = ?, updated_at_ns = ?
+			WHERE id = ? AND state = 'STAGING'
+		`, at.UnixNano(), at.UnixNano(), objectID); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}); err != nil {
+		t.Fatalf("set STAGING object times: %v", err)
 	}
 }
 

@@ -448,11 +448,10 @@ func (store *Store) reclaimRecord(
 		var directory *os.File
 		switch record.state {
 		case stateStaging:
-			if inLive {
-				return fmt.Errorf("STAGING object %d unexpectedly exists in live", objectID)
-			}
 			if inStaging {
 				directory = store.staging
+			} else if inLive {
+				directory = store.live
 			}
 			outcome = reclaimDeletedStaging
 		case stateLive:
