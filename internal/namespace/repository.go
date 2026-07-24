@@ -1243,10 +1243,14 @@ func (transaction *Transaction) Rename(
 	if request.OldParentID <= 0 || request.NewParentID <= 0 {
 		return RenameResult{}, fmt.Errorf("%w: parent IDs must be positive", ErrInvalidOperation)
 	}
-	if request.ExpectedSourceID <= 0 ||
-		!request.ExpectedSourceKind.valid() ||
-		request.ExpectedSourceKind == GlobalRoot ||
-		request.ExpectedSourceKind == LibraryRoot {
+	if request.ExpectedSourceID <= 0 {
+		return RenameResult{}, fmt.Errorf("%w: invalid expected source", ErrInvalidOperation)
+	}
+	switch request.ExpectedSourceKind {
+	case Directory, OverlayFile:
+	case ProjectionFile:
+		return RenameResult{}, ErrReadOnly
+	default:
 		return RenameResult{}, fmt.Errorf("%w: invalid expected source", ErrInvalidOperation)
 	}
 	if err := validateName(request.OldName); err != nil {

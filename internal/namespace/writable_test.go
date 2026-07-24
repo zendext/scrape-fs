@@ -325,6 +325,82 @@ func TestTransactionRenameRejectsDirectoryDescendantMove(t *testing.T) {
 	}
 }
 
+func TestTransactionRenameRejectsProjectionSource(t *testing.T) {
+	opened := openTestDatabase(t)
+	repository := NewRepository(opened)
+	ctx := context.Background()
+	rootID := createTestLibraryRoot(t, repository)
+
+	var projection Node
+	if _, err := repository.Update(
+		ctx,
+		testOperation("projection.create"),
+		func(transaction *Transaction) error {
+			var err error
+			projection, err = transaction.CreateNode(ctx, CreateNode{
+				ParentID: rootID,
+				Name:     "source.mkv",
+				Kind:     ProjectionFile,
+				Source: &ProjectionSource{
+					Path:          "/source.mkv",
+					DeviceID:      1,
+					Inode:         2,
+					Size:          3,
+					AtimeNS:       4,
+					MtimeNS:       5,
+					SourceCtimeNS: 6,
+					VerifiedAtNS:  7,
+				},
+				Creator: Actor{Kind: ActorSystem},
+				Attributes: Attributes{
+					Mode: 0o444,
+				},
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("create Projection: %v", err)
+	}
+	assertVersionAndLogCount(t, opened, 2, 2)
+
+	if _, err := repository.Update(
+		ctx,
+		Operation{
+			Name:  "node.rename",
+			Actor: Actor{Kind: ActorSystem},
+			Details: OperationDetails{
+				Paths:     []string{"library/source.mkv", "library/renamed.mkv"},
+				NodeKinds: []NodeKind{ProjectionFile, ProjectionFile},
+			},
+		},
+		func(transaction *Transaction) error {
+			_, err := transaction.Rename(ctx, RenameNode{
+				OldParentID:        rootID,
+				OldName:            "source.mkv",
+				NewParentID:        rootID,
+				NewName:            "renamed.mkv",
+				ExpectedSourceID:   projection.ID,
+				ExpectedSourceKind: projection.Kind,
+			})
+			return err
+		},
+	); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Projection Rename error = %v, want ErrReadOnly", err)
+	}
+	assertVersionAndLogCount(t, opened, 2, 2)
+
+	source, err := repository.Child(ctx, rootID, "source.mkv")
+	if err != nil {
+		t.Fatalf("read Projection source after rejected Rename: %v", err)
+	}
+	if source.ID != projection.ID || source.Kind != ProjectionFile {
+		t.Errorf("Projection source after rejected Rename = %#v, want %#v", source, projection)
+	}
+	if _, err := repository.Child(ctx, rootID, "renamed.mkv"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Projection target error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestTransactionRenameRejectsStaleWritableSourceReplacedByProjection(t *testing.T) {
 	opened := openTestDatabase(t)
 	repository := NewRepository(opened)
