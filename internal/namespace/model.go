@@ -16,6 +16,12 @@ var (
 	ErrInvalidPath      = errors.New("invalid relative namespace path")
 	ErrInvalidRoot      = errors.New("invalid library root")
 	ErrNotFound         = errors.New("namespace node not found")
+	ErrNotEmpty         = errors.New("directory not empty")
+	ErrCrossLibrary     = errors.New("cross-library operation")
+	ErrProtected        = errors.New("protected namespace node")
+	ErrReadOnly         = errors.New("read-only namespace node")
+	ErrIsDirectory      = errors.New("target is a directory")
+	ErrNotDirectory     = errors.New("target is not a directory")
 )
 
 type NodeKind string
@@ -149,6 +155,29 @@ type CreateOverlay struct {
 	Name       string
 	Creator    Actor
 	Attributes Attributes
+}
+
+type RenameNode struct {
+	OldParentID int64
+	OldName     string
+	NewParentID int64
+	NewName     string
+	NoReplace   bool
+}
+
+type RenameResult struct {
+	Node     Node
+	Replaced *Node
+}
+
+type SetAttributes struct {
+	NodeID     int64
+	Mode       *fs.FileMode
+	UID        *uint32
+	GID        *uint32
+	AtimeNS    *int64
+	MtimeNS    *int64
+	TouchCtime bool
 }
 
 type Node struct {

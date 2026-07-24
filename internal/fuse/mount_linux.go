@@ -46,6 +46,9 @@ func Mount(
 	if err != nil {
 		return nil, err
 	}
+	if root.writer == nil || root.objectWriter == nil {
+		return nil, errors.New("writable namespace and object store are required")
+	}
 	if err := clearStaleMount(configuration.Mountpoint); err != nil {
 		return nil, err
 	}

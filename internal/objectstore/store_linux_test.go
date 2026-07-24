@@ -520,6 +520,38 @@ func TestStatObjectReturnsLiveFileMetadata(t *testing.T) {
 	}
 }
 
+func TestCreateWithFlagsConfiguresAppendBeforeReturningHandle(t *testing.T) {
+	fixture := newFixture(t)
+	handle, _, err := fixture.store.CreateWithFlags(
+		context.Background(),
+		overlayOperation("library/poster.jpg"),
+		overlayRequest(fixture.libraryRootID, "poster.jpg"),
+		strings.NewReader("first"),
+		unix.O_APPEND,
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer handle.Close()
+
+	if _, err := handle.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	if _, err := handle.Write([]byte("-second")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, err := handle.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("rewind: %v", err)
+	}
+	content, err := io.ReadAll(handle)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if got, want := string(content), "first-second"; got != want {
+		t.Errorf("content = %q, want %q", got, want)
+	}
+}
+
 func TestDeleteObjectKeepsOpenedDescriptorsValid(t *testing.T) {
 	fixture := newFixture(t)
 	content := []byte("content")
