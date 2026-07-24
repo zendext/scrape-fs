@@ -181,6 +181,8 @@ def add_control_arguments(parser):
 
 
 def handle_plan(arguments):
+    output_paths = plan_output_paths(arguments.batch, arguments.artifacts)
+    invalidate_plan_outputs(output_paths)
     try:
         report, batch, artifacts = create_plan(
             arguments.source,
@@ -199,10 +201,14 @@ def handle_plan(arguments):
         write_json(sys.stdout, report)
         return 3
 
-    write_json_file(arguments.batch, batch)
-    write_json_file(arguments.artifacts, artifacts)
-    report["batch_file"] = normalized_output_path(arguments.batch)
-    report["artifacts_file"] = normalized_output_path(arguments.artifacts)
+    try:
+        write_json_file(output_paths[0], batch)
+        write_json_file(output_paths[1], artifacts)
+    except Exception:
+        invalidate_plan_outputs(output_paths)
+        raise
+    report["batch_file"] = os.fspath(output_paths[0])
+    report["artifacts_file"] = os.fspath(output_paths[1])
     write_json(sys.stdout, report)
     return 0
 
@@ -881,17 +887,11 @@ def plan_episodes(
 ):
     tvshow_path = first_named(nfos, "tvshow.nfo")
     tvshow = parse_nfo(tvshow_path, "tvshow") if tvshow_path else {}
-    first_match = EPISODE_PATTERN.search(videos[0].stem)
-    if first_match is None:
-        raise ManualHandling(
-            "ambiguous_layout",
-            "episode planning requires standard SxxEyy filenames",
-            videos[0],
-        )
+    inferred_show_title = infer_episode_series_title(videos)
     show_title = (
         metadata_text(metadata, "show_title")
         or tvshow.get("title")
-        or infer_show_title(videos[0].stem, first_match.start())
+        or inferred_show_title
     )
     show_year = metadata_year(metadata, "show_year") or tvshow.get("year")
     provider_ids = merge_provider_ids(
@@ -1101,12 +1101,52 @@ def child_text(root, name):
 def infer_movie_name(stem):
     year_match = YEAR_PATTERN.search(stem)
     year = int(year_match.group(1)) if year_match else None
-    title_part = stem[: year_match.start()] if year_match else stem
+    title_part = stem
+    if year_match:
+        title_part = stem[: year_match.start()]
+        before = title_part.rstrip()
+        after = stem[year_match.end() :].lstrip()
+        delimiters = {"(": ")", "[": "]", "{": "}"}
+        if before and before[-1] in delimiters and after.startswith(
+            delimiters[before[-1]]
+        ):
+            title_part = before[:-1].rstrip()
     return humanize_filename(title_part), year
 
 
 def infer_show_title(stem, episode_start):
     return humanize_filename(stem[:episode_start])
+
+
+def infer_episode_series_title(videos):
+    inferred = []
+    identities: dict[str, tuple[str, Path]] = {}
+    for video in sorted(videos, key=os.fspath):
+        match = EPISODE_PATTERN.search(video.stem)
+        if match is None:
+            raise ManualHandling(
+                "ambiguous_layout",
+                "episode planning requires standard SxxEyy filenames",
+                video,
+            )
+        title = infer_show_title(video.stem, match.start())
+        if not title:
+            continue
+        identity = title.casefold()
+        identities.setdefault(identity, (title, video))
+        inferred.append(title)
+    if len(identities) > 1:
+        titles = ", ".join(sorted(value[0] for value in identities.values()))
+        conflicting = sorted(
+            (value[1] for value in identities.values()),
+            key=os.fspath,
+        )[1]
+        raise ManualHandling(
+            "mixed_series",
+            f"episode directory contains multiple inferred series: {titles}",
+            conflicting,
+        )
+    return inferred[0] if inferred else None
 
 
 def infer_episode_title(stem, episode_end):
@@ -1779,13 +1819,50 @@ def normalized_existing_file(value):
     return os.fspath(path)
 
 
-def normalized_output_path(value):
-    return os.fspath(normalized_absolute_path(value))
+def plan_output_paths(batch, artifacts):
+    paths = (normalized_absolute_path(batch), normalized_absolute_path(artifacts))
+    if paths[0] == paths[1]:
+        invalidate_plan_outputs(paths[:1])
+        raise ValueError("batch and artifact outputs must use different paths")
+    return paths
+
+
+def invalidate_plan_outputs(paths):
+    errors: list[Exception] = []
+    for path in paths:
+        try:
+            status = path.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            errors.append(error)
+            continue
+        if stat.S_ISDIR(status.st_mode):
+            errors.append(ValueError(f"plan output path is a directory: {path}"))
+            continue
+        try:
+            path.unlink()
+        except OSError as error:
+            errors.append(error)
+    if errors:
+        raise OSError(
+            "cannot invalidate prior plan outputs: "
+            + "; ".join(str(error) for error in errors)
+        )
+
+
+def reject_duplicate_object_keys(pairs):
+    document = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError(f"duplicate JSON object field {key!r}")
+        document[key] = value
+    return document
 
 
 def read_json_file(path):
     with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        return json.load(handle, object_pairs_hook=reject_duplicate_object_keys)
 
 
 def write_json_file(path_value, value):

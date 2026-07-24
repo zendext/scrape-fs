@@ -208,6 +208,40 @@ class ScrapeFSMediaTests(unittest.TestCase):
         self.assertNotIn("source", artifact)
         self.assertIn("<title>Dune: Part One</title>", artifact["content"])
 
+    def test_normalizes_parenthesized_and_bracketed_movie_years(self):
+        cases = {
+            "Dune (2021).mkv": "Movies/Dune (2021)/Dune (2021).mkv",
+            "Arrival [2016].mkv": "Movies/Arrival (2016)/Arrival (2016).mkv",
+        }
+        for name, expected_target in cases.items():
+            with self.subTest(name=name):
+                source = self.root / name
+                source.write_text("fixture movie", encoding="utf-8")
+                batch = self.root / f"{source.stem}.batch.json"
+                artifacts = self.root / f"{source.stem}.artifacts.json"
+
+                result = self.run_tool(
+                    "plan",
+                    "--source",
+                    source,
+                    "--library",
+                    "media",
+                    "--profile",
+                    "jellyfin",
+                    "--batch",
+                    batch,
+                    "--artifacts",
+                    artifacts,
+                    "--ffprobe",
+                    self.ffprobe,
+                )
+
+                self.assertEqual(json.loads(result.stdout)["status"], "ready")
+                self.assertEqual(
+                    json.loads(batch.read_text())["entries"][0]["target"],
+                    expected_target,
+                )
+
     def test_plans_multiple_standard_episodes_and_subtitles(self):
         source = self.copy_fixture("episodes")
 
@@ -252,6 +286,45 @@ class ScrapeFSMediaTests(unittest.TestCase):
             ],
         )
 
+    def test_returns_manual_for_mixed_series_episode_directory(self):
+        source = self.root / "mixed-series"
+        source.mkdir()
+        (source / "Alpha.S01E01.One.mkv").write_text(
+            "fixture episode",
+            encoding="utf-8",
+        )
+        (source / "Beta.S01E02.Two.mkv").write_text(
+            "fixture episode",
+            encoding="utf-8",
+        )
+        batch = self.root / "mixed-series.batch.json"
+        artifacts = self.root / "mixed-series.artifacts.json"
+
+        result = self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 3)
+        self.assertIn(
+            "mixed_series",
+            [item["code"] for item in json.loads(result.stdout)["manual"]],
+        )
+        self.assertFalse(batch.exists())
+        self.assertFalse(artifacts.exists())
+
     def test_returns_explicit_manual_outcomes_for_unsupported_layouts(self):
         cases = {
             "multi-episode": "multi_episode_file",
@@ -286,6 +359,105 @@ class ScrapeFSMediaTests(unittest.TestCase):
                 self.assertIn(expected_code, [item["code"] for item in report["manual"]])
                 self.assertFalse(batch.exists())
                 self.assertFalse(artifacts.exists())
+
+    def test_manual_rerun_invalidates_previous_plan_outputs(self):
+        source = self.copy_fixture("movie-directory")
+        report, batch, artifacts = self.plan(source, "jellyfin")
+        self.assertEqual(report["status"], "ready")
+        self.assertTrue(batch.exists())
+        self.assertTrue(artifacts.exists())
+        (source / "Other.2022.mkv").write_text("second movie", encoding="utf-8")
+
+        rerun = self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+            check=False,
+        )
+
+        self.assertEqual(rerun.returncode, 3)
+        self.assertEqual(json.loads(rerun.stdout)["status"], "manual")
+        self.assertFalse(batch.exists())
+        self.assertFalse(artifacts.exists())
+
+    def test_rejects_duplicate_keys_in_metadata_and_artifact_manifest(self):
+        source = self.root / "movie.mkv"
+        source.write_text("fixture movie", encoding="utf-8")
+        metadata = self.root / "duplicate-metadata.json"
+        metadata.write_text(
+            '{"kind":"movie","title":"Reviewed","title":"Executed","year":2020}',
+            encoding="utf-8",
+        )
+        batch = self.root / "duplicate.batch.json"
+        artifacts = self.root / "duplicate.artifacts.json"
+
+        planned = self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--metadata",
+            metadata,
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+            check=False,
+        )
+        self.assertEqual(planned.returncode, 3)
+        self.assertIn(
+            "metadata_invalid",
+            [item["code"] for item in json.loads(planned.stdout)["manual"]],
+        )
+        self.assertFalse(batch.exists())
+        self.assertFalse(artifacts.exists())
+
+        mountpoint = self.root / "mount"
+        target_directory = mountpoint / "media" / "Movies" / "Movie"
+        target_directory.mkdir(parents=True)
+        reviewed = self.root / "reviewed.nfo"
+        executed = self.root / "executed.nfo"
+        reviewed.write_text("<movie><title>Reviewed</title></movie>\n", encoding="utf-8")
+        executed.write_text("<movie><title>Executed</title></movie>\n", encoding="utf-8")
+        manifest = self.root / "duplicate-manifest.json"
+        manifest.write_text(
+            (
+                '{"schema":"scrapefs.agent-artifacts/v1","library":"media",'
+                '"artifacts":[{"kind":"nfo",'
+                f'"source":{json.dumps(str(reviewed))},'
+                f'"source":{json.dumps(str(executed))},'
+                '"target":"media/Movies/Movie/movie.nfo"}]}'
+            ),
+            encoding="utf-8",
+        )
+
+        artifact_result = self.run_tool(
+            "artifacts",
+            "--manifest",
+            manifest,
+            "--mountpoint",
+            mountpoint,
+            check=False,
+        )
+        self.assertEqual(artifact_result.returncode, 5)
+        payload = json.loads(artifact_result.stdout)
+        self.assertEqual(payload["failed"][0]["code"], "invalid_manifest")
+        self.assertFalse((target_directory / "movie.nfo").exists())
 
     def test_does_not_follow_symlink_or_accept_remote_source(self):
         source = self.root / "symlink-source"
