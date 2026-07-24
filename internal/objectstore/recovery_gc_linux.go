@@ -78,6 +78,7 @@ const (
 	reclaimNone reclaimOutcome = iota
 	reclaimDeletedLive
 	reclaimDeletedStaging
+	reclaimDeletedUntracked
 	reclaimRetainedReferenced
 	reclaimRetainedActive
 	reclaimRetainedGrace
@@ -339,6 +340,10 @@ func (store *Store) GarbageCollect(ctx context.Context) (GCResult, error) {
 	orphanIDs = compactObjectIDs(orphanIDs)
 	for _, objectID := range orphanIDs {
 		result.Examined++
+		if store.active[objectID] > 0 {
+			result.RetainedActive++
+			continue
+		}
 		stagingEntry, inStaging := staging[objectID]
 		liveEntry, inLive := live[objectID]
 		if inStaging && inLive {
@@ -359,7 +364,15 @@ func (store *Store) GarbageCollect(ctx context.Context) (GCResult, error) {
 			result.RetainedGracePeriod++
 			continue
 		}
-		deleted, err := store.reclaimUntracked(ctx, directory, objectID)
+		if err := runHook(store.hooks.beforeDelete, objectID); err != nil {
+			result.Errors = append(result.Errors, GCError{
+				ObjectID: objectID,
+				Code:     "DeleteHookFailed",
+				Message:  err.Error(),
+			})
+			continue
+		}
+		outcome, err := store.reclaimUntracked(ctx, directory, objectID)
 		if err != nil {
 			result.Errors = append(result.Errors, GCError{
 				ObjectID: objectID,
@@ -368,9 +381,7 @@ func (store *Store) GarbageCollect(ctx context.Context) (GCResult, error) {
 			})
 			continue
 		}
-		if deleted {
-			result.DeletedUntracked++
-		}
+		applyReclaimOutcome(&result, outcome)
 	}
 	sort.Slice(result.Errors, func(left, right int) bool {
 		if result.Errors[left].ObjectID != result.Errors[right].ObjectID {
@@ -479,8 +490,11 @@ func (store *Store) reclaimUntracked(
 	ctx context.Context,
 	directory *os.File,
 	objectID int64,
-) (bool, error) {
-	deleted := false
+) (reclaimOutcome, error) {
+	if store.active[objectID] > 0 {
+		return reclaimRetainedActive, nil
+	}
+	outcome := reclaimNone
 	err := store.database.UseConnection(ctx, func(connection *database.Connection) error {
 		transaction, err := connection.BeginTx(ctx, nil)
 		if err != nil {
@@ -492,6 +506,10 @@ func (store *Store) reclaimUntracked(
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		if store.active[objectID] > 0 {
+			outcome = reclaimRetainedActive
+			return nil
+		}
 		entry, exists, err := statObjectEntry(directory, objectID)
 		if err != nil {
 			return err
@@ -502,10 +520,10 @@ func (store *Store) reclaimUntracked(
 		if err := unlinkObject(directory, objectID); err != nil {
 			return err
 		}
-		deleted = true
+		outcome = reclaimDeletedUntracked
 		return transaction.Commit()
 	})
-	return deleted, err
+	return outcome, err
 }
 
 func (store *Store) objectRecords(ctx context.Context) ([]objectRecord, error) {
@@ -728,6 +746,8 @@ func applyReclaimOutcome(result *GCResult, outcome reclaimOutcome) {
 		result.DeletedLive++
 	case reclaimDeletedStaging:
 		result.DeletedStaging++
+	case reclaimDeletedUntracked:
+		result.DeletedUntracked++
 	case reclaimRetainedReferenced:
 		result.RetainedReferenced++
 	case reclaimRetainedActive:

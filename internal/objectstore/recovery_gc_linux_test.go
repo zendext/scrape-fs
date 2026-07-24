@@ -228,6 +228,107 @@ func TestGarbageCollectRechecksReferencesImmediatelyBeforeDeletion(t *testing.T)
 	assertObjectReferenceExists(t, fixture.database, objectID)
 }
 
+func TestGarbageCollectRetainsUntrackedObjectWithActiveHandle(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	fixture := newFixtureWithStoreOptions(t, Options{
+		OrphanGracePeriod: time.Hour,
+		Now:               func() time.Time { return now },
+	})
+	handle, _, err := fixture.store.Create(
+		context.Background(),
+		overlayOperation("library/untracked-active"),
+		overlayRequest(fixture.libraryRootID, "untracked-active"),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	objectID := handle.ObjectID
+	removeOverlayReference(
+		t,
+		fixture.repository,
+		fixture.libraryRootID,
+		"untracked-active",
+	)
+	deleteObjectRecord(t, fixture.database, objectID)
+	setFileTimes(t, fixture.storePath, liveDirectory, objectID, now.Add(-3*time.Hour))
+
+	result, err := fixture.store.GarbageCollect(context.Background())
+	if err != nil {
+		t.Fatalf("GarbageCollect: %v", err)
+	}
+	if result.DeletedUntracked != 0 || result.RetainedActive != 1 {
+		t.Errorf("GC result = %#v", result)
+	}
+	assertObjectPathExists(t, fixture.storePath, liveDirectory, objectID, true)
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(handle.Fd()), &stat); err != nil {
+		t.Fatalf("Fstat active handle: %v", err)
+	}
+
+	if err := handle.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	result, err = fixture.store.GarbageCollect(context.Background())
+	if err != nil {
+		t.Fatalf("GarbageCollect after close: %v", err)
+	}
+	if result.DeletedUntracked != 1 || result.RetainedActive != 0 {
+		t.Errorf("GC after close result = %#v", result)
+	}
+	assertObjectPathExists(t, fixture.storePath, liveDirectory, objectID, false)
+}
+
+func TestGarbageCollectRechecksUntrackedActiveHandleBeforeDeletion(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	fixture := newFixtureWithStoreOptions(t, Options{
+		OrphanGracePeriod: time.Hour,
+		Now:               func() time.Time { return now },
+	})
+	const objectID int64 = 99
+	writeObjectFile(t, fixture.storePath, liveDirectory, objectID, "untracked")
+	setFileTimes(t, fixture.storePath, liveDirectory, objectID, now.Add(-3*time.Hour))
+
+	var handle *File
+	fixture.store.hooks.beforeDelete = func(candidate int64) error {
+		if candidate != objectID {
+			return nil
+		}
+		raw, err := openExistingObject(fixture.store.live, objectID, unix.O_RDWR)
+		if err != nil {
+			return err
+		}
+		handle = &File{File: raw, ObjectID: objectID}
+		fixture.store.trackHandle(handle)
+		return nil
+	}
+
+	result, err := fixture.store.GarbageCollect(context.Background())
+	if err != nil {
+		t.Fatalf("GarbageCollect: %v", err)
+	}
+	if result.DeletedUntracked != 0 || result.RetainedActive != 1 {
+		t.Errorf("GC result = %#v", result)
+	}
+	assertObjectPathExists(t, fixture.storePath, liveDirectory, objectID, true)
+	if handle == nil {
+		t.Fatal("before-delete hook did not open a handle")
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatalf("Close injected handle: %v", err)
+	}
+
+	fixture.store.hooks.beforeDelete = nil
+	result, err = fixture.store.GarbageCollect(context.Background())
+	if err != nil {
+		t.Fatalf("GarbageCollect after close: %v", err)
+	}
+	if result.DeletedUntracked != 1 {
+		t.Errorf("GC after close result = %#v", result)
+	}
+	assertObjectPathExists(t, fixture.storePath, liveDirectory, objectID, false)
+}
+
 func TestDeleteObjectDefersReclamationWhileHandleIsActive(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	fixture := newFixtureWithStoreOptions(t, Options{
@@ -327,6 +428,27 @@ func setObjectTimes(t *testing.T, opened *database.DB, objectID int64, at time.T
 		return transaction.Commit()
 	}); err != nil {
 		t.Fatalf("set object times: %v", err)
+	}
+}
+
+func deleteObjectRecord(t *testing.T, opened *database.DB, objectID int64) {
+	t.Helper()
+	if err := opened.UseConnection(context.Background(), func(connection *database.Connection) error {
+		transaction, err := connection.BeginTx(context.Background(), nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err := transaction.ExecContext(
+			context.Background(),
+			"DELETE FROM objects WHERE id = ?",
+			objectID,
+		); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}); err != nil {
+		t.Fatalf("delete object record: %v", err)
 	}
 }
 
