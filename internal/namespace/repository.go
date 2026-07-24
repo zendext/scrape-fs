@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zendext/scrape-fs/internal/database"
@@ -17,14 +18,34 @@ import (
 )
 
 type Repository struct {
-	database *database.DB
-	now      func() time.Time
+	database    *database.DB
+	now         func() time.Time
+	listenersMu sync.RWMutex
+	listeners   []CommitListener
 }
 
 func NewRepository(opened *database.DB) *Repository {
 	return &Repository{
 		database: opened,
 		now:      time.Now,
+	}
+}
+
+func (repository *Repository) AddCommitListener(listener CommitListener) {
+	if listener == nil {
+		return
+	}
+	repository.listenersMu.Lock()
+	defer repository.listenersMu.Unlock()
+	repository.listeners = append(repository.listeners, listener)
+}
+
+func (repository *Repository) notifyCommit(commit Commit) {
+	repository.listenersMu.RLock()
+	listeners := append([]CommitListener(nil), repository.listeners...)
+	repository.listenersMu.RUnlock()
+	for _, listener := range listeners {
+		listener(commit)
 	}
 }
 
@@ -137,7 +158,7 @@ func (repository *Repository) SetAttributes(
 
 	var updated Node
 	err = repository.database.UseWrite(ctx, func() error {
-		return repository.useConnection(ctx, func(connection *database.Connection) error {
+		if err := repository.useConnection(ctx, func(connection *database.Connection) error {
 			transaction, err := connection.BeginTx(ctx, nil)
 			if err != nil {
 				return fmt.Errorf("begin namespace metadata transaction: %w", err)
@@ -205,7 +226,11 @@ func (repository *Repository) SetAttributes(
 				return fmt.Errorf("commit namespace metadata transaction: %w", err)
 			}
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+		repository.notifyCommit(Commit{Operation: "namespace.set-attributes"})
+		return nil
 	})
 	if err != nil {
 		return Node{}, err
@@ -604,6 +629,12 @@ func (repository *Repository) Update(
 			detailsJSON,
 			change,
 		)
+		if err == nil {
+			repository.notifyCommit(Commit{
+				Operation: operation.Name,
+				Actor:     operation.Actor,
+			})
+		}
 		return err
 	})
 	return version, err
@@ -628,6 +659,12 @@ func (repository *Repository) TryUpdate(
 			detailsJSON,
 			change,
 		)
+		if err == nil {
+			repository.notifyCommit(Commit{
+				Operation: operation.Name,
+				Actor:     operation.Actor,
+			})
+		}
 		return err
 	})
 	if errors.Is(err, database.ErrWriteInProgress) {

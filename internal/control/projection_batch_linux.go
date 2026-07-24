@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"net"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/zendext/scrape-fs/internal/library"
@@ -232,20 +231,44 @@ func Serve(
 	projectionService ProjectionService,
 	gcService GCService,
 ) error {
-	if libraryService == nil {
-		return fmt.Errorf("Library control service must not be nil")
-	}
-	if projectionService == nil {
-		return fmt.Errorf("Projection control service must not be nil")
-	}
-	if gcService == nil {
-		return fmt.Errorf("GC control service must not be nil")
-	}
-	controlGroupID, err := resolveGroupID(ControlGroupName, systemGroupLookup)
+	server, err := Start(
+		socketPath,
+		mode,
+		administratorUID,
+		service,
+		libraryService,
+		projectionService,
+		gcService,
+	)
 	if err != nil {
 		return err
 	}
-	return serveWithOptions(ctx, socketPath, mode, service, serverOptions{
+	return serveStarted(ctx, server)
+}
+
+func Start(
+	socketPath string,
+	mode fs.FileMode,
+	administratorUID uint32,
+	service BatchService,
+	libraryService LibraryService,
+	projectionService ProjectionService,
+	gcService GCService,
+) (*Server, error) {
+	if libraryService == nil {
+		return nil, fmt.Errorf("Library control service must not be nil")
+	}
+	if projectionService == nil {
+		return nil, fmt.Errorf("Projection control service must not be nil")
+	}
+	if gcService == nil {
+		return nil, fmt.Errorf("GC control service must not be nil")
+	}
+	controlGroupID, err := resolveGroupID(ControlGroupName, systemGroupLookup)
+	if err != nil {
+		return nil, err
+	}
+	return startWithOptions(socketPath, mode, service, serverOptions{
 		limits: defaultServerLimits(),
 		security: serverSecurity{
 			daemonUID:        uint32(os.Geteuid()),
@@ -294,85 +317,11 @@ func serveWithOptions(
 	service BatchService,
 	options serverOptions,
 ) error {
-	if service == nil {
-		return fmt.Errorf("Projection Batch control service must not be nil")
-	}
-	if err := validateServerLimits(options.limits); err != nil {
-		return err
-	}
-	if options.readPeerIdentity == nil {
-		return fmt.Errorf("control peer identity reader must not be nil")
-	}
-	prepared, err := prepareSocketPath(socketPath, options.security)
+	server, err := startWithOptions(socketPath, mode, service, options)
 	if err != nil {
 		return err
 	}
-	defer prepared.Close()
-
-	listener, err := prepared.listen()
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-	if err := prepared.setMetadata(mode); err != nil {
-		return err
-	}
-	if err := prepared.grantRoleAccess(options.security); err != nil {
-		return err
-	}
-	if err := prepared.verifyConfiguredSocket(); err != nil {
-		return err
-	}
-	if options.ready != nil {
-		close(options.ready)
-	}
-
-	stopped := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			listener.Close()
-		case <-stopped:
-		}
-	}()
-	defer close(stopped)
-
-	var handlers sync.WaitGroup
-	defer handlers.Wait()
-	slots := make(chan struct{}, options.limits.maxConnections)
-	for {
-		select {
-		case slots <- struct{}{}:
-		case <-ctx.Done():
-			return nil
-		}
-		connection, err := listener.AcceptUnix()
-		if err != nil {
-			<-slots
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				return nil
-			}
-			if retryableAcceptError(err) {
-				timer := time.NewTimer(options.limits.acceptRetryDelay)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return nil
-				case <-timer.C:
-					continue
-				}
-			}
-			return fmt.Errorf("accept ScrapeFS control connection: %w", err)
-		}
-		handlers.Add(1)
-		go func() {
-			defer handlers.Done()
-			defer func() {
-				<-slots
-			}()
-			handleConnection(ctx, connection, service, options)
-		}()
-	}
+	return serveStarted(ctx, server)
 }
 
 func validateServerLimits(limits serverLimits) error {

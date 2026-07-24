@@ -19,6 +19,7 @@ var (
 	ErrAlreadyRunning           = errors.New("scrapefsd is already running")
 	ErrConnectionLeaseExpired   = errors.New("database connection lease expired")
 	ErrWriteInProgress          = errors.New("database write in progress")
+	ErrWritesClosed             = errors.New("database writes are closed")
 	ErrUnsupportedSchemaVersion = errors.New("unsupported database schema version")
 )
 
@@ -33,6 +34,9 @@ type DB struct {
 	lock           *os.File
 	connectionGate chan struct{}
 	writeGate      chan struct{}
+	writeAdmission sync.Mutex
+	writesOpen     bool
+	writeWG        sync.WaitGroup
 	closeOnce      sync.Once
 	closeErr       error
 }
@@ -298,6 +302,7 @@ func openWithPrepareHook(
 		lock:           lock,
 		connectionGate: connectionGate,
 		writeGate:      writeGate,
+		writesOpen:     true,
 	}, nil
 }
 
@@ -332,6 +337,10 @@ func (database *DB) UseWrite(ctx context.Context, use func() error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := database.admitWrite(); err != nil {
+		return err
+	}
+	defer database.writeWG.Done()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -347,6 +356,10 @@ func (database *DB) TryUseWrite(ctx context.Context, use func() error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := database.admitWrite(); err != nil {
+		return err
+	}
+	defer database.writeWG.Done()
 	select {
 	case <-database.writeGate:
 		defer func() {
@@ -358,8 +371,26 @@ func (database *DB) TryUseWrite(ctx context.Context, use func() error) error {
 	}
 }
 
+func (database *DB) admitWrite() error {
+	database.writeAdmission.Lock()
+	defer database.writeAdmission.Unlock()
+	if !database.writesOpen {
+		return ErrWritesClosed
+	}
+	database.writeWG.Add(1)
+	return nil
+}
+
+func (database *DB) StopWrites() {
+	database.writeAdmission.Lock()
+	database.writesOpen = false
+	database.writeAdmission.Unlock()
+	database.writeWG.Wait()
+}
+
 func (database *DB) Close() error {
 	database.closeOnce.Do(func() {
+		database.StopWrites()
 		<-database.connectionGate
 		defer func() {
 			database.connectionGate <- struct{}{}

@@ -89,6 +89,12 @@ This lock establishes exclusive ownership of the full ScrapeFS runtime on the ho
 12. Create the Unix socket.
 13. Signal readiness.
 
+When the systemd-compatible `NOTIFY_SOCKET` environment variable is set, the
+daemon sends the exact `READY=1` datagram only after the index, FUSE mount, and
+control socket are usable. Filesystem socket paths and Linux abstract sockets
+prefixed with `@` are supported. No notification is sent when the variable is
+unset. Notification failure aborts startup and unwinds only acquired resources.
+
 Unknown FUSE filesystems are never unmounted.
 
 The daemon mounts through the retained mountpoint directory descriptor rather
@@ -98,11 +104,12 @@ unanchored `fusermount` path.
 
 ## 5. Normal Shutdown
 
-1. Stop accepting new control requests and namespace-write transactions.
-2. Wait for in-flight transactions.
-3. Unmount FUSE normally.
-4. Close the socket and SQLite.
-5. Release the daemon lock.
+1. Stop accepting new control requests.
+2. Close namespace-write admission and wait for admitted writes.
+3. Wait for accepted control requests.
+4. Unmount FUSE normally.
+5. Close the control socket, object store, and SQLite.
+6. Release the daemon lock.
 
 Normal shutdown does not use lazy unmount.
 

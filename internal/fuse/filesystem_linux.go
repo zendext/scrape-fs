@@ -67,6 +67,7 @@ type node struct {
 	objects      objectMetadataReader
 	objectWriter objectWriter
 	projections  projectionLifecycle
+	registry     *inodeRegistry
 	record       namespace.Node
 }
 
@@ -100,6 +101,7 @@ func newRoot(
 		objects:      objects,
 		objectWriter: objectWriter,
 		projections:  projections,
+		registry:     newInodeRegistry(),
 		record:       root,
 	}, nil
 }
@@ -162,9 +164,11 @@ func (current *node) Lookup(
 		objects:      current.objects,
 		objectWriter: current.objectWriter,
 		projections:  current.projections,
+		registry:     current.registry,
 		record:       child,
 	}
 	inode := current.NewInode(ctx, operations, stableAttr(child))
+	current.registry.Store(child.ID, inode)
 	return inode, 0
 }
 
@@ -793,9 +797,12 @@ func (current *node) newChild(
 		objects:      current.objects,
 		objectWriter: current.objectWriter,
 		projections:  current.projections,
+		registry:     current.registry,
 		record:       record,
 	}
-	return current.NewInode(ctx, operations, stableAttr(record)), 0
+	inode := current.NewInode(ctx, operations, stableAttr(record))
+	current.registry.Store(record.ID, inode)
+	return inode, 0
 }
 
 func (current *node) overlayHandle(

@@ -29,6 +29,44 @@ func TestOpenPreparesPrivateObjectStoreLayout(t *testing.T) {
 	}
 }
 
+func TestOpenUsesConfiguredRepositoryForOverlayCommits(t *testing.T) {
+	root := t.TempDir()
+	opened := openTestDatabase(t, root)
+	repository := namespace.NewRepository(opened)
+	libraryRootID := createLibraryRoot(t, repository)
+	var commits []namespace.Commit
+	repository.AddCommitListener(func(commit namespace.Commit) {
+		commits = append(commits, commit)
+	})
+
+	store, err := OpenWithOptions(filepath.Join(root, "objects"), opened, Options{
+		Repository: repository,
+	})
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	handle, _, err := store.Create(
+		context.Background(),
+		overlayOperation("library/poster.jpg"),
+		overlayRequest(libraryRootID, "poster.jpg"),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatalf("handle Close: %v", err)
+	}
+	if len(commits) != 1 || commits[0].Operation != "overlay.create" {
+		t.Errorf("commits = %#v, want one overlay.create", commits)
+	}
+}
+
 func TestOpenSyncsCreatedObjectStoreDirectories(t *testing.T) {
 	root := t.TempDir()
 	opened := openTestDatabase(t, root)
