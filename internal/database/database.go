@@ -18,6 +18,7 @@ const DefaultLockPath = "/run/scrapefs/scrapefsd.lock"
 var (
 	ErrAlreadyRunning           = errors.New("scrapefsd is already running")
 	ErrConnectionLeaseExpired   = errors.New("database connection lease expired")
+	ErrWriteInProgress          = errors.New("database write in progress")
 	ErrUnsupportedSchemaVersion = errors.New("unsupported database schema version")
 )
 
@@ -31,6 +32,7 @@ type DB struct {
 	directory      *os.File
 	lock           *os.File
 	connectionGate chan struct{}
+	writeGate      chan struct{}
 	closeOnce      sync.Once
 	closeErr       error
 }
@@ -287,12 +289,15 @@ func openWithPrepareHook(
 
 	connectionGate := make(chan struct{}, 1)
 	connectionGate <- struct{}{}
+	writeGate := make(chan struct{}, 1)
+	writeGate <- struct{}{}
 	return &DB{
 		pool:           pool,
 		conn:           conn,
 		directory:      prepared.directory,
 		lock:           lock,
 		connectionGate: connectionGate,
+		writeGate:      writeGate,
 	}, nil
 }
 
@@ -321,6 +326,36 @@ func (database *DB) UseConnection(
 		err = errors.Join(err, lease.close())
 	}()
 	return use(&Connection{lease: lease})
+}
+
+func (database *DB) UseWrite(ctx context.Context, use func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-database.writeGate:
+	}
+	defer func() {
+		database.writeGate <- struct{}{}
+	}()
+	return use()
+}
+
+func (database *DB) TryUseWrite(ctx context.Context, use func() error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-database.writeGate:
+		defer func() {
+			database.writeGate <- struct{}{}
+		}()
+		return use()
+	default:
+		return ErrWriteInProgress
+	}
 }
 
 func (database *DB) Close() error {

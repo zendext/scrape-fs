@@ -23,6 +23,7 @@ var (
 	ErrBatchOwnedProjection = errors.New("projection is owned by a Projection Batch")
 	ErrIsDirectory          = errors.New("target is a directory")
 	ErrNotDirectory         = errors.New("target is not a directory")
+	ErrWriteInProgress      = errors.New("namespace write in progress")
 )
 
 type NodeKind string

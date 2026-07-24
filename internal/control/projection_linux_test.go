@@ -305,6 +305,18 @@ func TestProjectionBatchOwnershipErrorCodeIsStable(t *testing.T) {
 	}
 }
 
+func TestLibraryRemovalErrorCodesAreStable(t *testing.T) {
+	t.Parallel()
+	for err, want := range map[error]string{
+		namespace.ErrNotEmpty:        "NotEmpty",
+		namespace.ErrWriteInProgress: "NamespaceWriteInProgress",
+	} {
+		if got := classifyError(err); got != want {
+			t.Errorf("classifyError(%v) = %q, want %q", err, got, want)
+		}
+	}
+}
+
 func TestProjectionControlRejectsUnauthorizedCreateBeforeServiceCall(t *testing.T) {
 	projectionService := &countingProjectionService{}
 	socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")

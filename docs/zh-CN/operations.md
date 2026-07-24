@@ -127,7 +127,7 @@ scrapefs library add <name> --profile <name>@<version>
 scrapefs library list
 scrapefs library rename <name> <new-name>
 scrapefs library set-profile <name> --profile <name>@<version>
-scrapefs library remove
+scrapefs library remove <name> [--recursive]
 
 scrapefs projection add <source> <library:/target>
 scrapefs projection list [--library <name>]
@@ -160,7 +160,9 @@ object 错误使用确定性顺序；计数区分 LIVE、STAGING、无数据库�
 
 `library add` 使用调用管理员的 peer UID/GID 创建 ACTIVE Library，并使用固定的 v1 mode：LibraryRoot 和目录为 `0775`，Projection 为 `0444`，OverlayFile 为 `0664`。`library rename` 在一个事务中同时重命名 ACTIVE Library 记录及其受保护的 LibraryRoot，保留二者稳定 ID，写一条 operation log，并只增加一次 namespace version。新名称重复或无效时，Library、LibraryRoot、namespace version 和 operation log 均保持不变。
 
-`library set-profile` 修改后续 direct Projection 和 Projection Batch validate/apply 使用的 Profile，不移动或重命名已有节点，写一条 operation log，且不增加 namespace version。只接受内置的 `jellyfin@1` 和 `plex@1` Profile。`library add`、`library rename` 和 `library set-profile` 需要管理员授权。`library list` 按名称确定性排序返回 ACTIVE Library，管理员和控制用户均可调用。
+`library remove <name>` 将空 Library 标记为 retired。非空 Library 在未显式指定 `--recursive` 时返回稳定的 `NotEmpty` 错误。存在其他在途 namespace write 时，recursive remove 不等待，而是返回 `NamespaceWriteInProgress`。成功删除会移除节点树、清空 `root_node_id`、将 Library 标记为 RETIRED、写一条 operation log，并只增加一次 namespace version。`scrapefs.library-result/v1` 响应包含 `root_node_id` 为零的 RETIRED Library。源文件与 Projection Batch 历史保持不变；Batch list/show 继续可用，undo 返回 `LibraryNotFound`。Overlay object 在事务提交后进入回收条件，已经打开的 handle 在关闭前仍可使用。
+
+`library set-profile` 修改后续 direct Projection 和 Projection Batch validate/apply 使用的 Profile，不移动或重命名已有节点，写一条 operation log，且不增加 namespace version。只接受内置的 `jellyfin@1` 和 `plex@1` Profile。`library add`、`library rename`、`library remove` 和 `library set-profile` 需要管理员授权。`library list` 按名称确定性排序返回 ACTIVE Library，管理员和控制用户均可调用。
 
 `projection add`、`projection mv` 和 `projection rm` 返回 `scrapefs.projection-result/v1`；remove 返回已删除 Projection 的快照。源文件选择、目标校验与 namespace mutation 仅在 control 授权成功后执行。`projection list` 使用 `scrapefs.projection-list/v1` 返回 direct 与 Batch Projection，按 Library、相对 target 和 node ID 确定性排序。`--library <name>` 只返回指定 ACTIVE Library；列表使用持久化缓存 metadata，不打开源文件。
 

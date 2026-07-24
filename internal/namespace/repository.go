@@ -136,74 +136,76 @@ func (repository *Repository) SetAttributes(
 	}
 
 	var updated Node
-	err = repository.useConnection(ctx, func(connection *database.Connection) error {
-		transaction, err := connection.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin namespace metadata transaction: %w", err)
-		}
-		defer transaction.Rollback()
+	err = repository.database.UseWrite(ctx, func() error {
+		return repository.useConnection(ctx, func(connection *database.Connection) error {
+			transaction, err := connection.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("begin namespace metadata transaction: %w", err)
+			}
+			defer transaction.Rollback()
 
-		node, err := queryNode(ctx, transaction, "id = ?", request.NodeID)
-		if err != nil {
-			return err
-		}
-		switch node.Kind {
-		case GlobalRoot, LibraryRoot:
-			return ErrProtected
-		case ProjectionFile:
-			return ErrReadOnly
-		case Directory, OverlayFile:
-		default:
-			return ErrInvalidNode
-		}
+			node, err := queryNode(ctx, transaction, "id = ?", request.NodeID)
+			if err != nil {
+				return err
+			}
+			switch node.Kind {
+			case GlobalRoot, LibraryRoot:
+				return ErrProtected
+			case ProjectionFile:
+				return ErrReadOnly
+			case Directory, OverlayFile:
+			default:
+				return ErrInvalidNode
+			}
 
-		if request.Mode != nil {
-			node.Attributes.Mode = request.Mode.Perm()
-		}
-		if request.UID != nil {
-			node.Attributes.UID = *request.UID
-		}
-		if request.GID != nil {
-			node.Attributes.GID = *request.GID
-		}
-		if request.AtimeNS != nil {
-			node.AtimeNS = *request.AtimeNS
-		}
-		if request.MtimeNS != nil {
-			node.MtimeNS = *request.MtimeNS
-		}
-		now := repository.now().UTC().UnixNano()
-		if _, err := transaction.ExecContext(ctx, `
-			UPDATE nodes
-			SET
-				mode = ?,
-				uid = ?,
-				gid = ?,
-				atime_ns = ?,
-				mtime_ns = ?,
-				virtual_ctime_ns = ?,
-				updated_at = ?
-			WHERE id = ?
-		`,
-			node.Attributes.Mode.Perm(),
-			node.Attributes.UID,
-			node.Attributes.GID,
-			node.AtimeNS,
-			node.MtimeNS,
-			now,
-			now,
-			node.ID,
-		); err != nil {
-			return classifyMutationError("update node attributes", err)
-		}
-		updated, err = queryNode(ctx, transaction, "id = ?", node.ID)
-		if err != nil {
-			return fmt.Errorf("read updated node attributes: %w", err)
-		}
-		if err := transaction.Commit(); err != nil {
-			return fmt.Errorf("commit namespace metadata transaction: %w", err)
-		}
-		return nil
+			if request.Mode != nil {
+				node.Attributes.Mode = request.Mode.Perm()
+			}
+			if request.UID != nil {
+				node.Attributes.UID = *request.UID
+			}
+			if request.GID != nil {
+				node.Attributes.GID = *request.GID
+			}
+			if request.AtimeNS != nil {
+				node.AtimeNS = *request.AtimeNS
+			}
+			if request.MtimeNS != nil {
+				node.MtimeNS = *request.MtimeNS
+			}
+			now := repository.now().UTC().UnixNano()
+			if _, err := transaction.ExecContext(ctx, `
+				UPDATE nodes
+				SET
+					mode = ?,
+					uid = ?,
+					gid = ?,
+					atime_ns = ?,
+					mtime_ns = ?,
+					virtual_ctime_ns = ?,
+					updated_at = ?
+				WHERE id = ?
+			`,
+				node.Attributes.Mode.Perm(),
+				node.Attributes.UID,
+				node.Attributes.GID,
+				node.AtimeNS,
+				node.MtimeNS,
+				now,
+				now,
+				node.ID,
+			); err != nil {
+				return classifyMutationError("update node attributes", err)
+			}
+			updated, err = queryNode(ctx, transaction, "id = ?", node.ID)
+			if err != nil {
+				return fmt.Errorf("read updated node attributes: %w", err)
+			}
+			if err := transaction.Commit(); err != nil {
+				return fmt.Errorf("commit namespace metadata transaction: %w", err)
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return Node{}, err
@@ -588,14 +590,72 @@ func (repository *Repository) Update(
 	operation Operation,
 	change func(*Transaction) error,
 ) (_ int64, err error) {
-	if err := validateOperation(operation, change); err != nil {
+	detailsJSON, err := prepareOperation(operation, change)
+	if err != nil {
 		return 0, err
+	}
+
+	var version int64
+	err = repository.database.UseWrite(ctx, func() error {
+		var err error
+		version, err = repository.updateWithConnection(
+			ctx,
+			operation,
+			detailsJSON,
+			change,
+		)
+		return err
+	})
+	return version, err
+}
+
+func (repository *Repository) TryUpdate(
+	ctx context.Context,
+	operation Operation,
+	change func(*Transaction) error,
+) (_ int64, err error) {
+	detailsJSON, err := prepareOperation(operation, change)
+	if err != nil {
+		return 0, err
+	}
+
+	var version int64
+	err = repository.database.TryUseWrite(ctx, func() error {
+		var err error
+		version, err = repository.updateWithConnection(
+			ctx,
+			operation,
+			detailsJSON,
+			change,
+		)
+		return err
+	})
+	if errors.Is(err, database.ErrWriteInProgress) {
+		return 0, ErrWriteInProgress
+	}
+	return version, err
+}
+
+func prepareOperation(
+	operation Operation,
+	change func(*Transaction) error,
+) ([]byte, error) {
+	if err := validateOperation(operation, change); err != nil {
+		return nil, err
 	}
 	detailsJSON, err := json.Marshal(operation.Details)
 	if err != nil {
-		return 0, fmt.Errorf("%w: encode details: %v", ErrInvalidOperation, err)
+		return nil, fmt.Errorf("%w: encode details: %v", ErrInvalidOperation, err)
 	}
+	return detailsJSON, nil
+}
 
+func (repository *Repository) updateWithConnection(
+	ctx context.Context,
+	operation Operation,
+	detailsJSON []byte,
+	change func(*Transaction) error,
+) (_ int64, err error) {
 	var version int64
 	err = repository.useConnection(ctx, func(connection *database.Connection) error {
 		var err error
@@ -1036,6 +1096,163 @@ func (transaction *Transaction) SetLibraryProfile(
 	}
 	transaction.audited = true
 	return changed, nil
+}
+
+func (transaction *Transaction) RetireLibrary(
+	ctx context.Context,
+	name string,
+	recursive bool,
+) (Library, []int64, error) {
+	if err := validateName(name); err != nil {
+		return Library{}, nil, fmt.Errorf("%w: invalid name: %v", ErrInvalidLibrary, err)
+	}
+	library, err := queryLibrary(
+		ctx,
+		transaction.transaction,
+		"libraries.status = 'ACTIVE' AND libraries.name = ?",
+		name,
+	)
+	if errors.Is(err, ErrNotFound) {
+		return Library{}, nil, fmt.Errorf("%w: %q", ErrLibraryNotFound, name)
+	}
+	if err != nil {
+		return Library{}, nil, fmt.Errorf("read Library %q for removal: %w", name, err)
+	}
+
+	var childID int64
+	err = transaction.transaction.QueryRowContext(ctx, `
+		SELECT id
+		FROM nodes
+		WHERE parent_id = ?
+		ORDER BY id
+		LIMIT 1
+	`, library.RootNodeID).Scan(&childID)
+	if err == nil && !recursive {
+		return Library{}, nil, ErrNotEmpty
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Library{}, nil, fmt.Errorf("check Library contents: %w", err)
+	}
+
+	objectIDs := []int64{}
+	var cursorID int64
+	for {
+		var nodeID int64
+		var objectID int64
+		err := transaction.transaction.QueryRowContext(ctx, `
+			WITH RECURSIVE tree(id) AS (
+				SELECT id FROM nodes WHERE id = ?
+				UNION ALL
+				SELECT child.id
+				FROM nodes AS child
+				JOIN tree ON child.parent_id = tree.id
+			)
+			SELECT nodes.id, nodes.object_id
+			FROM nodes
+			JOIN tree ON tree.id = nodes.id
+			WHERE nodes.kind = 'OVERLAY_FILE'
+			  AND nodes.id > ?
+			ORDER BY nodes.id
+			LIMIT 1
+		`, library.RootNodeID, cursorID).Scan(&nodeID, &objectID)
+		if errors.Is(err, sql.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return Library{}, nil, fmt.Errorf("list Library Overlay objects: %w", err)
+		}
+		objectIDs = append(objectIDs, objectID)
+		cursorID = nodeID
+	}
+
+	now := transaction.now().UTC().UnixNano()
+	result, err := transaction.transaction.ExecContext(ctx, `
+		UPDATE libraries
+		SET
+			status = 'RETIRED',
+			root_node_id = NULL,
+			updated_at = ?,
+			retired_at = ?
+		WHERE id = ?
+		  AND status = 'ACTIVE'
+		  AND root_node_id = ?
+	`, now, now, library.ID, library.RootNodeID)
+	if err != nil {
+		return Library{}, nil, classifyLibraryMutationError("retire Library", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return Library{}, nil, fmt.Errorf("read retired Library count: %w", err)
+	}
+	if updated != 1 {
+		return Library{}, nil, fmt.Errorf(
+			"%w: Library %d disappeared during removal",
+			ErrInvalidLibrary,
+			library.ID,
+		)
+	}
+
+	for {
+		var leafID int64
+		err := transaction.transaction.QueryRowContext(ctx, `
+			WITH RECURSIVE tree(id) AS (
+				SELECT id FROM nodes WHERE id = ?
+				UNION ALL
+				SELECT child.id
+				FROM nodes AS child
+				JOIN tree ON child.parent_id = tree.id
+			)
+			SELECT nodes.id
+			FROM nodes
+			JOIN tree ON tree.id = nodes.id
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM nodes AS child
+				WHERE child.parent_id = nodes.id
+			)
+			ORDER BY nodes.id DESC
+			LIMIT 1
+		`, library.RootNodeID).Scan(&leafID)
+		if errors.Is(err, sql.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return Library{}, nil, fmt.Errorf("select Library tree leaf: %w", err)
+		}
+		result, err := transaction.transaction.ExecContext(
+			ctx,
+			"DELETE FROM nodes WHERE id = ?",
+			leafID,
+		)
+		if err != nil {
+			return Library{}, nil, classifyMutationError("remove Library node", err)
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return Library{}, nil, fmt.Errorf("read removed Library node count: %w", err)
+		}
+		if deleted != 1 {
+			return Library{}, nil, fmt.Errorf(
+				"%w: Library node %d disappeared during removal",
+				ErrInvalidNode,
+				leafID,
+			)
+		}
+	}
+	if err := transaction.touchDirectory(ctx, 1, now); err != nil {
+		return Library{}, nil, err
+	}
+	retired, err := queryLibrary(
+		ctx,
+		transaction.transaction,
+		"libraries.id = ?",
+		library.ID,
+	)
+	if err != nil {
+		return Library{}, nil, fmt.Errorf("read retired Library: %w", err)
+	}
+	transaction.changed = true
+	return retired, objectIDs, nil
 }
 
 func (transaction *Transaction) CreateNode(
@@ -2927,6 +3144,7 @@ func queryLibrary(
 	var directoryMode int64
 	var projectionMode int64
 	var overlayMode int64
+	var rootNodeID sql.NullInt64
 	var joinedRootID sql.NullInt64
 	var rootParentID sql.NullInt64
 	var rootName sql.NullString
@@ -2938,7 +3156,7 @@ func queryLibrary(
 		&library.ID,
 		&library.Name,
 		&library.Status,
-		&library.RootNodeID,
+		&rootNodeID,
 		&library.ProfileName,
 		&library.ProfileVersion,
 		&uid,
@@ -2965,6 +3183,9 @@ func queryLibrary(
 
 	library.UID = uint32(uid)
 	library.GID = uint32(gid)
+	if rootNodeID.Valid {
+		library.RootNodeID = rootNodeID.Int64
+	}
 	library.RootMode = fs.FileMode(rootMode)
 	library.DirectoryMode = fs.FileMode(directoryMode)
 	library.ProjectionMode = fs.FileMode(projectionMode)
@@ -2994,7 +3215,7 @@ func validatePersistedLibrary(
 	rootUID sql.NullInt64,
 	rootGID sql.NullInt64,
 ) error {
-	if library.Status != LibraryActive {
+	if library.Status != LibraryActive && library.Status != LibraryRetired {
 		return fmt.Errorf(
 			"%w: Library %d has status %q",
 			ErrInvalidLibrary,
@@ -3015,6 +3236,23 @@ func validatePersistedLibrary(
 		OverlayMode:    library.OverlayMode,
 	}).Validate(); err != nil {
 		return fmt.Errorf("%w: Library %d configuration: %v", ErrInvalidLibrary, library.ID, err)
+	}
+	if library.Status == LibraryRetired {
+		if library.RootNodeID != 0 ||
+			joinedRootID.Valid ||
+			rootParentID.Valid ||
+			rootName.Valid ||
+			rootKind.Valid ||
+			joinedRootMode.Valid ||
+			rootUID.Valid ||
+			rootGID.Valid {
+			return fmt.Errorf(
+				"%w: retired Library %d has a root node",
+				ErrInvalidLibrary,
+				library.ID,
+			)
+		}
+		return nil
 	}
 	if !joinedRootID.Valid ||
 		joinedRootID.Int64 != library.RootNodeID ||

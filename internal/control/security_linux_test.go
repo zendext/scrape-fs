@@ -303,6 +303,10 @@ func TestServeRejectsControlUserLibraryLifecycleMutationsBeforeDispatch(t *testi
 	client := NewClient(socketPath)
 	calls := []func() error{
 		func() error {
+			_, err := client.RemoveLibrary(context.Background(), "media", true)
+			return err
+		},
+		func() error {
 			_, err := client.RenameLibrary(context.Background(), "media", "movies")
 			return err
 		},
@@ -1139,6 +1143,16 @@ func (service *countingLibraryService) List(
 func (service *countingLibraryService) Rename(
 	context.Context,
 	library.RenameRequest,
+) (namespace.Library, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	service.calls++
+	return namespace.Library{}, nil
+}
+
+func (service *countingLibraryService) Remove(
+	context.Context,
+	library.RemoveRequest,
 ) (namespace.Library, error) {
 	service.mu.Lock()
 	defer service.mu.Unlock()

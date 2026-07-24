@@ -65,6 +65,7 @@ type request struct {
 	NewLibraryName     string `json:"new_library_name,omitempty"`
 	ProfileName        string `json:"profile_name,omitempty"`
 	ProfileVersion     int64  `json:"profile_version,omitempty"`
+	Recursive          bool   `json:"recursive,omitempty"`
 	SourcePath         string `json:"source_path,omitempty"`
 	Target             string `json:"target,omitempty"`
 	NewTarget          string `json:"new_target,omitempty"`
@@ -537,6 +538,20 @@ func handleConnection(
 		if err == nil {
 			result = libraryResult(renamed)
 		}
+	case "library.remove":
+		if options.libraryService == nil {
+			err = fmt.Errorf("Library control service is unavailable")
+			break
+		}
+		var removed namespace.Library
+		removed, err = options.libraryService.Remove(ctx, library.RemoveRequest{
+			Name:      request.LibraryName,
+			Recursive: request.Recursive,
+			Actor:     actor,
+		})
+		if err == nil {
+			result = libraryResult(removed)
+		}
 	case "library.set-profile":
 		if options.libraryService == nil {
 			err = fmt.Errorf("Library control service is unavailable")
@@ -696,6 +711,10 @@ func classifyError(err error) string {
 		return "InvalidLibrary"
 	case errors.Is(err, namespace.ErrInvalidPath):
 		return "InvalidPath"
+	case errors.Is(err, namespace.ErrNotEmpty):
+		return "NotEmpty"
+	case errors.Is(err, namespace.ErrWriteInProgress):
+		return "NamespaceWriteInProgress"
 	case errors.Is(err, projection.ErrUnsafeSource):
 		return "UnsafeSource"
 	case errors.Is(err, projection.ErrSourceNotFound):

@@ -546,6 +546,7 @@ Remove an unused virtual media Library without deleting source files.
 
 ```bash
 scrapefs library remove jellyfin
+scrapefs library remove jellyfin --recursive
 ```
 
 ### Main Flow
@@ -565,12 +566,12 @@ For explicit recursive removal:
 
 ### Alternative Flows
 
-- Ordinary removal of non-empty Library: return `ENOTEMPTY`.
-- An in-flight namespace write exists: recursive removal fails.
+- Ordinary removal of a non-empty Library returns `NotEmpty` (`ENOTEMPTY` in the namespace/FUSE domain).
+- An in-flight namespace write causes recursive removal to return `NamespaceWriteInProgress`.
 
 ### Result
 
-The Library disappears from the FUSE root. Source files remain.
+The Library disappears from the FUSE root and the command returns its RETIRED snapshot. Source files and Projection Batch history remain. Already open Overlay handles remain usable until closed.
 
 ### Related Specifications
 

@@ -229,6 +229,47 @@ func TestLibraryClientServerRoundTripUsesPeerOwnershipAndDefaultModes(t *testing
 		listed.Libraries[0] != profileChanged.Library {
 		t.Errorf("ListLibraries result = %#v, changed = %#v", listed, profileChanged)
 	}
+
+	if _, err := repository.Update(
+		context.Background(),
+		namespace.Operation{
+			Name:  "test.directory.create",
+			Actor: namespace.Actor{Kind: namespace.ActorSystem},
+			Details: namespace.OperationDetails{
+				Paths:     []string{"movies/Shows"},
+				NodeKinds: []namespace.NodeKind{namespace.Directory},
+			},
+		},
+		func(transaction *namespace.Transaction) error {
+			_, err := transaction.CreateNode(context.Background(), namespace.CreateNode{
+				ParentID: profileChanged.Library.RootNodeID,
+				Name:     "Shows",
+				Kind:     namespace.Directory,
+				Creator:  namespace.Actor{Kind: namespace.ActorSystem},
+				Attributes: namespace.Attributes{
+					Mode: 0o775,
+				},
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("create Library child: %v", err)
+	}
+	if _, err := client.RemoveLibrary(context.Background(), "movies", false); err == nil {
+		t.Fatal("ordinary RemoveLibrary succeeded for non-empty Library")
+	} else if remote, ok := err.(*RemoteError); !ok || remote.Code != "NotEmpty" {
+		t.Fatalf("ordinary RemoveLibrary error = %v, want NotEmpty", err)
+	}
+	removed, err := client.RemoveLibrary(context.Background(), "movies", true)
+	if err != nil {
+		t.Fatalf("recursive RemoveLibrary: %v", err)
+	}
+	if removed.Schema != LibraryResultSchema ||
+		removed.Library.ID != created.Library.ID ||
+		removed.Library.Status != namespace.LibraryRetired ||
+		removed.Library.RootNodeID != 0 {
+		t.Errorf("RemoveLibrary result = %#v", removed)
+	}
 }
 
 func TestLibraryClientReturnsStableDomainErrors(t *testing.T) {

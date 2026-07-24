@@ -16,6 +16,7 @@ const (
 type LibraryService interface {
 	Create(context.Context, library.CreateRequest) (namespace.Library, error)
 	List(context.Context) ([]namespace.Library, error)
+	Remove(context.Context, library.RemoveRequest) (namespace.Library, error)
 	Rename(context.Context, library.RenameRequest) (namespace.Library, error)
 	SetProfile(context.Context, library.SetProfileRequest) (namespace.Library, error)
 }
@@ -85,6 +86,21 @@ func (client *Client) RenameLibrary(
 		Command:        "library.rename",
 		LibraryName:    name,
 		NewLibraryName: newName,
+	}, &result)
+	return result, err
+}
+
+func (client *Client) RemoveLibrary(
+	ctx context.Context,
+	name string,
+	recursive bool,
+) (LibraryResult, error) {
+	var result LibraryResult
+	err := client.call(ctx, request{
+		Schema:      requestSchema,
+		Command:     "library.remove",
+		LibraryName: name,
+		Recursive:   recursive,
 	}, &result)
 	return result, err
 }

@@ -130,7 +130,7 @@ scrapefs library add <name> --profile <name>@<version>
 scrapefs library list
 scrapefs library rename <name> <new-name>
 scrapefs library set-profile <name> --profile <name>@<version>
-scrapefs library remove
+scrapefs library remove <name> [--recursive]
 
 scrapefs projection add <source> <library:/target>
 scrapefs projection list [--library <name>]
@@ -165,7 +165,9 @@ candidate eligible for unsafe deletion.
 
 `library add` creates an ACTIVE Library with the invoking administrator's peer UID/GID and the fixed v1 modes `0775` for the LibraryRoot and directories, `0444` for Projections, and `0664` for OverlayFiles. `library rename` atomically renames the ACTIVE Library record and its protected LibraryRoot, preserves both stable IDs, writes one operation-log entry, and increments namespace version once. A duplicate or invalid new name leaves the Library, LibraryRoot, namespace version, and operation log unchanged.
 
-`library set-profile` changes the Profile used by later direct Projection and Projection Batch validation/apply. It does not move or rename existing nodes, writes one operation-log entry, and does not increment namespace version. Only the built-in `jellyfin@1` and `plex@1` Profiles are accepted. `library add`, `library rename`, and `library set-profile` require administrator authorization. `library list` returns ACTIVE Libraries in deterministic name order and is available to administrators and control users.
+`library remove <name>` retires an empty Library. A non-empty Library returns the stable `NotEmpty` error unless `--recursive` is explicit. Recursive removal returns `NamespaceWriteInProgress` instead of waiting when another namespace write is active. A successful removal deletes the node tree, clears `root_node_id`, marks the Library RETIRED, writes one operation-log entry, and increments namespace version once. The `scrapefs.library-result/v1` response contains the RETIRED Library with `root_node_id` equal to zero. Source files and Projection Batch history remain unchanged; Batch list/show continue to work, while undo returns `LibraryNotFound`. Overlay objects become eligible for post-commit reclamation, and already open handles remain usable until closed.
+
+`library set-profile` changes the Profile used by later direct Projection and Projection Batch validation/apply. It does not move or rename existing nodes, writes one operation-log entry, and does not increment namespace version. Only the built-in `jellyfin@1` and `plex@1` Profiles are accepted. `library add`, `library rename`, `library remove`, and `library set-profile` require administrator authorization. `library list` returns ACTIVE Libraries in deterministic name order and is available to administrators and control users.
 
 `projection add`, `projection mv`, and `projection rm` return `scrapefs.projection-result/v1`; remove returns the deleted Projection snapshot. Source selection, target validation, and namespace mutation run only after control authorization succeeds. `projection list` returns direct and batch Projections using `scrapefs.projection-list/v1`, ordered deterministically by Library, relative target, and node ID. `--library <name>` limits the result to that ACTIVE Library. Listing uses persisted cached metadata and does not open source files.
 

@@ -31,6 +31,7 @@ type cli struct {
 type libraryCLI struct {
 	Add        libraryAddCLI        `cmd:"" help:"Create a Library."`
 	List       libraryListCLI       `cmd:"" help:"List Libraries."`
+	Remove     libraryRemoveCLI     `cmd:"" help:"Retire a Library."`
 	Rename     libraryRenameCLI     `cmd:"" help:"Rename an ACTIVE Library."`
 	SetProfile librarySetProfileCLI `cmd:"" help:"Change the Profile used by an ACTIVE Library."`
 }
@@ -45,6 +46,11 @@ type libraryListCLI struct{}
 type libraryRenameCLI struct {
 	Name    string `arg:"" name:"name" help:"Current Library name."`
 	NewName string `arg:"" name:"new-name" help:"New Library name."`
+}
+
+type libraryRemoveCLI struct {
+	Name      string `arg:"" name:"name" help:"Library name."`
+	Recursive bool   `help:"Remove a non-empty Library node tree."`
 }
 
 type librarySetProfileCLI struct {
@@ -122,6 +128,7 @@ type controlService interface {
 		library.ProfileIdentifier,
 	) (control.LibraryResult, error)
 	ListLibraries(context.Context) (control.LibraryListResult, error)
+	RemoveLibrary(context.Context, string, bool) (control.LibraryResult, error)
 	RenameLibrary(context.Context, string, string) (control.LibraryResult, error)
 	SetLibraryProfile(
 		context.Context,
@@ -257,6 +264,15 @@ func runWithBatchService(
 			ctx,
 			commandLine.Library.Rename.Name,
 			commandLine.Library.Rename.NewName,
+		)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case strings.HasPrefix(command, "library remove"):
+		result, err = service.RemoveLibrary(
+			ctx,
+			commandLine.Library.Remove.Name,
+			commandLine.Library.Remove.Recursive,
 		)
 		if err != nil {
 			return writeCommandError(stderr, err)
@@ -450,6 +466,10 @@ func errorCode(err error) string {
 		return "InvalidLibrary"
 	case errors.Is(err, namespace.ErrInvalidPath):
 		return "InvalidPath"
+	case errors.Is(err, namespace.ErrNotEmpty):
+		return "NotEmpty"
+	case errors.Is(err, namespace.ErrWriteInProgress):
+		return "NamespaceWriteInProgress"
 	case errors.Is(err, projection.ErrUnsafeSource):
 		return "UnsafeSource"
 	case errors.Is(err, projection.ErrSourceNotFound):
