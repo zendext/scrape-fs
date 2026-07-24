@@ -74,7 +74,7 @@ Move, remove, and rebind are direct-Projection operations. They reject a Project
 
 The first version accepts absolute source paths and has no Source Root registry or logical disk aliases.
 
-Control users allowed to run `projection add` or `scrape` are trusted source-path selectors. The daemon service account should have read access only to intended media directories.
+Control users that can submit source paths through direct Projection, rebind, or Projection Batch operations are trusted source-path selectors. The daemon service account should have read access only to intended media directories.
 
 The daemon MUST:
 

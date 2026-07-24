@@ -16,7 +16,7 @@ scrapefs scrape \
   --library jellyfin
 ```
 
-That command implied that the daemon would enumerate the source directory, run Agent analysis, and generate Projections. The behavior was never implemented and is removed from the target v1 CLI contract without a compatibility alias.
+That command implied that the daemon would enumerate the source directory, run Agent analysis, and generate Projections. The behavior did not enter the v1 implementation and has been removed from the target v1 CLI contract without a compatibility alias.
 
 A later external-Agent design considered persisting `scrapefs.scrape/v1` plans, revisions, and pending approval state in the daemon. The external Agent already owns work context and user interaction, so that duplicate state is no longer part of v1.
 
@@ -228,7 +228,7 @@ Repeated undo of an undone batch returns `AlreadyUndone`.
 
 ## 8. Relationship to Direct Projection
 
-Issue #8 implements a direct operation that creates one Projection. Direct and batch operations share:
+The direct operation creates one Projection at a time. Direct and batch operations share:
 
 - secure source opening and identity extraction;
 - Library resolution;
@@ -415,5 +415,5 @@ Undo removes only remaining batch-owned Projections. NFO, artwork, and other
 OverlayFiles remain and must be handled by the user through ordinary FUSE
 operations based on the undo result.
 
-Issue #39 owns shared status, doctor, and runtime diagnostics. This Skill does
-not duplicate or replace those commands.
+The daemon and control CLI provide shared status, doctor, and runtime
+diagnostics. This Skill does not duplicate or replace those commands.

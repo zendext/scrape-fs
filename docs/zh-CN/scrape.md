@@ -16,7 +16,7 @@ scrapefs scrape \
   --library jellyfin
 ```
 
-该命令意味着 daemon 枚举源目录、运行 Agent 分析并生成 Projection。这个行为尚未实现，并从目标 v1 CLI 契约中移除，不提供兼容 alias。
+该命令意味着 daemon 枚举源目录、运行 Agent 分析并生成 Projection。这个行为没有进入 v1 实现，并已从目标 v1 CLI 契约中移除，不提供兼容 alias。
 
 后续的外部 Agent 设计曾考虑由 daemon 持久化 `scrapefs.scrape/v1` Plan、revision 和待确认状态。外部 Agent 已经拥有工作上下文并负责用户交互，因此这层状态重复且不再属于 v1。
 
@@ -228,7 +228,7 @@ undo 不删除通过 FUSE 创建的 OverlayFile。CLI 必须列出阻止目录�
 
 ## 8. 与 Direct Projection 的关系
 
-Issue #8 实现一次创建一个 Projection 的 direct operation。Direct 和 Batch 必须共享：
+Direct operation 一次创建一个 Projection。Direct 和 Batch 必须共享：
 
 - source 安全打开与身份提取；
 - Library 解析；
@@ -400,5 +400,5 @@ python3 "$SKILL_DIR/scripts/scrapefs_media.py" undo batch-42
 undo 只删除仍存在的 batch-owned Projection。NFO、artwork 和其他 OverlayFile
 继续保留，必须根据 undo 结果由用户通过普通 FUSE 操作处理。
 
-Issue #39 负责共享 status、doctor 和 runtime diagnostics；本 Skill 不复制或
-替代这些命令。
+共享 status、doctor 和 runtime diagnostics 由 daemon 与控制 CLI 提供；本
+Skill 不复制或替代这些命令。

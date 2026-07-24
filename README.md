@@ -6,7 +6,7 @@ ScrapeFS is an external-agent-assisted media organization and virtual directory 
 
 It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
 
-> Status: early implementation. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite and the Overlay object store, rebuilds the in-memory index, mounts the persisted namespace, and serves authenticated Library, direct Projection, Projection Batch, status, and read-only doctor operations through the Unix control socket. Readiness is emitted only after the index, mount, and socket are usable; committed namespace changes trigger FUSE cache invalidation, and normal shutdown drains admitted writes before unmounting. FUSE clients can create and modify ordinary directories and object-backed OverlayFiles, read ProjectionFiles through verified source descriptors, and rename or unlink direct ProjectionFiles through shared Projection lifecycle operations. The repository also ships the first installable external Agent skill for media enumeration, probing, naming, batch confirmation, and FUSE artifact workflows.
+> Status: the v1 target feature set is implemented. The project is in a pre-release stage and has not published a stable release. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite and the Overlay object store, rebuilds the in-memory index, mounts the persisted namespace, and serves authenticated Library, direct Projection, Projection Batch, status, and read-only doctor operations through the Unix control socket. Readiness is emitted only after the index, mount, and socket are usable; committed namespace changes trigger FUSE cache invalidation, and normal shutdown drains admitted writes before unmounting. FUSE clients can create and modify ordinary directories and object-backed OverlayFiles, read ProjectionFiles through verified source descriptors, and rename or unlink direct ProjectionFiles through shared Projection lifecycle operations. The repository also ships the first installable external Agent skill for media enumeration, probing, naming, batch confirmation, and FUSE artifact workflows.
 
 ## Core Model
 
@@ -123,9 +123,19 @@ Run the baseline checks:
 
 ```bash
 go test ./...
+go test -race ./...
 go vet ./...
-gofmt -w .
+test -z "$(gofmt -l .)"
+python3 -m unittest discover \
+  -s skills/organize-scrapefs-media/tests \
+  -p 'test_*.py'
 ```
+
+`go test ./...` includes real FUSE-mount and cross-UID/GID ACL integration
+tests. The FUSE tests require `/dev/fuse` and either root or effective
+`CAP_SYS_ADMIN`; the cross-role ACL connection test requires root or a
+root-mapped user namespace. Tests explicitly report skipped when these
+requirements are unavailable.
 
 ## Documentation
 

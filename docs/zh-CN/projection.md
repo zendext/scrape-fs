@@ -72,7 +72,7 @@ Move、remove 和 rebind 都是 direct Projection 操作。`origin_scrape_id` �
 
 第一版接受绝对源路径，不使用 Source Root 或逻辑磁盘别名。
 
-有权执行 `projection add` 和 `scrape` 的控制用户被视为可信源路径选择者。daemon 服务账号应只拥有预期媒体目录的读取权限。
+能够通过 direct Projection、rebind 或 Projection Batch 提交 source path 的控制用户被视为可信源路径选择者。daemon 服务账号应只拥有预期媒体目录的读取权限。
 
 daemon 必须：
 
