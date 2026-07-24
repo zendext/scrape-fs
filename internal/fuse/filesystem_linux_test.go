@@ -3,6 +3,7 @@ package fuse
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"syscall"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"github.com/zendext/scrape-fs/internal/objectstore"
 	"golang.org/x/sys/unix"
 )
 
@@ -336,18 +338,40 @@ func TestFilesystemMapsReadErrorsAndRejectsMutation(t *testing.T) {
 		t.Errorf("GlobalRoot Setattr errno = %v, want EPERM", errno)
 	}
 
-	directory := &node{record: testNode(2, 1, "library", namespace.LibraryRoot)}
-	if _, errno := directory.Mkdir(
+	libraryRoot := &node{record: testNode(2, 1, "library", namespace.LibraryRoot)}
+	if errno := libraryRoot.Setattr(
 		context.Background(),
-		"new",
-		0o755,
-		&gofuse.EntryOut{},
+		nil,
+		&gofuse.SetAttrIn{},
+		&gofuse.AttrOut{},
 	); errno != syscall.EPERM {
-		t.Errorf("LibraryRoot Mkdir errno = %v, want EPERM", errno)
+		t.Errorf("LibraryRoot Setattr errno = %v, want EPERM", errno)
 	}
 	ordinary := &node{record: testNode(3, 2, "Movies", namespace.Directory)}
-	if errno := ordinary.Unlink(context.Background(), "file"); errno != syscall.EROFS {
-		t.Errorf("Directory Unlink errno = %v, want EROFS", errno)
+	if _, errno := ordinary.Mknod(
+		context.Background(),
+		"fifo",
+		syscall.S_IFIFO|0o600,
+		0,
+		&gofuse.EntryOut{},
+	); errno != syscall.EOPNOTSUPP {
+		t.Errorf("Directory Mknod errno = %v, want EOPNOTSUPP", errno)
+	}
+
+	projection := &node{record: testNode(4, 3, "movie.mkv", namespace.ProjectionFile)}
+	if handle, _, errno := projection.Open(
+		context.Background(),
+		unix.O_RDONLY|unix.O_APPEND,
+	); handle != nil || errno != syscall.EROFS {
+		t.Errorf("Projection Open O_APPEND = handle %v errno %v, want nil/EROFS", handle, errno)
+	}
+	if errno := projection.Setattr(
+		context.Background(),
+		nil,
+		&gofuse.SetAttrIn{},
+		&gofuse.AttrOut{},
+	); errno != syscall.EROFS {
+		t.Errorf("Projection Setattr errno = %v, want EROFS", errno)
 	}
 }
 
@@ -457,6 +481,28 @@ func (reader *fakeObjectMetadataReader) StatObject(
 		return unix.Stat_t{}, unix.EIO
 	}
 	return stat, nil
+}
+
+func (reader *fakeObjectMetadataReader) CreateWithFlags(
+	context.Context,
+	namespace.Operation,
+	namespace.CreateOverlay,
+	io.Reader,
+	int,
+) (*objectstore.File, namespace.Node, error) {
+	return nil, namespace.Node{}, unix.EIO
+}
+
+func (reader *fakeObjectMetadataReader) OpenObject(
+	context.Context,
+	int64,
+	int,
+) (*objectstore.File, error) {
+	return nil, unix.EIO
+}
+
+func (reader *fakeObjectMetadataReader) DeleteObject(int64) error {
+	return unix.EIO
 }
 
 func (reader *fakeNamespaceReader) GlobalRoot(context.Context) (namespace.Node, error) {

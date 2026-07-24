@@ -3,6 +3,7 @@ package fuse
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -12,8 +13,166 @@ import (
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/database"
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"github.com/zendext/scrape-fs/internal/objectstore"
 	"golang.org/x/sys/unix"
 )
+
+func TestMountWritableOverlayIntegration(t *testing.T) {
+	requireFUSEIntegration(t)
+
+	root := t.TempDir()
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := opened.Close(); err != nil {
+			t.Errorf("cleanup database Close: %v", err)
+		}
+	})
+	store, err := objectstore.Open(filepath.Join(root, "objects"), opened)
+	if err != nil {
+		t.Fatalf("objectstore Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("cleanup objectstore Close: %v", err)
+		}
+	})
+	repository := namespace.NewRepository(opened)
+	library := createIntegrationLibrary(t, repository)
+	mountpoint := filepath.Join(root, "mount")
+	mounted, err := Mount(
+		context.Background(),
+		config.FUSE{
+			Mountpoint:      mountpoint,
+			EntryTimeout:    50 * time.Millisecond,
+			AttrTimeout:     50 * time.Millisecond,
+			NegativeTimeout: 0,
+		},
+		repository,
+		store,
+	)
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := mounted.Unmount(); err != nil {
+			t.Errorf("cleanup Unmount: %v", err)
+		}
+	})
+
+	movies := filepath.Join(mountpoint, library.Name, "Movies")
+	if err := os.Mkdir(movies, 0o750); err != nil {
+		t.Fatalf("Mkdir Movies: %v", err)
+	}
+	path := filepath.Join(movies, "poster.jpg")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o640)
+	if err != nil {
+		t.Fatalf("OpenFile create Overlay: %v", err)
+	}
+	t.Cleanup(func() {
+		file.Close()
+	})
+	if _, err := file.WriteAt([]byte("abcdef"), 0); err != nil {
+		t.Fatalf("WriteAt initial: %v", err)
+	}
+	if _, err := file.WriteAt([]byte("XY"), 2); err != nil {
+		t.Fatalf("WriteAt random: %v", err)
+	}
+	appendFile, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("OpenFile append: %v", err)
+	}
+	if _, err := appendFile.Write([]byte("-append")); err != nil {
+		appendFile.Close()
+		t.Fatalf("append Write: %v", err)
+	}
+	if err := appendFile.Sync(); err != nil {
+		appendFile.Close()
+		t.Fatalf("append Sync: %v", err)
+	}
+	if err := appendFile.Close(); err != nil {
+		t.Fatalf("append Close: %v", err)
+	}
+	if err := file.Truncate(10); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	atime := time.Unix(11, 12)
+	mtime := time.Unix(13, 14)
+	if err := os.Chtimes(path, atime, mtime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat Overlay: %v", err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	if info.Mode().Perm() != 0o600 ||
+		info.Size() != 10 ||
+		stat.Uid != uint32(os.Geteuid()) ||
+		stat.Gid != uint32(os.Getegid()) ||
+		stat.Atim.Sec != atime.Unix() ||
+		stat.Mtim.Sec != mtime.Unix() {
+		t.Errorf("Overlay stat = mode %v size %d owner %d:%d atime %v mtime %v",
+			info.Mode().Perm(),
+			info.Size(),
+			stat.Uid,
+			stat.Gid,
+			stat.Atim,
+			stat.Mtim,
+		)
+	}
+	record, err := repository.Child(context.Background(), library.RootNodeID, "Movies")
+	if err != nil {
+		t.Fatalf("read Movies node: %v", err)
+	}
+	overlay, err := repository.Child(context.Background(), record.ID, "poster.jpg")
+	if err != nil {
+		t.Fatalf("read Overlay node: %v", err)
+	}
+	if overlay.ObjectID == nil {
+		t.Fatal("Overlay has no backing object")
+	}
+	backing, err := store.StatObject(context.Background(), *overlay.ObjectID)
+	if err != nil {
+		t.Fatalf("StatObject: %v", err)
+	}
+	if os.FileMode(backing.Mode).Perm() != 0o600 ||
+		backing.Uid != uint32(os.Geteuid()) ||
+		backing.Gid != uint32(os.Getegid()) {
+		t.Errorf("backing metadata = mode %#o owner %d:%d",
+			os.FileMode(backing.Mode).Perm(),
+			backing.Uid,
+			backing.Gid,
+		)
+	}
+
+	renamed := filepath.Join(movies, "cover.jpg")
+	if err := os.Rename(path, renamed); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if err := os.Remove(renamed); err != nil {
+		t.Fatalf("Unlink: %v", err)
+	}
+	buffer := make([]byte, 10)
+	if read, err := file.ReadAt(buffer, 0); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("ReadAt active unlinked handle: %v", err)
+	} else if read != 10 || string(buffer) != "abXYef-app" {
+		t.Errorf("active unlinked read = %d/%q", read, buffer)
+	}
+	if err := os.Remove(movies); err != nil {
+		t.Fatalf("Rmdir Movies: %v", err)
+	}
+}
 
 func TestMountReadOnlyTraversalIntegration(t *testing.T) {
 	requireFUSEIntegration(t)
@@ -341,6 +500,44 @@ func createIntegrationNamespace(
 		t.Fatalf("create integration namespace: %v", err)
 	}
 	return projection
+}
+
+func createIntegrationLibrary(
+	t *testing.T,
+	repository *namespace.Repository,
+) namespace.Library {
+	t.Helper()
+	var library namespace.Library
+	if _, err := repository.Update(
+		context.Background(),
+		namespace.Operation{
+			Name:  "fuse.integration.library",
+			Actor: namespace.Actor{Kind: namespace.ActorSystem},
+			Details: namespace.OperationDetails{
+				Paths:     []string{"jellyfin"},
+				NodeKinds: []namespace.NodeKind{namespace.LibraryRoot},
+			},
+		},
+		func(transaction *namespace.Transaction) error {
+			var err error
+			library, err = transaction.CreateLibrary(context.Background(), namespace.CreateLibrary{
+				Name:           "jellyfin",
+				ProfileName:    "jellyfin",
+				ProfileVersion: 1,
+				Creator:        namespace.Actor{Kind: namespace.ActorSystem},
+				UID:            uint32(os.Geteuid()),
+				GID:            uint32(os.Getegid()),
+				RootMode:       0o775,
+				DirectoryMode:  0o775,
+				ProjectionMode: 0o444,
+				OverlayMode:    0o664,
+			})
+			return err
+		},
+	); err != nil {
+		t.Fatalf("CreateLibrary: %v", err)
+	}
+	return library
 }
 
 func assertIntegrationTraversal(

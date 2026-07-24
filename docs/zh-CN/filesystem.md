@@ -4,6 +4,8 @@
 
 本文定义 Directory、OverlayFile、权限、rename、object store 和缓存语义。ProjectionFile 的专用语义见 [Projection 模型](projection.md)。
 
+实现状态：Directory 和 OverlayFile 的 FUSE mutation 与 I/O 已实现。ProjectionFile 内容、rename 和 unlink 仍是独立实现单元。
+
 ## 1. 文件属性
 
 Directory 的 mode、uid、gid、atime、mtime 和虚拟 ctime 保存在 SQLite。
@@ -56,7 +58,10 @@ noexec
 
 - ProjectionFile chmod/chown：`EROFS`；
 - GlobalRoot/LibraryRoot chmod/chown：`EPERM`；
+- 在 GlobalRoot 下创建目录项：`EPERM`；
 - 普通 Directory/OverlayFile：按权限允许或由内核拒绝。
+
+LibraryRoot 自身保持受保护；具备普通内核权限的调用者可以在其下创建和删除普通子节点。
 
 ## 3. OverlayFile 操作
 
@@ -137,6 +142,8 @@ RENAME_NOREPLACE
 
 `RENAME_NOREPLACE` 且目标存在时返回 `EEXIST`。
 
+不支持的 rename flags 返回 `EINVAL`。
+
 同一 Library 内允许：
 
 - ProjectionFile rename 到不存在目标；
@@ -146,11 +153,12 @@ RENAME_NOREPLACE
 
 拒绝：
 
-- OverlayFile 覆盖 ProjectionFile；
-- ProjectionFile 覆盖已有文件；
-- 文件覆盖目录或目录覆盖文件；
-- 目录覆盖已有目录；
-- 目录移动到自身子树。
+- OverlayFile 覆盖 ProjectionFile：`EEXIST`；
+- ProjectionFile 覆盖已有文件：`EEXIST`；
+- 文件覆盖目录：`EISDIR`；
+- 目录覆盖文件：`ENOTDIR`；
+- 目录覆盖已有目录：`EEXIST`；
+- 目录移动到自身子树：`EINVAL`。
 
 普通 FUSE rename 和 `projection mv` 禁止跨 Library，返回 `EXDEV`。
 
@@ -245,6 +253,8 @@ orphan_grace_period = 24h
 - open/getattr 返回 `EIO`；
 - doctor 报告 missing object；
 - 不创建空文件。
+
+unlink 和 Overlay-over-Overlay replacement 先删除 namespace entry，再删除旧 live object。已经打开的 descriptor 在 object unlink 后继续有效。清理失败时保留未引用 object，交给恢复和 GC 流程处理；不得恢复已经过期的 namespace entry。
 
 ## 9. 缓存
 

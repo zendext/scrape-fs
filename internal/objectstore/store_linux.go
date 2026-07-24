@@ -42,6 +42,17 @@ type File struct {
 	ObjectID int64
 }
 
+func (file *File) EnableAppend() error {
+	flags, err := unix.FcntlInt(file.Fd(), unix.F_GETFL, 0)
+	if err != nil {
+		return fmt.Errorf("read object %d flags: %w", file.ObjectID, err)
+	}
+	if _, err := unix.FcntlInt(file.Fd(), unix.F_SETFL, flags|unix.O_APPEND); err != nil {
+		return fmt.Errorf("enable append for object %d: %w", file.ObjectID, err)
+	}
+	return nil
+}
+
 type hooks struct {
 	afterStagingRecord func(int64) error
 	afterStagingSync   func(int64) error
@@ -103,6 +114,16 @@ func (store *Store) Create(
 	operation namespace.Operation,
 	request namespace.CreateOverlay,
 	initial io.Reader,
+) (_ *File, _ namespace.Node, err error) {
+	return store.CreateWithFlags(ctx, operation, request, initial, 0)
+}
+
+func (store *Store) CreateWithFlags(
+	ctx context.Context,
+	operation namespace.Operation,
+	request namespace.CreateOverlay,
+	initial io.Reader,
+	flags int,
 ) (_ *File, _ namespace.Node, err error) {
 	store.coordinator.Lock()
 	defer store.coordinator.Unlock()
@@ -168,6 +189,11 @@ func (store *Store) Create(
 	}
 	if err := store.prepareHandle(handle); err != nil {
 		return nil, namespace.Node{}, err
+	}
+	if flags&unix.O_APPEND != 0 {
+		if err := handle.EnableAppend(); err != nil {
+			return nil, namespace.Node{}, err
+		}
 	}
 
 	var node namespace.Node

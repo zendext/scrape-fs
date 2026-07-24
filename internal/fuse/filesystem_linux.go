@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"math"
+	"strings"
 	"syscall"
 	"time"
 
@@ -11,6 +15,7 @@ import (
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"github.com/zendext/scrape-fs/internal/objectstore"
 	"golang.org/x/sys/unix"
 )
 
@@ -27,11 +32,34 @@ type objectMetadataReader interface {
 	StatObject(context.Context, int64) (unix.Stat_t, error)
 }
 
+type namespaceWriter interface {
+	Update(
+		context.Context,
+		namespace.Operation,
+		func(*namespace.Transaction) error,
+	) (int64, error)
+	SetAttributes(context.Context, namespace.SetAttributes) (namespace.Node, error)
+}
+
+type objectWriter interface {
+	CreateWithFlags(
+		context.Context,
+		namespace.Operation,
+		namespace.CreateOverlay,
+		io.Reader,
+		int,
+	) (*objectstore.File, namespace.Node, error)
+	OpenObject(context.Context, int64, int) (*objectstore.File, error)
+	DeleteObject(int64) error
+}
+
 type node struct {
 	gofs.Inode
-	reader  namespaceReader
-	objects objectMetadataReader
-	record  namespace.Node
+	reader       namespaceReader
+	writer       namespaceWriter
+	objects      objectMetadataReader
+	objectWriter objectWriter
+	record       namespace.Node
 }
 
 func newRoot(
@@ -52,7 +80,15 @@ func newRoot(
 	if root.ID != 1 || root.Kind != namespace.GlobalRoot || root.ParentID != nil {
 		return nil, fmt.Errorf("%w: invalid GlobalRoot", namespace.ErrInvalidRoot)
 	}
-	return &node{reader: reader, objects: objects, record: root}, nil
+	writer, _ := reader.(namespaceWriter)
+	objectWriter, _ := objects.(objectWriter)
+	return &node{
+		reader:       reader,
+		writer:       writer,
+		objects:      objects,
+		objectWriter: objectWriter,
+		record:       root,
+	}, nil
 }
 
 func filesystemOptions(configuration config.FUSE) gofs.Options {
@@ -108,9 +144,11 @@ func (current *node) Lookup(
 	}
 
 	operations := &node{
-		reader:  current.reader,
-		objects: current.objects,
-		record:  child,
+		reader:       current.reader,
+		writer:       current.writer,
+		objects:      current.objects,
+		objectWriter: current.objectWriter,
+		record:       child,
 	}
 	inode := current.NewInode(ctx, operations, stableAttr(child))
 	return inode, 0
@@ -118,11 +156,15 @@ func (current *node) Lookup(
 
 func (current *node) Getattr(
 	ctx context.Context,
-	_ gofs.FileHandle,
+	file gofs.FileHandle,
 	out *gofuse.AttrOut,
 ) syscall.Errno {
 	record, err := current.reader.Node(ctx, current.record.ID)
 	if err != nil {
+		if handle, ok := file.(*overlayHandle); ok &&
+			errors.Is(err, namespace.ErrNotFound) {
+			return handle.Getattr(ctx, out)
+		}
 		return errorNumber(err)
 	}
 	if record.ID != current.record.ID || record.Kind != current.record.Kind {
@@ -186,21 +228,168 @@ func (current *node) Readdir(ctx context.Context) (gofs.DirStream, syscall.Errno
 }
 
 func (current *node) Setattr(
-	context.Context,
-	gofs.FileHandle,
-	*gofuse.SetAttrIn,
-	*gofuse.AttrOut,
+	ctx context.Context,
+	file gofs.FileHandle,
+	input *gofuse.SetAttrIn,
+	out *gofuse.AttrOut,
 ) syscall.Errno {
-	return current.mutationError()
+	switch current.record.Kind {
+	case namespace.GlobalRoot, namespace.LibraryRoot:
+		return syscall.EPERM
+	case namespace.ProjectionFile:
+		return syscall.EROFS
+	case namespace.Directory, namespace.OverlayFile:
+	default:
+		return syscall.EIO
+	}
+	if current.writer == nil {
+		return syscall.EIO
+	}
+
+	modeValue, hasMode := input.GetMode()
+	uid, hasUID := input.GetUID()
+	gid, hasGID := input.GetGID()
+	size, hasSize := input.GetSize()
+	atime, hasAtime := input.GetATime()
+	mtime, hasMtime := input.GetMTime()
+	if current.record.Kind == namespace.Directory && hasSize {
+		return syscall.EISDIR
+	}
+
+	attributes := namespace.SetAttributes{NodeID: current.record.ID}
+	if hasMode {
+		mode := fs.FileMode(modeValue).Perm()
+		attributes.Mode = &mode
+	}
+	if hasUID {
+		attributes.UID = &uid
+	}
+	if hasGID {
+		attributes.GID = &gid
+	}
+	if current.record.Kind == namespace.Directory {
+		if hasAtime {
+			value := atime.UnixNano()
+			attributes.AtimeNS = &value
+		}
+		if hasMtime {
+			value := mtime.UnixNano()
+			attributes.MtimeNS = &value
+		}
+	}
+
+	requestHandle, handleBased := file.(*overlayHandle)
+	objectChanged := false
+	if current.record.Kind == namespace.OverlayFile &&
+		(hasSize || hasAtime || hasMtime) {
+		handle, temporary, errno := current.overlayHandle(ctx, file, unix.O_RDWR)
+		if errno != 0 {
+			return errno
+		}
+		if temporary {
+			defer handle.Release(context.Background())
+		}
+		if hasSize {
+			if size > math.MaxInt64 {
+				return syscall.EFBIG
+			}
+			if errno := handle.truncate(int64(size)); errno != 0 {
+				return errno
+			}
+		}
+		if hasAtime || hasMtime {
+			var atimePointer *time.Time
+			var mtimePointer *time.Time
+			if hasAtime {
+				atimePointer = &atime
+			}
+			if hasMtime {
+				mtimePointer = &mtime
+			}
+			if errno := handle.setTimes(atimePointer, mtimePointer); errno != 0 {
+				return errno
+			}
+		}
+		objectChanged = true
+	}
+
+	virtualChanged := attributes.Mode != nil ||
+		attributes.UID != nil ||
+		attributes.GID != nil
+	directoryTimesChanged := attributes.AtimeNS != nil ||
+		attributes.MtimeNS != nil
+	metadataChanged := virtualChanged ||
+		directoryTimesChanged ||
+		objectChanged
+	persistMetadata := (current.record.Kind == namespace.Directory &&
+		(virtualChanged || directoryTimesChanged)) ||
+		(current.record.Kind == namespace.OverlayFile && virtualChanged)
+	if persistMetadata {
+		record, err := current.writer.SetAttributes(ctx, attributes)
+		if err != nil {
+			if current.record.Kind == namespace.OverlayFile &&
+				handleBased &&
+				errors.Is(err, namespace.ErrNotFound) {
+				requestHandle.updateVirtualAttributes(attributes)
+			} else {
+				return errorNumber(err)
+			}
+		} else if handleBased {
+			requestHandle.updateRecord(record)
+		}
+	}
+	if errno := current.Getattr(ctx, file, out); errno != 0 {
+		return errno
+	}
+	if metadataChanged {
+		_ = current.NotifyContent(0, 0)
+	}
+	return 0
 }
 
 func (current *node) Mkdir(
-	context.Context,
-	string,
-	uint32,
-	*gofuse.EntryOut,
+	ctx context.Context,
+	name string,
+	mode uint32,
+	out *gofuse.EntryOut,
 ) (*gofs.Inode, syscall.Errno) {
-	return nil, current.mutationError()
+	if current.record.Kind == namespace.GlobalRoot {
+		return nil, syscall.EPERM
+	}
+	if !directoryKind(current.record.Kind) {
+		return nil, syscall.ENOTDIR
+	}
+	caller, actor, errno := fuseActor(ctx)
+	if errno != 0 || current.writer == nil {
+		if errno == 0 {
+			errno = syscall.EIO
+		}
+		return nil, errno
+	}
+	var created namespace.Node
+	operation := current.operation(ctx, "fuse.directory.create", name, namespace.Directory, actor)
+	if _, err := current.writer.Update(ctx, operation, func(transaction *namespace.Transaction) error {
+		var err error
+		created, err = transaction.CreateNode(ctx, namespace.CreateNode{
+			ParentID: current.record.ID,
+			Name:     name,
+			Kind:     namespace.Directory,
+			Creator:  actor,
+			Attributes: namespace.Attributes{
+				Mode: fs.FileMode(mode).Perm(),
+				UID:  caller.Uid,
+				GID:  caller.Gid,
+			},
+		})
+		return err
+	}); err != nil {
+		return nil, errorNumber(err)
+	}
+	child, errno := current.newChild(ctx, created, out)
+	if errno == 0 {
+		current.invalidateAttributes()
+	}
+	return child, errno
 }
 
 func (current *node) Mknod(
@@ -210,17 +399,63 @@ func (current *node) Mknod(
 	uint32,
 	*gofuse.EntryOut,
 ) (*gofs.Inode, syscall.Errno) {
-	return nil, current.mutationError()
+	if current.record.Kind == namespace.GlobalRoot {
+		return nil, syscall.EPERM
+	}
+	if !directoryKind(current.record.Kind) {
+		return nil, syscall.ENOTDIR
+	}
+	return nil, syscall.EOPNOTSUPP
 }
 
 func (current *node) Create(
-	context.Context,
-	string,
-	uint32,
-	uint32,
-	*gofuse.EntryOut,
+	ctx context.Context,
+	name string,
+	flags uint32,
+	mode uint32,
+	out *gofuse.EntryOut,
 ) (*gofs.Inode, gofs.FileHandle, uint32, syscall.Errno) {
-	return nil, nil, 0, current.mutationError()
+	if current.record.Kind == namespace.GlobalRoot {
+		return nil, nil, 0, syscall.EPERM
+	}
+	if !directoryKind(current.record.Kind) {
+		return nil, nil, 0, syscall.ENOTDIR
+	}
+	caller, actor, errno := fuseActor(ctx)
+	if errno != 0 || current.objectWriter == nil {
+		if errno == 0 {
+			errno = syscall.EIO
+		}
+		return nil, nil, 0, errno
+	}
+	operation := current.operation(ctx, "fuse.overlay.create", name, namespace.OverlayFile, actor)
+	file, created, err := current.objectWriter.CreateWithFlags(
+		ctx,
+		operation,
+		namespace.CreateOverlay{
+			ParentID: current.record.ID,
+			Name:     name,
+			Creator:  actor,
+			Attributes: namespace.Attributes{
+				Mode: fs.FileMode(mode).Perm(),
+				UID:  caller.Uid,
+				GID:  caller.Gid,
+			},
+		},
+		nil,
+		int(flags),
+	)
+	if err != nil {
+		return nil, nil, 0, errorNumber(err)
+	}
+	inode, errno := current.newChild(ctx, created, out)
+	if errno != 0 {
+		file.Close()
+		return nil, nil, 0, errno
+	}
+	current.invalidateAttributes()
+	handle := &overlayHandle{file: file, flags: int(flags), record: created}
+	return inode, handle, 0, 0
 }
 
 func (current *node) Symlink(
@@ -229,7 +464,13 @@ func (current *node) Symlink(
 	string,
 	*gofuse.EntryOut,
 ) (*gofs.Inode, syscall.Errno) {
-	return nil, current.mutationError()
+	if current.record.Kind == namespace.GlobalRoot {
+		return nil, syscall.EPERM
+	}
+	if !directoryKind(current.record.Kind) {
+		return nil, syscall.ENOTDIR
+	}
+	return nil, syscall.EOPNOTSUPP
 }
 
 func (current *node) Link(
@@ -238,33 +479,325 @@ func (current *node) Link(
 	string,
 	*gofuse.EntryOut,
 ) (*gofs.Inode, syscall.Errno) {
-	return nil, current.mutationError()
+	if current.record.Kind == namespace.GlobalRoot {
+		return nil, syscall.EPERM
+	}
+	if !directoryKind(current.record.Kind) {
+		return nil, syscall.ENOTDIR
+	}
+	return nil, syscall.EOPNOTSUPP
 }
 
-func (current *node) Unlink(context.Context, string) syscall.Errno {
-	return current.mutationError()
+func (current *node) Readlink(context.Context) ([]byte, syscall.Errno) {
+	return nil, syscall.EOPNOTSUPP
 }
 
-func (current *node) Rmdir(context.Context, string) syscall.Errno {
-	return current.mutationError()
+func (current *node) Unlink(ctx context.Context, name string) syscall.Errno {
+	if current.record.Kind == namespace.GlobalRoot {
+		return syscall.EPERM
+	}
+	if !directoryKind(current.record.Kind) {
+		return syscall.ENOTDIR
+	}
+	if current.writer == nil || current.objectWriter == nil {
+		return syscall.EIO
+	}
+	child, err := current.reader.Child(ctx, current.record.ID, name)
+	if err != nil {
+		return errorNumber(err)
+	}
+	if child.Kind == namespace.Directory {
+		return syscall.EISDIR
+	}
+	if child.Kind != namespace.OverlayFile {
+		return syscall.EROFS
+	}
+	_, actor, errno := fuseActor(ctx)
+	if errno != 0 {
+		return errno
+	}
+	operation := current.operation(ctx, "fuse.overlay.unlink", name, child.Kind, actor)
+	var removed namespace.Node
+	if _, err := current.writer.Update(ctx, operation, func(transaction *namespace.Transaction) error {
+		var err error
+		removed, err = transaction.RemoveOverlay(ctx, current.record.ID, name)
+		return err
+	}); err != nil {
+		return errorNumber(err)
+	}
+	if removed.ObjectID != nil {
+		_ = current.objectWriter.DeleteObject(*removed.ObjectID)
+	}
+	current.invalidateAttributes()
+	return 0
+}
+
+func (current *node) Rmdir(ctx context.Context, name string) syscall.Errno {
+	if current.record.Kind == namespace.GlobalRoot {
+		return syscall.EPERM
+	}
+	if !directoryKind(current.record.Kind) {
+		return syscall.ENOTDIR
+	}
+	if current.writer == nil {
+		return syscall.EIO
+	}
+	child, err := current.reader.Child(ctx, current.record.ID, name)
+	if err != nil {
+		return errorNumber(err)
+	}
+	if child.Kind != namespace.Directory {
+		return syscall.ENOTDIR
+	}
+	_, actor, errno := fuseActor(ctx)
+	if errno != 0 {
+		return errno
+	}
+	operation := current.operation(ctx, "fuse.directory.remove", name, child.Kind, actor)
+	if _, err := current.writer.Update(ctx, operation, func(transaction *namespace.Transaction) error {
+		_, err := transaction.RemoveDirectory(ctx, current.record.ID, name)
+		return err
+	}); err != nil {
+		return errorNumber(err)
+	}
+	current.invalidateAttributes()
+	return 0
 }
 
 func (current *node) Rename(
-	context.Context,
-	string,
-	gofs.InodeEmbedder,
-	string,
-	uint32,
+	ctx context.Context,
+	name string,
+	newParent gofs.InodeEmbedder,
+	newName string,
+	flags uint32,
 ) syscall.Errno {
-	return current.mutationError()
-}
-
-func (current *node) mutationError() syscall.Errno {
-	if current.record.Kind == namespace.GlobalRoot ||
-		current.record.Kind == namespace.LibraryRoot {
+	if current.record.Kind == namespace.GlobalRoot {
 		return syscall.EPERM
 	}
-	return syscall.EROFS
+	if flags != 0 && flags != unix.RENAME_NOREPLACE {
+		return syscall.EINVAL
+	}
+	targetParent, ok := newParent.(*node)
+	if !ok ||
+		current.writer == nil ||
+		targetParent.writer == nil ||
+		current.writer != targetParent.writer {
+		return syscall.EXDEV
+	}
+	source, err := current.reader.Child(ctx, current.record.ID, name)
+	if err != nil {
+		return errorNumber(err)
+	}
+	if source.Kind == namespace.ProjectionFile {
+		return syscall.EROFS
+	}
+	if source.Kind != namespace.Directory && source.Kind != namespace.OverlayFile {
+		return syscall.EPERM
+	}
+	sourceInode := current.GetChild(name)
+	_, actor, errno := fuseActor(ctx)
+	if errno != 0 {
+		return errno
+	}
+	operation := namespace.Operation{
+		Name:  "fuse.node.rename",
+		Actor: actor,
+		Details: namespace.OperationDetails{
+			Paths: []string{
+				current.childPath(ctx, name),
+				targetParent.childPath(ctx, newName),
+			},
+			NodeKinds: []namespace.NodeKind{source.Kind, source.Kind},
+		},
+	}
+	var result namespace.RenameResult
+	if _, err := current.writer.Update(ctx, operation, func(transaction *namespace.Transaction) error {
+		var err error
+		result, err = transaction.Rename(ctx, namespace.RenameNode{
+			OldParentID:        current.record.ID,
+			OldName:            name,
+			NewParentID:        targetParent.record.ID,
+			NewName:            newName,
+			NoReplace:          flags == unix.RENAME_NOREPLACE,
+			ExpectedSourceID:   source.ID,
+			ExpectedSourceKind: source.Kind,
+		})
+		return err
+	}); err != nil {
+		return errorNumber(err)
+	}
+	if result.Replaced != nil &&
+		result.Replaced.ObjectID != nil &&
+		current.objectWriter != nil {
+		_ = current.objectWriter.DeleteObject(*result.Replaced.ObjectID)
+	}
+	current.invalidateAttributes()
+	targetParent.invalidateAttributes()
+	if sourceInode != nil {
+		_ = sourceInode.NotifyContent(0, 0)
+	}
+	return 0
+}
+
+func (current *node) Open(
+	ctx context.Context,
+	flags uint32,
+) (gofs.FileHandle, uint32, syscall.Errno) {
+	if directoryKind(current.record.Kind) {
+		return nil, 0, syscall.EISDIR
+	}
+	if current.record.Kind == namespace.ProjectionFile {
+		if flags&(unix.O_WRONLY|unix.O_RDWR|unix.O_APPEND|unix.O_TRUNC) != 0 {
+			return nil, 0, syscall.EROFS
+		}
+		return nil, 0, syscall.EOPNOTSUPP
+	}
+	if current.record.Kind != namespace.OverlayFile ||
+		current.objectWriter == nil {
+		return nil, 0, syscall.EIO
+	}
+	if flags&unix.O_CREAT != 0 && flags&unix.O_EXCL != 0 {
+		return nil, 0, syscall.EEXIST
+	}
+	record, err := current.reader.Node(ctx, current.record.ID)
+	if err != nil {
+		return nil, 0, errorNumber(err)
+	}
+	if record.ObjectID == nil {
+		return nil, 0, syscall.EIO
+	}
+	backingFlags := int(flags &^ gofuse.FMODE_EXEC)
+	file, err := current.objectWriter.OpenObject(
+		ctx,
+		*record.ObjectID,
+		backingFlags&^(unix.O_CREAT|unix.O_EXCL),
+	)
+	if err != nil {
+		return nil, 0, errorNumber(err)
+	}
+	if flags&unix.O_TRUNC != 0 {
+		_ = current.NotifyContent(0, 0)
+	}
+	return &overlayHandle{file: file, flags: int(flags), record: record}, 0, 0
+}
+
+func (current *node) Allocate(
+	context.Context,
+	gofs.FileHandle,
+	uint64,
+	uint64,
+	uint32,
+) syscall.Errno {
+	return syscall.EOPNOTSUPP
+}
+
+func (current *node) newChild(
+	ctx context.Context,
+	record namespace.Node,
+	out *gofuse.EntryOut,
+) (*gofs.Inode, syscall.Errno) {
+	if err := validateChild(current.record, record, record.Name); err != nil {
+		return nil, syscall.EIO
+	}
+	if err := fillAttr(ctx, record, current.objects, &out.Attr); err != nil {
+		return nil, errorNumber(err)
+	}
+	operations := &node{
+		reader:       current.reader,
+		writer:       current.writer,
+		objects:      current.objects,
+		objectWriter: current.objectWriter,
+		record:       record,
+	}
+	return current.NewInode(ctx, operations, stableAttr(record)), 0
+}
+
+func (current *node) overlayHandle(
+	ctx context.Context,
+	file gofs.FileHandle,
+	flags int,
+) (*overlayHandle, bool, syscall.Errno) {
+	if file != nil {
+		handle, ok := file.(*overlayHandle)
+		if !ok {
+			return nil, false, syscall.EIO
+		}
+		return handle, false, 0
+	}
+	if current.objectWriter == nil {
+		return nil, false, syscall.EIO
+	}
+	record, err := current.reader.Node(ctx, current.record.ID)
+	if err != nil {
+		return nil, false, errorNumber(err)
+	}
+	if record.Kind != namespace.OverlayFile ||
+		record.ObjectID == nil ||
+		*record.ObjectID <= 0 {
+		return nil, false, syscall.EIO
+	}
+	opened, err := current.objectWriter.OpenObject(ctx, *record.ObjectID, flags)
+	if err != nil {
+		return nil, false, errorNumber(err)
+	}
+	return &overlayHandle{file: opened, flags: flags, record: record}, true, 0
+}
+
+func (current *node) operation(
+	ctx context.Context,
+	name string,
+	childName string,
+	kind namespace.NodeKind,
+	actor namespace.Actor,
+) namespace.Operation {
+	return namespace.Operation{
+		Name:  name,
+		Actor: actor,
+		Details: namespace.OperationDetails{
+			Paths:     []string{current.childPath(ctx, childName)},
+			NodeKinds: []namespace.NodeKind{kind},
+		},
+	}
+}
+
+func (current *node) childPath(ctx context.Context, name string) string {
+	components := []string{name}
+	seen := map[int64]struct{}{}
+	currentID := current.record.ID
+	for currentID != 1 {
+		if _, duplicate := seen[currentID]; duplicate {
+			return fmt.Sprintf("inode:%d/%s", current.record.ID, name)
+		}
+		seen[currentID] = struct{}{}
+		record, err := current.reader.Node(ctx, currentID)
+		if err != nil || record.ParentID == nil {
+			return fmt.Sprintf("inode:%d/%s", current.record.ID, name)
+		}
+		components = append(components, record.Name)
+		currentID = *record.ParentID
+	}
+	for left, right := 0, len(components)-1; left < right; left, right = left+1, right-1 {
+		components[left], components[right] = components[right], components[left]
+	}
+	return strings.Join(components, "/")
+}
+
+func (current *node) invalidateAttributes() {
+	_ = current.NotifyContent(0, 0)
+}
+
+func fuseActor(
+	ctx context.Context,
+) (*gofuse.Caller, namespace.Actor, syscall.Errno) {
+	caller, ok := gofuse.FromContext(ctx)
+	if !ok {
+		return nil, namespace.Actor{}, syscall.EIO
+	}
+	actorID := int64(caller.Uid)
+	return caller, namespace.Actor{
+		Kind: namespace.ActorFuse,
+		ID:   &actorID,
+	}, 0
 }
 
 func stableAttr(record namespace.Node) gofs.StableAttr {
@@ -319,15 +852,40 @@ func fillAttr(
 		if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Size < 0 {
 			return namespace.ErrInvalidObject
 		}
-		attr.Size = uint64(stat.Size)
-		atime = timespecNanoseconds(stat.Atim)
-		mtime = timespecNanoseconds(stat.Mtim)
-		ctime = max(timespecNanoseconds(stat.Ctim), record.VirtualCtimeNS)
+		return fillOverlayAttr(record, stat, attr)
 	}
 
 	attr.Atime, attr.Atimensec = splitNanoseconds(atime)
 	attr.Mtime, attr.Mtimensec = splitNanoseconds(mtime)
 	attr.Ctime, attr.Ctimensec = splitNanoseconds(ctime)
+	return nil
+}
+
+func fillOverlayAttr(
+	record namespace.Node,
+	stat unix.Stat_t,
+	attr *gofuse.Attr,
+) error {
+	if record.ID <= 0 ||
+		record.Kind != namespace.OverlayFile ||
+		record.ObjectID == nil ||
+		*record.ObjectID <= 0 ||
+		stat.Mode&unix.S_IFMT != unix.S_IFREG ||
+		stat.Size < 0 {
+		return namespace.ErrInvalidObject
+	}
+	attr.Ino = uint64(record.ID)
+	attr.Mode = syscall.S_IFREG | uint32(record.Attributes.Mode.Perm())
+	attr.Uid = record.Attributes.UID
+	attr.Gid = record.Attributes.GID
+	attr.Nlink = 1
+	attr.Size = uint64(stat.Size)
+	attr.Atime, attr.Atimensec = splitNanoseconds(timespecNanoseconds(stat.Atim))
+	attr.Mtime, attr.Mtimensec = splitNanoseconds(timespecNanoseconds(stat.Mtim))
+	attr.Ctime, attr.Ctimensec = splitNanoseconds(max(
+		timespecNanoseconds(stat.Ctim),
+		record.VirtualCtimeNS,
+	))
 	return nil
 }
 
@@ -385,6 +943,38 @@ func fileType(kind namespace.NodeKind) uint32 {
 
 func errorNumber(err error) syscall.Errno {
 	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, syscall.EPERM):
+		return syscall.EPERM
+	case errors.Is(err, syscall.EACCES):
+		return syscall.EACCES
+	case errors.Is(err, syscall.EBADF):
+		return syscall.EBADF
+	case errors.Is(err, syscall.EINVAL):
+		return syscall.EINVAL
+	case errors.Is(err, syscall.ENOSPC):
+		return syscall.ENOSPC
+	case errors.Is(err, syscall.EFBIG):
+		return syscall.EFBIG
+	case errors.Is(err, syscall.EIO):
+		return syscall.EIO
+	case errors.Is(err, namespace.ErrConflict):
+		return syscall.EEXIST
+	case errors.Is(err, namespace.ErrNotEmpty):
+		return syscall.ENOTEMPTY
+	case errors.Is(err, namespace.ErrCrossLibrary):
+		return syscall.EXDEV
+	case errors.Is(err, namespace.ErrProtected):
+		return syscall.EPERM
+	case errors.Is(err, namespace.ErrReadOnly):
+		return syscall.EROFS
+	case errors.Is(err, namespace.ErrIsDirectory):
+		return syscall.EISDIR
+	case errors.Is(err, namespace.ErrNotDirectory):
+		return syscall.ENOTDIR
+	case errors.Is(err, namespace.ErrInvalidOperation):
+		return syscall.EINVAL
 	case errors.Is(err, namespace.ErrNotFound),
 		errors.Is(err, namespace.ErrLibraryNotFound),
 		errors.Is(err, namespace.ErrInvalidPath):

@@ -127,6 +127,90 @@ func (repository *Repository) Children(
 	return children, nil
 }
 
+func (repository *Repository) SetAttributes(
+	ctx context.Context,
+	request SetAttributes,
+) (_ Node, err error) {
+	if err := validateSetAttributes(request); err != nil {
+		return Node{}, err
+	}
+
+	var updated Node
+	err = repository.useConnection(ctx, func(connection *database.Connection) error {
+		transaction, err := connection.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin namespace metadata transaction: %w", err)
+		}
+		defer transaction.Rollback()
+
+		node, err := queryNode(ctx, transaction, "id = ?", request.NodeID)
+		if err != nil {
+			return err
+		}
+		switch node.Kind {
+		case GlobalRoot, LibraryRoot:
+			return ErrProtected
+		case ProjectionFile:
+			return ErrReadOnly
+		case Directory, OverlayFile:
+		default:
+			return ErrInvalidNode
+		}
+
+		if request.Mode != nil {
+			node.Attributes.Mode = request.Mode.Perm()
+		}
+		if request.UID != nil {
+			node.Attributes.UID = *request.UID
+		}
+		if request.GID != nil {
+			node.Attributes.GID = *request.GID
+		}
+		if request.AtimeNS != nil {
+			node.AtimeNS = *request.AtimeNS
+		}
+		if request.MtimeNS != nil {
+			node.MtimeNS = *request.MtimeNS
+		}
+		now := repository.now().UTC().UnixNano()
+		if _, err := transaction.ExecContext(ctx, `
+			UPDATE nodes
+			SET
+				mode = ?,
+				uid = ?,
+				gid = ?,
+				atime_ns = ?,
+				mtime_ns = ?,
+				virtual_ctime_ns = ?,
+				updated_at = ?
+			WHERE id = ?
+		`,
+			node.Attributes.Mode.Perm(),
+			node.Attributes.UID,
+			node.Attributes.GID,
+			node.AtimeNS,
+			node.MtimeNS,
+			now,
+			now,
+			node.ID,
+		); err != nil {
+			return classifyMutationError("update node attributes", err)
+		}
+		updated, err = queryNode(ctx, transaction, "id = ?", node.ID)
+		if err != nil {
+			return fmt.Errorf("read updated node attributes: %w", err)
+		}
+		if err := transaction.Commit(); err != nil {
+			return fmt.Errorf("commit namespace metadata transaction: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return Node{}, err
+	}
+	return updated, nil
+}
+
 func (repository *Repository) NamespaceVersion(ctx context.Context) (int64, error) {
 	var version int64
 	if err := repository.useConnection(ctx, func(connection *database.Connection) error {
@@ -1107,6 +1191,219 @@ func (transaction *Transaction) CreateOverlay(
 	return transaction.createNode(ctx, nodeRequest)
 }
 
+func (transaction *Transaction) RemoveDirectory(
+	ctx context.Context,
+	parentID int64,
+	name string,
+) (Node, error) {
+	node, err := transaction.childForMutation(ctx, parentID, name)
+	if err != nil {
+		return Node{}, err
+	}
+	if node.Kind != Directory {
+		return Node{}, ErrNotDirectory
+	}
+	var childID int64
+	if err := transaction.transaction.QueryRowContext(ctx, `
+		SELECT id
+		FROM nodes
+		WHERE parent_id = ?
+		ORDER BY id
+		LIMIT 1
+	`, node.ID).Scan(&childID); err == nil {
+		return Node{}, ErrNotEmpty
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Node{}, fmt.Errorf("check directory contents: %w", err)
+	}
+	return transaction.removeNode(ctx, node)
+}
+
+func (transaction *Transaction) RemoveOverlay(
+	ctx context.Context,
+	parentID int64,
+	name string,
+) (Node, error) {
+	node, err := transaction.childForMutation(ctx, parentID, name)
+	if err != nil {
+		return Node{}, err
+	}
+	if node.Kind == Directory {
+		return Node{}, ErrIsDirectory
+	}
+	if node.Kind != OverlayFile {
+		return Node{}, ErrReadOnly
+	}
+	return transaction.removeNode(ctx, node)
+}
+
+func (transaction *Transaction) Rename(
+	ctx context.Context,
+	request RenameNode,
+) (RenameResult, error) {
+	if request.OldParentID <= 0 || request.NewParentID <= 0 {
+		return RenameResult{}, fmt.Errorf("%w: parent IDs must be positive", ErrInvalidOperation)
+	}
+	if request.ExpectedSourceID <= 0 {
+		return RenameResult{}, fmt.Errorf("%w: invalid expected source", ErrInvalidOperation)
+	}
+	switch request.ExpectedSourceKind {
+	case Directory, OverlayFile:
+	case ProjectionFile:
+		return RenameResult{}, ErrReadOnly
+	default:
+		return RenameResult{}, fmt.Errorf("%w: invalid expected source", ErrInvalidOperation)
+	}
+	if err := validateName(request.OldName); err != nil {
+		return RenameResult{}, fmt.Errorf("%w: invalid old name: %v", ErrInvalidOperation, err)
+	}
+	if err := validateName(request.NewName); err != nil {
+		return RenameResult{}, fmt.Errorf("%w: invalid new name: %v", ErrInvalidOperation, err)
+	}
+
+	oldParent, err := queryNode(ctx, transaction.transaction, "id = ?", request.OldParentID)
+	if err != nil {
+		return RenameResult{}, err
+	}
+	newParent, err := queryNode(ctx, transaction.transaction, "id = ?", request.NewParentID)
+	if err != nil {
+		return RenameResult{}, err
+	}
+	if oldParent.Kind == GlobalRoot || newParent.Kind == GlobalRoot {
+		return RenameResult{}, ErrProtected
+	}
+	if !directoryKind(oldParent.Kind) || !directoryKind(newParent.Kind) {
+		return RenameResult{}, ErrNotDirectory
+	}
+	oldRootID, err := libraryRootID(ctx, transaction.transaction, oldParent.ID)
+	if err != nil {
+		return RenameResult{}, err
+	}
+	newRootID, err := libraryRootID(ctx, transaction.transaction, newParent.ID)
+	if err != nil {
+		return RenameResult{}, err
+	}
+	if oldRootID != newRootID {
+		return RenameResult{}, ErrCrossLibrary
+	}
+
+	source, err := queryNode(
+		ctx,
+		transaction.transaction,
+		"parent_id = ? AND name = ?",
+		request.OldParentID,
+		request.OldName,
+	)
+	if err != nil {
+		return RenameResult{}, err
+	}
+	if source.ID != request.ExpectedSourceID ||
+		source.Kind != request.ExpectedSourceKind {
+		if source.Kind == ProjectionFile &&
+			request.ExpectedSourceKind != ProjectionFile {
+			return RenameResult{}, ErrReadOnly
+		}
+		return RenameResult{}, ErrNotFound
+	}
+	if source.Kind == GlobalRoot || source.Kind == LibraryRoot {
+		return RenameResult{}, ErrProtected
+	}
+	if request.OldParentID == request.NewParentID && request.OldName == request.NewName {
+		return RenameResult{Node: source}, nil
+	}
+	if source.Kind == Directory {
+		descendant, err := nodeIsDescendant(
+			ctx,
+			transaction.transaction,
+			request.NewParentID,
+			source.ID,
+		)
+		if err != nil {
+			return RenameResult{}, err
+		}
+		if descendant {
+			return RenameResult{}, fmt.Errorf(
+				"%w: directory cannot move into its own subtree",
+				ErrInvalidOperation,
+			)
+		}
+	}
+
+	var replaced *Node
+	target, err := queryNode(
+		ctx,
+		transaction.transaction,
+		"parent_id = ? AND name = ?",
+		request.NewParentID,
+		request.NewName,
+	)
+	if err == nil {
+		if request.NoReplace {
+			return RenameResult{}, ErrConflict
+		}
+		switch {
+		case source.Kind == Directory && target.Kind != Directory:
+			return RenameResult{}, ErrNotDirectory
+		case source.Kind != Directory && target.Kind == Directory:
+			return RenameResult{}, ErrIsDirectory
+		case source.Kind == OverlayFile && target.Kind == OverlayFile:
+			removed, err := transaction.removeNodeWithoutTouch(ctx, target)
+			if err != nil {
+				return RenameResult{}, err
+			}
+			replaced = &removed
+		default:
+			return RenameResult{}, ErrConflict
+		}
+	} else if !errors.Is(err, ErrNotFound) {
+		return RenameResult{}, err
+	}
+
+	now := transaction.now().UTC().UnixNano()
+	result, err := transaction.transaction.ExecContext(ctx, `
+		UPDATE nodes
+		SET
+			parent_id = ?,
+			name = ?,
+			virtual_ctime_ns = ?,
+			updated_at = ?
+		WHERE id = ?
+		  AND parent_id = ?
+		  AND name = ?
+	`,
+		request.NewParentID,
+		request.NewName,
+		now,
+		now,
+		source.ID,
+		request.OldParentID,
+		request.OldName,
+	)
+	if err != nil {
+		return RenameResult{}, classifyMutationError("rename node", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return RenameResult{}, fmt.Errorf("read renamed node count: %w", err)
+	}
+	if updated != 1 {
+		return RenameResult{}, ErrNotFound
+	}
+	if err := transaction.touchDirectory(ctx, oldParent.ID, now); err != nil {
+		return RenameResult{}, err
+	}
+	if newParent.ID != oldParent.ID {
+		if err := transaction.touchDirectory(ctx, newParent.ID, now); err != nil {
+			return RenameResult{}, err
+		}
+	}
+	moved, err := queryNode(ctx, transaction.transaction, "id = ?", source.ID)
+	if err != nil {
+		return RenameResult{}, fmt.Errorf("read renamed node: %w", err)
+	}
+	transaction.changed = true
+	return RenameResult{Node: moved, Replaced: replaced}, nil
+}
+
 func (transaction *Transaction) CreateProjectionBatch(
 	ctx context.Context,
 	request CreateProjectionBatch,
@@ -1594,6 +1891,140 @@ func (transaction *Transaction) touchDirectory(
 	return nil
 }
 
+func (transaction *Transaction) childForMutation(
+	ctx context.Context,
+	parentID int64,
+	name string,
+) (Node, error) {
+	if parentID <= 0 {
+		return Node{}, ErrNotFound
+	}
+	if err := validateName(name); err != nil {
+		return Node{}, err
+	}
+	parent, err := queryNode(ctx, transaction.transaction, "id = ?", parentID)
+	if err != nil {
+		return Node{}, err
+	}
+	if parent.Kind == GlobalRoot {
+		return Node{}, ErrProtected
+	}
+	if !directoryKind(parent.Kind) {
+		return Node{}, ErrNotDirectory
+	}
+	return queryNode(
+		ctx,
+		transaction.transaction,
+		"parent_id = ? AND name = ?",
+		parentID,
+		name,
+	)
+}
+
+func (transaction *Transaction) removeNode(
+	ctx context.Context,
+	node Node,
+) (Node, error) {
+	removed, err := transaction.removeNodeWithoutTouch(ctx, node)
+	if err != nil {
+		return Node{}, err
+	}
+	now := transaction.now().UTC().UnixNano()
+	if err := transaction.touchDirectory(ctx, *node.ParentID, now); err != nil {
+		return Node{}, err
+	}
+	transaction.changed = true
+	return removed, nil
+}
+
+func (transaction *Transaction) removeNodeWithoutTouch(
+	ctx context.Context,
+	node Node,
+) (Node, error) {
+	if node.ParentID == nil || node.Kind == GlobalRoot || node.Kind == LibraryRoot {
+		return Node{}, ErrProtected
+	}
+	result, err := transaction.transaction.ExecContext(
+		ctx,
+		"DELETE FROM nodes WHERE id = ? AND parent_id = ? AND name = ?",
+		node.ID,
+		*node.ParentID,
+		node.Name,
+	)
+	if err != nil {
+		return Node{}, classifyMutationError("remove node", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return Node{}, fmt.Errorf("read removed node count: %w", err)
+	}
+	if deleted != 1 {
+		return Node{}, ErrNotFound
+	}
+	transaction.changed = true
+	return node, nil
+}
+
+func libraryRootID(
+	ctx context.Context,
+	query nodeQuery,
+	nodeID int64,
+) (int64, error) {
+	seen := map[int64]struct{}{}
+	currentID := nodeID
+	for {
+		if _, duplicate := seen[currentID]; duplicate {
+			return 0, fmt.Errorf("%w: node ancestry contains a cycle", ErrInvalidRoot)
+		}
+		seen[currentID] = struct{}{}
+		node, err := queryNode(ctx, query, "id = ?", currentID)
+		if err != nil {
+			return 0, err
+		}
+		switch node.Kind {
+		case LibraryRoot:
+			return node.ID, nil
+		case Directory:
+			if node.ParentID == nil {
+				return 0, ErrInvalidRoot
+			}
+			currentID = *node.ParentID
+		default:
+			return 0, ErrInvalidRoot
+		}
+	}
+}
+
+func nodeIsDescendant(
+	ctx context.Context,
+	query nodeQuery,
+	nodeID int64,
+	ancestorID int64,
+) (bool, error) {
+	seen := map[int64]struct{}{}
+	currentID := nodeID
+	for {
+		if currentID == ancestorID {
+			return true, nil
+		}
+		if _, duplicate := seen[currentID]; duplicate {
+			return false, fmt.Errorf("%w: node ancestry contains a cycle", ErrInvalidRoot)
+		}
+		seen[currentID] = struct{}{}
+		node, err := queryNode(ctx, query, "id = ?", currentID)
+		if err != nil {
+			return false, err
+		}
+		if node.Kind == LibraryRoot {
+			return false, nil
+		}
+		if node.ParentID == nil {
+			return false, ErrInvalidRoot
+		}
+		currentID = *node.ParentID
+	}
+}
+
 func validateOperation(operation Operation, change func(*Transaction) error) error {
 	if strings.TrimSpace(operation.Name) == "" {
 		return fmt.Errorf("%w: operation name must not be empty", ErrInvalidOperation)
@@ -1683,6 +2114,27 @@ func validateCreateNode(request CreateNode) error {
 		}
 	}
 	return nil
+}
+
+func validateSetAttributes(request SetAttributes) error {
+	if request.NodeID <= 0 {
+		return fmt.Errorf("%w: node ID must be positive", ErrInvalidNode)
+	}
+	if request.Mode == nil &&
+		request.UID == nil &&
+		request.GID == nil &&
+		request.AtimeNS == nil &&
+		request.MtimeNS == nil {
+		return fmt.Errorf("%w: no attributes were provided", ErrInvalidNode)
+	}
+	if request.Mode != nil && *request.Mode != request.Mode.Perm() {
+		return fmt.Errorf("%w: mode must contain only permission bits", ErrInvalidNode)
+	}
+	return nil
+}
+
+func directoryKind(kind NodeKind) bool {
+	return kind == GlobalRoot || kind == LibraryRoot || kind == Directory
 }
 
 func validateCreateProjectionBatch(request CreateProjectionBatch) error {

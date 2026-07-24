@@ -6,6 +6,8 @@
 
 This document defines Directory and OverlayFile behavior, permissions, rename rules, object storage, and caching. Projection-specific behavior is defined in the [Projection model](projection.md).
 
+Implementation status: Directory and OverlayFile FUSE mutation and I/O are implemented. ProjectionFile content, rename, and unlink remain a separate implementation unit.
+
 ## 1. Attributes
 
 Directory mode, uid, gid, atime, mtime, and virtual ctime are stored in SQLite.
@@ -58,7 +60,10 @@ Defined errors:
 
 - ProjectionFile chmod/chown: `EROFS`;
 - GlobalRoot/LibraryRoot chmod/chown: `EPERM`;
+- creating an entry under GlobalRoot: `EPERM`;
 - ordinary Directory/OverlayFile: allowed by normal permissions or rejected by the kernel.
+
+LibraryRoot itself remains protected, while callers with normal kernel permission may create and remove ordinary children below it.
 
 ## 3. OverlayFile Operations
 
@@ -139,6 +144,8 @@ RENAME_NOREPLACE
 
 `RENAME_NOREPLACE` with an existing target returns `EEXIST`.
 
+Unsupported rename flags return `EINVAL`.
+
 Within one Library:
 
 - ProjectionFile may move to a missing target;
@@ -148,11 +155,12 @@ Within one Library:
 
 Rejected:
 
-- OverlayFile replacing ProjectionFile;
-- ProjectionFile replacing an existing file;
-- file replacing directory or directory replacing file;
-- directory replacing an existing directory;
-- directory moving into its own subtree.
+- OverlayFile replacing ProjectionFile: `EEXIST`;
+- ProjectionFile replacing an existing file: `EEXIST`;
+- file replacing directory: `EISDIR`;
+- directory replacing file: `ENOTDIR`;
+- directory replacing an existing directory: `EEXIST`;
+- directory moving into its own subtree: `EINVAL`.
 
 FUSE rename and `projection mv` across Libraries return `EXDEV`.
 
@@ -245,6 +253,8 @@ When an OverlayFile node references a missing live object:
 - open/getattr returns `EIO`;
 - doctor reports a missing object;
 - ScrapeFS does not create an empty replacement.
+
+Unlink and Overlay-over-Overlay replacement remove the namespace entry before deleting the old live object. Existing open descriptors remain valid after that object is unlinked. Cleanup failures leave an unreferenced object for the recovery and garbage-collection workflow; they do not restore a stale namespace entry.
 
 ## 9. Cache
 
