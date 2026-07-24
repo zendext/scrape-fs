@@ -28,6 +28,7 @@ type mountFilesystem func(
 type Mounted struct {
 	server     mountedServer
 	mountpoint *preparedMountpoint
+	registry   *inodeRegistry
 	mu         sync.Mutex
 	finished   bool
 	unmountErr error
@@ -79,7 +80,12 @@ func Mount(
 	if err := verifyMounted(configuration.Mountpoint); err != nil {
 		return nil, errors.Join(err, unmountPrepared(prepared, server))
 	}
-	return &Mounted{server: server, mountpoint: prepared}, nil
+	root.registry.Store(root.record.ID, &root.Inode)
+	return &Mounted{
+		server:     server,
+		mountpoint: prepared,
+		registry:   root.registry,
+	}, nil
 }
 
 type directMountedServer struct {

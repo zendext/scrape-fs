@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/control"
@@ -308,6 +310,12 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 	stop := errors.New("stop control server")
 	unmountErr := errors.New("unmount failed")
 	var events []string
+	server := &recordingControlRuntime{
+		done:    make(chan struct{}),
+		events:  &events,
+		stopErr: stop,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	mount := func(
 		_ context.Context,
 		_ config.FUSE,
@@ -339,8 +347,7 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 			return unmountErr
 		}}, nil
 	}
-	serveControl := func(
-		_ context.Context,
+	startControl := func(
 		_ string,
 		_ os.FileMode,
 		_ uint32,
@@ -348,7 +355,7 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 		libraryService control.LibraryService,
 		projectionService control.ProjectionService,
 		gcService control.GCService,
-	) error {
+	) (controlRuntime, error) {
 		if service == nil {
 			t.Fatal("control service is nil")
 		}
@@ -362,21 +369,33 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 			t.Fatal("GC control service is nil")
 		}
 		events = append(events, "control")
-		return stop
+		return server, nil
 	}
 
-	err = serveRuntime(
-		context.Background(),
+	err = serveRuntimeWithDependencies(
+		ctx,
 		configuration,
 		opened,
-		mount,
-		serveControl,
+		runtimeDependencies{
+			newIndex: func(*namespace.Repository) runtimeIndex {
+				return &recordingRuntimeIndex{events: &events}
+			},
+			mount:        mount,
+			startControl: startControl,
+			notifyReady: func() error {
+				events = append(events, "ready")
+				cancel()
+				return nil
+			},
+			warnings: io.Discard,
+		},
 	)
 	if !errors.Is(err, stop) || !errors.Is(err, unmountErr) {
 		t.Fatalf("serveRuntime error = %v, want control and unmount errors", err)
 	}
-	if got := strings.Join(events, ","); got != "mount,control,unmount" {
-		t.Fatalf("runtime events = %q, want mount,control,unmount", got)
+	want := "index,mount,control,ready,stop,wait,unmount,close"
+	if got := strings.Join(events, ","); got != want {
+		t.Fatalf("runtime events = %q, want %q", got, want)
 	}
 }
 
@@ -405,33 +424,41 @@ func TestServeRuntimeRejectsUnsafeObjectStoreBeforeControl(t *testing.T) {
 
 	mountCalled := false
 	controlCalled := false
-	err = serveRuntime(
+	err = serveRuntimeWithDependencies(
 		context.Background(),
 		config.Config{
 			Storage: config.Storage{OverlayStorePath: storePath},
 		},
 		opened,
-		func(
-			context.Context,
-			config.FUSE,
-			*namespace.Repository,
-			*objectstore.Store,
-		) (mountedFilesystem, error) {
-			mountCalled = true
-			return recordingMount{}, nil
-		},
-		func(
-			context.Context,
-			string,
-			os.FileMode,
-			uint32,
-			control.BatchService,
-			control.LibraryService,
-			control.ProjectionService,
-			control.GCService,
-		) error {
-			controlCalled = true
-			return nil
+		runtimeDependencies{
+			newIndex: func(*namespace.Repository) runtimeIndex {
+				return &recordingRuntimeIndex{}
+			},
+			mount: func(
+				context.Context,
+				config.FUSE,
+				*namespace.Repository,
+				*objectstore.Store,
+			) (mountedFilesystem, error) {
+				mountCalled = true
+				return recordingMount{}, nil
+			},
+			startControl: func(
+				string,
+				os.FileMode,
+				uint32,
+				control.BatchService,
+				control.LibraryService,
+				control.ProjectionService,
+				control.GCService,
+			) (controlRuntime, error) {
+				controlCalled = true
+				return nil, nil
+			},
+			notifyReady: func() error {
+				return nil
+			},
+			warnings: io.Discard,
 		},
 	)
 	if err == nil || !strings.Contains(err.Error(), "object store") {
@@ -439,6 +466,758 @@ func TestServeRuntimeRejectsUnsafeObjectStoreBeforeControl(t *testing.T) {
 	}
 	if mountCalled || controlCalled {
 		t.Fatal("FUSE or control started after object-store initialization failure")
+	}
+}
+
+func TestServeRuntimeDoesNotSignalReadyAfterControlStops(t *testing.T) {
+	root := t.TempDir()
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer opened.Close()
+
+	controlErr := errors.New("control accept loop failed")
+	var events []string
+	done := make(chan struct{})
+	close(done)
+	server := &recordingControlRuntime{
+		done:   done,
+		events: &events,
+		err:    controlErr,
+	}
+	err = serveRuntimeWithDependencies(
+		context.Background(),
+		config.Config{
+			Storage: config.Storage{
+				OverlayStorePath: filepath.Join(root, "objects"),
+			},
+		},
+		opened,
+		runtimeDependencies{
+			newIndex: func(*namespace.Repository) runtimeIndex {
+				return &recordingRuntimeIndex{events: &events}
+			},
+			mount: func(
+				context.Context,
+				config.FUSE,
+				*namespace.Repository,
+				*objectstore.Store,
+			) (mountedFilesystem, error) {
+				events = append(events, "mount")
+				return recordingMount{unmount: func() error {
+					events = append(events, "unmount")
+					return nil
+				}}, nil
+			},
+			startControl: func(
+				string,
+				os.FileMode,
+				uint32,
+				control.BatchService,
+				control.LibraryService,
+				control.ProjectionService,
+				control.GCService,
+			) (controlRuntime, error) {
+				events = append(events, "control")
+				return server, nil
+			},
+			notifyReady: func() error {
+				events = append(events, "ready")
+				return nil
+			},
+			warnings: io.Discard,
+		},
+	)
+	if !errors.Is(err, controlErr) {
+		t.Fatalf("serveRuntimeWithDependencies error = %v, want control error", err)
+	}
+	want := "index,mount,control,stop,wait,unmount,close"
+	if got := strings.Join(events, ","); got != want {
+		t.Fatalf("runtime events = %q, want %q", got, want)
+	}
+}
+
+func TestServeRuntimeDoesNotSignalReadyAfterStartupCancellation(t *testing.T) {
+	root := t.TempDir()
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer opened.Close()
+
+	var events []string
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &recordingControlRuntime{
+		done:   make(chan struct{}),
+		events: &events,
+	}
+	err = serveRuntimeWithDependencies(
+		ctx,
+		config.Config{
+			Storage: config.Storage{
+				OverlayStorePath: filepath.Join(root, "objects"),
+			},
+		},
+		opened,
+		runtimeDependencies{
+			newIndex: func(*namespace.Repository) runtimeIndex {
+				return &recordingRuntimeIndex{events: &events}
+			},
+			mount: func(
+				context.Context,
+				config.FUSE,
+				*namespace.Repository,
+				*objectstore.Store,
+			) (mountedFilesystem, error) {
+				events = append(events, "mount")
+				return recordingMount{unmount: func() error {
+					events = append(events, "unmount")
+					return nil
+				}}, nil
+			},
+			startControl: func(
+				string,
+				os.FileMode,
+				uint32,
+				control.BatchService,
+				control.LibraryService,
+				control.ProjectionService,
+				control.GCService,
+			) (controlRuntime, error) {
+				events = append(events, "control")
+				cancel()
+				return server, nil
+			},
+			notifyReady: func() error {
+				events = append(events, "ready")
+				return nil
+			},
+			warnings: io.Discard,
+		},
+	)
+	if err != nil {
+		t.Fatalf("serveRuntimeWithDependencies: %v", err)
+	}
+	want := "index,mount,control,stop,wait,unmount,close"
+	if got := strings.Join(events, ","); got != want {
+		t.Fatalf("runtime events = %q, want %q", got, want)
+	}
+}
+
+func TestServeRuntimeOrdersReadinessAndGracefulShutdown(t *testing.T) {
+	root := t.TempDir()
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer opened.Close()
+
+	var events []string
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &recordingControlRuntime{
+		done:   make(chan struct{}),
+		events: &events,
+	}
+	err = serveRuntimeWithDependencies(
+		ctx,
+		config.Config{
+			Storage: config.Storage{
+				OverlayStorePath: filepath.Join(root, "objects"),
+			},
+		},
+		opened,
+		runtimeDependencies{
+			newIndex: func(*namespace.Repository) runtimeIndex {
+				return &recordingRuntimeIndex{events: &events}
+			},
+			mount: func(
+				context.Context,
+				config.FUSE,
+				*namespace.Repository,
+				*objectstore.Store,
+			) (mountedFilesystem, error) {
+				events = append(events, "mount")
+				return recordingMount{unmount: func() error {
+					events = append(events, "unmount")
+					return nil
+				}}, nil
+			},
+			startControl: func(
+				string,
+				os.FileMode,
+				uint32,
+				control.BatchService,
+				control.LibraryService,
+				control.ProjectionService,
+				control.GCService,
+			) (controlRuntime, error) {
+				events = append(events, "control")
+				return server, nil
+			},
+			notifyReady: func() error {
+				events = append(events, "ready")
+				cancel()
+				return nil
+			},
+			warnings: io.Discard,
+		},
+	)
+	if err != nil {
+		t.Fatalf("serveRuntimeWithDependencies: %v", err)
+	}
+	want := "index,mount,control,ready,stop,wait,unmount,close"
+	if got := strings.Join(events, ","); got != want {
+		t.Fatalf("runtime events = %q, want %q", got, want)
+	}
+	if err := opened.UseWrite(context.Background(), func() error {
+		t.Fatal("write ran after runtime shutdown")
+		return nil
+	}); !errors.Is(err, database.ErrWritesClosed) {
+		t.Fatalf("UseWrite after shutdown error = %v, want ErrWritesClosed", err)
+	}
+}
+
+func TestServeRuntimeStartupFailureMatrixDoesNotSignalReady(t *testing.T) {
+	tests := []struct {
+		name       string
+		indexErr   error
+		mountErr   error
+		controlErr error
+		notifyErr  error
+		want       string
+	}{
+		{
+			name:     "index",
+			indexErr: errors.New("index failed"),
+			want:     "index",
+		},
+		{
+			name:     "mount",
+			mountErr: errors.New("mount failed"),
+			want:     "index,mount",
+		},
+		{
+			name:       "control",
+			controlErr: errors.New("control failed"),
+			want:       "index,mount,control,unmount",
+		},
+		{
+			name:      "readiness",
+			notifyErr: errors.New("readiness failed"),
+			want:      "index,mount,control,notify,stop,wait,unmount,close",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			opened, err := database.OpenWithOptions(
+				context.Background(),
+				filepath.Join(root, "state", "scrapefs.db"),
+				database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+			)
+			if err != nil {
+				t.Fatalf("OpenWithOptions: %v", err)
+			}
+			defer opened.Close()
+
+			var events []string
+			server := &recordingControlRuntime{
+				done:   make(chan struct{}),
+				events: &events,
+			}
+			err = serveRuntimeWithDependencies(
+				context.Background(),
+				config.Config{
+					Storage: config.Storage{
+						OverlayStorePath: filepath.Join(root, "objects"),
+					},
+				},
+				opened,
+				runtimeDependencies{
+					newIndex: func(*namespace.Repository) runtimeIndex {
+						return &recordingRuntimeIndex{
+							events: &events,
+							err:    test.indexErr,
+						}
+					},
+					mount: func(
+						context.Context,
+						config.FUSE,
+						*namespace.Repository,
+						*objectstore.Store,
+					) (mountedFilesystem, error) {
+						events = append(events, "mount")
+						if test.mountErr != nil {
+							return nil, test.mountErr
+						}
+						return recordingMount{unmount: func() error {
+							events = append(events, "unmount")
+							return nil
+						}}, nil
+					},
+					startControl: func(
+						string,
+						os.FileMode,
+						uint32,
+						control.BatchService,
+						control.LibraryService,
+						control.ProjectionService,
+						control.GCService,
+					) (controlRuntime, error) {
+						events = append(events, "control")
+						if test.controlErr != nil {
+							return nil, test.controlErr
+						}
+						return server, nil
+					},
+					notifyReady: func() error {
+						events = append(events, "notify")
+						return test.notifyErr
+					},
+					warnings: io.Discard,
+				},
+			)
+			if err == nil || !errors.Is(err, firstError(
+				test.indexErr,
+				test.mountErr,
+				test.controlErr,
+				test.notifyErr,
+			)) {
+				t.Fatalf("serveRuntimeWithDependencies error = %v", err)
+			}
+			if got := strings.Join(events, ","); got != test.want {
+				t.Fatalf("runtime events = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestServeRuntimeWarnsWithoutFailingCommittedMutations(t *testing.T) {
+	root := t.TempDir()
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer opened.Close()
+
+	rebuildErr := errors.New("refresh failed")
+	invalidationErr := errors.New("invalidation failed")
+	index := &scriptedRuntimeIndex{
+		results: []runtimeIndexResult{
+			{},
+			{changes: namespace.ChangeSet{InodeIDs: []int64{1}}},
+			{err: rebuildErr},
+		},
+	}
+	mounted := &recordingInvalidatingMount{err: invalidationErr}
+	var repository *namespace.Repository
+	var mutationErr error
+	var warnings bytes.Buffer
+	var events []string
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &recordingControlRuntime{
+		done:   make(chan struct{}),
+		events: &events,
+	}
+	err = serveRuntimeWithDependencies(
+		ctx,
+		config.Config{
+			Storage: config.Storage{
+				OverlayStorePath: filepath.Join(root, "objects"),
+			},
+		},
+		opened,
+		runtimeDependencies{
+			newIndex: func(*namespace.Repository) runtimeIndex {
+				return index
+			},
+			mount: func(
+				_ context.Context,
+				_ config.FUSE,
+				got *namespace.Repository,
+				_ *objectstore.Store,
+			) (mountedFilesystem, error) {
+				repository = got
+				return mounted, nil
+			},
+			startControl: func(
+				string,
+				os.FileMode,
+				uint32,
+				control.BatchService,
+				control.LibraryService,
+				control.ProjectionService,
+				control.GCService,
+			) (controlRuntime, error) {
+				return server, nil
+			},
+			notifyReady: func() error {
+				var library namespace.Library
+				_, createErr := repository.Update(
+					context.Background(),
+					runtimeOperation(
+						"library.create",
+						[]string{"media"},
+						[]namespace.NodeKind{namespace.LibraryRoot},
+					),
+					func(transaction *namespace.Transaction) error {
+						var err error
+						library, err = transaction.CreateLibrary(
+							context.Background(),
+							runtimeLibraryRequest("media"),
+						)
+						return err
+					},
+				)
+				_, renameErr := repository.Update(
+					context.Background(),
+					runtimeOperation(
+						"library.rename",
+						[]string{"media", "movies"},
+						[]namespace.NodeKind{
+							namespace.LibraryRoot,
+							namespace.LibraryRoot,
+						},
+					),
+					func(transaction *namespace.Transaction) error {
+						_, err := transaction.RenameLibrary(
+							context.Background(),
+							library.Name,
+							"movies",
+						)
+						return err
+					},
+				)
+				mutationErr = errors.Join(createErr, renameErr)
+				cancel()
+				return nil
+			},
+			warnings: &warnings,
+		},
+	)
+	if err != nil {
+		t.Fatalf("serveRuntimeWithDependencies: %v", err)
+	}
+	if mutationErr != nil {
+		t.Fatalf("committed mutations returned warning error: %v", mutationErr)
+	}
+	if len(mounted.commits) != 1 ||
+		mounted.commits[0].Operation != "library.create" {
+		t.Fatalf("invalidation commits = %#v, want library.create", mounted.commits)
+	}
+	if !strings.Contains(warnings.String(), invalidationErr.Error()) ||
+		!strings.Contains(warnings.String(), "rebuild namespace index after library.rename") ||
+		!strings.Contains(warnings.String(), rebuildErr.Error()) {
+		t.Fatalf("warnings = %q", warnings.String())
+	}
+}
+
+func TestServeRuntimeDrainsAdmittedWriteBeforeUnmount(t *testing.T) {
+	root := t.TempDir()
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer opened.Close()
+
+	var repository *namespace.Repository
+	writeEntered := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	writeDone := make(chan error, 1)
+	unmounted := make(chan struct{})
+	shutdownStarted := make(chan struct{})
+	var events []string
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &recordingControlRuntime{
+		done:   make(chan struct{}),
+		events: &events,
+		stop: func() {
+			close(shutdownStarted)
+		},
+	}
+	runtimeDone := make(chan error, 1)
+	go func() {
+		runtimeDone <- serveRuntimeWithDependencies(
+			ctx,
+			config.Config{
+				Storage: config.Storage{
+					OverlayStorePath: filepath.Join(root, "objects"),
+				},
+			},
+			opened,
+			runtimeDependencies{
+				newIndex: func(*namespace.Repository) runtimeIndex {
+					return &recordingRuntimeIndex{}
+				},
+				mount: func(
+					_ context.Context,
+					_ config.FUSE,
+					got *namespace.Repository,
+					_ *objectstore.Store,
+				) (mountedFilesystem, error) {
+					repository = got
+					return recordingMount{unmount: func() error {
+						close(unmounted)
+						return nil
+					}}, nil
+				},
+				startControl: func(
+					string,
+					os.FileMode,
+					uint32,
+					control.BatchService,
+					control.LibraryService,
+					control.ProjectionService,
+					control.GCService,
+				) (controlRuntime, error) {
+					return server, nil
+				},
+				notifyReady: func() error {
+					go func() {
+						_, err := repository.Update(
+							context.Background(),
+							runtimeOperation(
+								"library.create",
+								[]string{"media"},
+								[]namespace.NodeKind{namespace.LibraryRoot},
+							),
+							func(transaction *namespace.Transaction) error {
+								close(writeEntered)
+								<-releaseWrite
+								_, err := transaction.CreateLibrary(
+									context.Background(),
+									runtimeLibraryRequest("media"),
+								)
+								return err
+							},
+						)
+						writeDone <- err
+					}()
+					<-writeEntered
+					cancel()
+					return nil
+				},
+				warnings: io.Discard,
+			},
+		)
+	}()
+
+	select {
+	case <-shutdownStarted:
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not begin shutdown")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		err := opened.TryUseWrite(context.Background(), func() error {
+			t.Fatal("new write ran during shutdown")
+			return nil
+		})
+		if errors.Is(err, database.ErrWritesClosed) {
+			break
+		}
+		if !errors.Is(err, database.ErrWriteInProgress) {
+			t.Fatalf("TryUseWrite during shutdown error = %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("runtime did not close write admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-unmounted:
+		t.Fatal("FUSE unmounted before admitted write completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(releaseWrite)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("admitted Update: %v", err)
+	}
+	select {
+	case err := <-runtimeDone:
+		if err != nil {
+			t.Fatalf("serveRuntimeWithDependencies: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not finish after admitted write completed")
+	}
+	if _, err := repository.Library(context.Background(), "media"); err != nil {
+		t.Fatalf("drained Library commit: %v", err)
+	}
+}
+
+func TestServeRuntimeRebuildsPersistedStateAcrossRestarts(t *testing.T) {
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "state", "scrapefs.db")
+	lockPath := filepath.Join(root, "run", "scrapefsd.lock")
+	storePath := filepath.Join(root, "objects")
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		databasePath,
+		database.Options{LockPath: lockPath},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	repository := namespace.NewRepository(opened)
+	var library namespace.Library
+	if _, err := repository.Update(
+		context.Background(),
+		runtimeOperation(
+			"library.create",
+			[]string{"media"},
+			[]namespace.NodeKind{namespace.LibraryRoot},
+		),
+		func(transaction *namespace.Transaction) error {
+			var err error
+			library, err = transaction.CreateLibrary(
+				context.Background(),
+				runtimeLibraryRequest("media"),
+			)
+			return err
+		},
+	); err != nil {
+		t.Fatalf("CreateLibrary: %v", err)
+	}
+	store, err := objectstore.OpenWithOptions(storePath, opened, objectstore.Options{
+		Repository: repository,
+	})
+	if err != nil {
+		t.Fatalf("OpenWithOptions object store: %v", err)
+	}
+	handle, node, err := store.Create(
+		context.Background(),
+		runtimeOperation(
+			"overlay.create",
+			[]string{"media/poster.jpg"},
+			[]namespace.NodeKind{namespace.OverlayFile},
+		),
+		namespace.CreateOverlay{
+			ParentID: library.RootNodeID,
+			Name:     "poster.jpg",
+			Creator:  namespace.Actor{Kind: namespace.ActorSystem},
+			Attributes: namespace.Attributes{
+				Mode: 0o640,
+				UID:  1000,
+				GID:  1000,
+			},
+		},
+		strings.NewReader("poster"),
+	)
+	if err != nil {
+		t.Fatalf("Create overlay: %v", err)
+	}
+	objectID := *node.ObjectID
+	if err := handle.Close(); err != nil {
+		t.Fatalf("overlay handle Close: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("object store Close: %v", err)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatalf("database Close: %v", err)
+	}
+
+	for restart := 1; restart <= 2; restart++ {
+		opened, err := database.OpenWithOptions(
+			context.Background(),
+			databasePath,
+			database.Options{LockPath: lockPath},
+		)
+		if err != nil {
+			t.Fatalf("restart %d OpenWithOptions: %v", restart, err)
+		}
+		var stats namespace.IndexStats
+		var content string
+		var events []string
+		ctx, cancel := context.WithCancel(context.Background())
+		server := &recordingControlRuntime{
+			done:   make(chan struct{}),
+			events: &events,
+		}
+		err = serveRuntimeWithDependencies(
+			ctx,
+			config.Config{
+				Storage: config.Storage{OverlayStorePath: storePath},
+			},
+			opened,
+			runtimeDependencies{
+				newIndex: func(repository *namespace.Repository) runtimeIndex {
+					return &capturingRuntimeIndex{
+						index: namespace.NewIndex(repository),
+						stats: &stats,
+					}
+				},
+				mount: func(
+					ctx context.Context,
+					_ config.FUSE,
+					_ *namespace.Repository,
+					store *objectstore.Store,
+				) (mountedFilesystem, error) {
+					file, err := store.OpenObject(ctx, objectID, os.O_RDONLY)
+					if err != nil {
+						return nil, err
+					}
+					data, readErr := io.ReadAll(file)
+					closeErr := file.Close()
+					if readErr != nil || closeErr != nil {
+						return nil, errors.Join(readErr, closeErr)
+					}
+					content = string(data)
+					return recordingMount{}, nil
+				},
+				startControl: func(
+					string,
+					os.FileMode,
+					uint32,
+					control.BatchService,
+					control.LibraryService,
+					control.ProjectionService,
+					control.GCService,
+				) (controlRuntime, error) {
+					return server, nil
+				},
+				notifyReady: func() error {
+					cancel()
+					return nil
+				},
+				warnings: io.Discard,
+			},
+		)
+		if err != nil {
+			t.Fatalf("restart %d serveRuntimeWithDependencies: %v", restart, err)
+		}
+		if stats != (namespace.IndexStats{Libraries: 1, Nodes: 3, Objects: 1}) {
+			t.Errorf("restart %d index stats = %#v", restart, stats)
+		}
+		if content != "poster" {
+			t.Errorf("restart %d object content = %q, want poster", restart, content)
+		}
+		if err := opened.Close(); err != nil {
+			t.Fatalf("restart %d database Close: %v", restart, err)
+		}
 	}
 }
 
@@ -451,6 +1230,157 @@ func (mounted recordingMount) Unmount() error {
 		return nil
 	}
 	return mounted.unmount()
+}
+
+type recordingInvalidatingMount struct {
+	commits []namespace.Commit
+	changes []namespace.ChangeSet
+	err     error
+}
+
+func (*recordingInvalidatingMount) Unmount() error {
+	return nil
+}
+
+func (mounted *recordingInvalidatingMount) Invalidate(
+	commit namespace.Commit,
+	changes namespace.ChangeSet,
+) []error {
+	mounted.commits = append(mounted.commits, commit)
+	mounted.changes = append(mounted.changes, changes)
+	if mounted.err == nil {
+		return nil
+	}
+	return []error{mounted.err}
+}
+
+type recordingRuntimeIndex struct {
+	events *[]string
+	err    error
+}
+
+func (index *recordingRuntimeIndex) Rebuild(
+	context.Context,
+) (namespace.ChangeSet, error) {
+	if index.events != nil {
+		*index.events = append(*index.events, "index")
+	}
+	return namespace.ChangeSet{}, index.err
+}
+
+type runtimeIndexResult struct {
+	changes namespace.ChangeSet
+	err     error
+}
+
+type scriptedRuntimeIndex struct {
+	results []runtimeIndexResult
+	calls   int
+}
+
+func (index *scriptedRuntimeIndex) Rebuild(
+	context.Context,
+) (namespace.ChangeSet, error) {
+	if index.calls >= len(index.results) {
+		return namespace.ChangeSet{}, errors.New("unexpected index rebuild")
+	}
+	result := index.results[index.calls]
+	index.calls++
+	return result.changes, result.err
+}
+
+type capturingRuntimeIndex struct {
+	index *namespace.Index
+	stats *namespace.IndexStats
+}
+
+func (index *capturingRuntimeIndex) Rebuild(
+	ctx context.Context,
+) (namespace.ChangeSet, error) {
+	changes, err := index.index.Rebuild(ctx)
+	if err == nil {
+		*index.stats = index.index.Stats()
+	}
+	return changes, err
+}
+
+type recordingControlRuntime struct {
+	done    chan struct{}
+	events  *[]string
+	err     error
+	stopErr error
+	stop    func()
+}
+
+func (server *recordingControlRuntime) Done() <-chan struct{} {
+	return server.done
+}
+
+func (server *recordingControlRuntime) Err() error {
+	return server.err
+}
+
+func (server *recordingControlRuntime) StopAccepting() error {
+	if server.events != nil {
+		*server.events = append(*server.events, "stop")
+	}
+	if server.stop != nil {
+		server.stop()
+	}
+	return server.stopErr
+}
+
+func (server *recordingControlRuntime) Wait() error {
+	if server.events != nil {
+		*server.events = append(*server.events, "wait")
+	}
+	return nil
+}
+
+func (server *recordingControlRuntime) Close() error {
+	if server.events != nil {
+		*server.events = append(*server.events, "close")
+	}
+	return nil
+}
+
+func runtimeOperation(
+	name string,
+	paths []string,
+	kinds []namespace.NodeKind,
+) namespace.Operation {
+	return namespace.Operation{
+		Name:  name,
+		Actor: namespace.Actor{Kind: namespace.ActorSystem},
+		Details: namespace.OperationDetails{
+			Paths:     paths,
+			NodeKinds: kinds,
+		},
+	}
+}
+
+func runtimeLibraryRequest(name string) namespace.CreateLibrary {
+	return namespace.CreateLibrary{
+		Name:           name,
+		ProfileName:    "jellyfin",
+		ProfileVersion: 1,
+		Creator:        namespace.Actor{Kind: namespace.ActorSystem},
+		UID:            1000,
+		GID:            1000,
+		RootMode:       0o775,
+		DirectoryMode:  0o775,
+		ProjectionMode: 0o444,
+		OverlayMode:    0o664,
+	}
+}
+
+func firstError(errors ...error) error {
+	for _, err := range errors {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func TestRunServesControlUntilContextCancellationAndClosesDatabase(t *testing.T) {

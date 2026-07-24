@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -688,6 +689,139 @@ func waitForServerReady(t *testing.T, ready <-chan struct{}) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("control server did not become ready")
 	}
+}
+
+func TestServerStopAcceptingDrainsHandlersBeforeSocketClose(t *testing.T) {
+	socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")
+	service := &blockingBatchService{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	ready := make(chan struct{})
+	server, err := startWithOptions(
+		socketPath,
+		0o660,
+		service,
+		serverOptions{
+			limits: defaultServerLimits(),
+			security: serverSecurity{
+				daemonUID:        uint32(os.Geteuid()),
+				administratorUID: uint32(os.Geteuid()),
+				controlGroupID:   uint32(os.Getegid()),
+			},
+			readPeerIdentity: readPeerIdentity,
+			ready:            ready,
+		},
+	)
+	if err != nil {
+		t.Fatalf("startWithOptions: %v", err)
+	}
+	t.Cleanup(func() {
+		select {
+		case <-service.release:
+		default:
+			close(service.release)
+		}
+		if err := server.Close(); err != nil {
+			t.Errorf("server Close: %v", err)
+		}
+	})
+	waitForServerReady(t, ready)
+
+	requestDone := make(chan error, 1)
+	go func() {
+		_, err := NewClient(socketPath).Validate(
+			context.Background(),
+			[]byte(`{"schema":"scrapefs.projection-batch/v1"}`),
+		)
+		requestDone <- err
+	}()
+	select {
+	case <-service.entered:
+	case <-time.After(time.Second):
+		t.Fatal("control request did not enter service")
+	}
+
+	if err := server.StopAccepting(); err != nil {
+		t.Fatalf("StopAccepting: %v", err)
+	}
+	if info, err := os.Lstat(socketPath); err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("socket after StopAccepting = %v/%v, want existing socket", info, err)
+	}
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- server.Wait()
+	}()
+	select {
+	case err := <-waitDone:
+		t.Fatalf("Wait returned before handler drained: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(service.release)
+	if err := <-requestDone; err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return after handler completed")
+	}
+	if err := server.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket after Close error = %v, want not exist", err)
+	}
+}
+
+type blockingBatchService struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (service *blockingBatchService) Validate(
+	context.Context,
+	[]byte,
+) (projectionbatch.ValidationResult, error) {
+	service.once.Do(func() {
+		close(service.entered)
+	})
+	<-service.release
+	return projectionbatch.ValidationResult{
+		Schema: projectionbatch.ValidationSchema,
+	}, nil
+}
+
+func (*blockingBatchService) Apply(
+	context.Context,
+	projectionbatch.ApplyRequest,
+) (projectionbatch.ApplyResult, error) {
+	return projectionbatch.ApplyResult{}, nil
+}
+
+func (*blockingBatchService) List(
+	context.Context,
+) (projectionbatch.ListResult, error) {
+	return projectionbatch.ListResult{}, nil
+}
+
+func (*blockingBatchService) Show(
+	context.Context,
+	string,
+) (projectionbatch.DetailResult, error) {
+	return projectionbatch.DetailResult{}, nil
+}
+
+func (*blockingBatchService) Undo(
+	context.Context,
+	projectionbatch.UndoRequest,
+) (projectionbatch.UndoResult, error) {
+	return projectionbatch.UndoResult{}, nil
 }
 
 func controlSocketTempDir(t *testing.T) string {

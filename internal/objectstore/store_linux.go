@@ -27,6 +27,7 @@ var ErrClosed = errors.New("object store is closed")
 type Options struct {
 	OrphanGracePeriod time.Duration
 	Now               func() time.Time
+	Repository        *namespace.Repository
 }
 
 type Store struct {
@@ -104,6 +105,10 @@ func OpenWithOptions(path string, opened *database.DB, options Options) (_ *Stor
 	if options.Now == nil {
 		options.Now = time.Now
 	}
+	repository := options.Repository
+	if repository == nil {
+		repository = namespace.NewRepository(opened)
+	}
 	root, err := prepareRoot(path)
 	if err != nil {
 		return nil, fmt.Errorf("open object store %q: %w", path, err)
@@ -141,7 +146,7 @@ func OpenWithOptions(path string, opened *database.DB, options Options) (_ *Stor
 	}
 	store := &Store{
 		database:    opened,
-		repository:  namespace.NewRepository(opened),
+		repository:  repository,
 		root:        root,
 		staging:     staging,
 		live:        live,

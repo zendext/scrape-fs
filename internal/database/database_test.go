@@ -9,10 +9,74 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
+
+func TestStopWritesRejectsNewWorkAndDrainsAdmittedWrite(t *testing.T) {
+	root := t.TempDir()
+	opened, err := OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := opened.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- opened.UseWrite(context.Background(), func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	stopped := make(chan struct{})
+	go func() {
+		opened.StopWrites()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatal("StopWrites returned before admitted write completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := opened.UseWrite(context.Background(), func() error {
+		t.Fatal("write callback ran after StopWrites")
+		return nil
+	}); !errors.Is(err, ErrWritesClosed) {
+		t.Fatalf("UseWrite after StopWrites error = %v, want ErrWritesClosed", err)
+	}
+
+	close(release)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("admitted UseWrite: %v", err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("StopWrites did not finish after admitted write completed")
+	}
+	if err := opened.TryUseWrite(context.Background(), func() error {
+		t.Fatal("TryUseWrite callback ran after StopWrites")
+		return nil
+	}); !errors.Is(err, ErrWritesClosed) {
+		t.Fatalf("TryUseWrite after StopWrites error = %v, want ErrWritesClosed", err)
+	}
+}
 
 func TestOpenInitializesDatabase(t *testing.T) {
 	root := t.TempDir()

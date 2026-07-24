@@ -87,6 +87,11 @@ flock(LOCK_EX | LOCK_NB)
 12. 创建 Unix socket。
 13. 发送 readiness。
 
+如果设置了 systemd 兼容的 `NOTIFY_SOCKET`，daemon 只会在 index、FUSE mount 和控制
+socket 全部可用后发送精确的 `READY=1` datagram。支持文件系统 socket path 和以 `@`
+开头的 Linux abstract socket；未设置该环境变量时不发送通知。通知失败会使启动失败，
+并且只清理已经获取的资源。
+
 不得卸载未知 FUSE 文件系统。
 
 daemon 必须通过持续持有的 mountpoint 目录 descriptor 挂载，而不是再次解析配置路径。
@@ -95,11 +100,12 @@ daemon 必须通过持续持有的 mountpoint 目录 descriptor 挂载，而不�
 
 ## 5. 正常停止
 
-1. 停止接受新控制请求和命名空间写事务。
-2. 等待在途事务完成。
-3. 正常卸载 FUSE。
-4. 关闭 socket 和 SQLite。
-5. 释放 daemon 锁。
+1. 停止接受新控制请求。
+2. 关闭新的 namespace write admission，并等待已准入写事务完成。
+3. 等待已接受的控制请求完成。
+4. 正常卸载 FUSE。
+5. 关闭控制 socket、object store 和 SQLite。
+6. 释放 daemon 锁。
 
 正常停止禁止使用 lazy unmount。
 
