@@ -60,9 +60,16 @@ func (service *Service) Create(
 	if err != nil {
 		return namespace.Node{}, err
 	}
+	return service.createPrepared(ctx, request, candidate)
+}
 
+func (service *Service) createPrepared(
+	ctx context.Context,
+	request CreateRequest,
+	candidate Candidate,
+) (namespace.Node, error) {
 	var created namespace.Node
-	_, err = service.repository.Update(ctx, namespace.Operation{
+	_, err := service.repository.Update(ctx, namespace.Operation{
 		Name:  "projection.create",
 		Actor: request.Actor,
 		Details: namespace.OperationDetails{
@@ -70,6 +77,9 @@ func (service *Service) Create(
 			NodeKinds: []namespace.NodeKind{namespace.ProjectionFile},
 		},
 	}, func(transaction *namespace.Transaction) error {
+		if err := transaction.ValidatePreparedLibrary(ctx, candidate.Library); err != nil {
+			return err
+		}
 		parentID := candidate.Library.RootNodeID
 		if len(candidate.Components) > 1 {
 			parent, err := transaction.EnsureManagedDirectories(

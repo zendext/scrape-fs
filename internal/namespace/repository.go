@@ -649,6 +649,35 @@ func (transaction *Transaction) NamespaceVersion(ctx context.Context) (int64, er
 	return namespaceVersion(ctx, transaction.transaction)
 }
 
+func (transaction *Transaction) ValidatePreparedLibrary(
+	ctx context.Context,
+	prepared Library,
+) error {
+	if prepared.ID <= 0 {
+		return fmt.Errorf("%w: invalid prepared Library", ErrInvalidLibrary)
+	}
+	current, err := queryLibrary(
+		ctx,
+		transaction.transaction,
+		"libraries.id = ? AND libraries.status = 'ACTIVE'",
+		prepared.ID,
+	)
+	if errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("%w: %q", ErrLibraryNotFound, prepared.Name)
+	}
+	if err != nil {
+		return fmt.Errorf("revalidate prepared Library %q: %w", prepared.Name, err)
+	}
+	if current != prepared {
+		return fmt.Errorf(
+			"%w: Library %q changed after preparation",
+			ErrConflict,
+			prepared.Name,
+		)
+	}
+	return nil
+}
+
 func (transaction *Transaction) Lookup(
 	ctx context.Context,
 	libraryRootID int64,
