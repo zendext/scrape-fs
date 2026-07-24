@@ -158,6 +158,8 @@ overlay_file_mode    = 0664
 
 LibraryRoot 只能通过控制面管理。普通 FUSE 用户对 GlobalRoot 执行 mkdir、create，或者对 LibraryRoot 执行 rename、unlink、rmdir、chmod、chown 时，必须返回 `EPERM`。
 
+重命名 ACTIVE Library 时，Library 记录和 LibraryRoot 名称在一个事务中更新，二者稳定 ID 保持不变，写一条 operation log，并只增加一次 namespace version。名称校验或唯一性检查失败时，两个名称和审计记录全部回滚。
+
 切换 Library Profile 时：
 
 - 已有 Projection 路径保持不变；

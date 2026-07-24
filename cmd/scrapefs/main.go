@@ -27,8 +27,10 @@ type cli struct {
 }
 
 type libraryCLI struct {
-	Add  libraryAddCLI  `cmd:"" help:"Create a Library."`
-	List libraryListCLI `cmd:"" help:"List Libraries."`
+	Add        libraryAddCLI        `cmd:"" help:"Create a Library."`
+	List       libraryListCLI       `cmd:"" help:"List Libraries."`
+	Rename     libraryRenameCLI     `cmd:"" help:"Rename an ACTIVE Library."`
+	SetProfile librarySetProfileCLI `cmd:"" help:"Change the Profile used by an ACTIVE Library."`
 }
 
 type libraryAddCLI struct {
@@ -37,6 +39,16 @@ type libraryAddCLI struct {
 }
 
 type libraryListCLI struct{}
+
+type libraryRenameCLI struct {
+	Name    string `arg:"" name:"name" help:"Current Library name."`
+	NewName string `arg:"" name:"new-name" help:"New Library name."`
+}
+
+type librarySetProfileCLI struct {
+	Name    string `arg:"" name:"name" help:"Library name."`
+	Profile string `help:"Built-in Profile identifier in name@version form." required:""`
+}
 
 type projectionCLI struct {
 	Add   projectionAddCLI   `cmd:"" help:"Create a direct Projection."`
@@ -88,6 +100,12 @@ type controlService interface {
 		library.ProfileIdentifier,
 	) (control.LibraryResult, error)
 	ListLibraries(context.Context) (control.LibraryListResult, error)
+	RenameLibrary(context.Context, string, string) (control.LibraryResult, error)
+	SetLibraryProfile(
+		context.Context,
+		string,
+		library.ProfileIdentifier,
+	) (control.LibraryResult, error)
 	CreateProjection(
 		context.Context,
 		projection.CreateRequest,
@@ -196,6 +214,28 @@ func runWithBatchService(
 		}
 	case strings.HasPrefix(command, "library list"):
 		result, err = service.ListLibraries(ctx)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case strings.HasPrefix(command, "library rename"):
+		result, err = service.RenameLibrary(
+			ctx,
+			commandLine.Library.Rename.Name,
+			commandLine.Library.Rename.NewName,
+		)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case strings.HasPrefix(command, "library set-profile"):
+		profile, err := parseProfileIdentifier(commandLine.Library.SetProfile.Profile)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+		result, err = service.SetLibraryProfile(
+			ctx,
+			commandLine.Library.SetProfile.Name,
+			profile,
+		)
 		if err != nil {
 			return writeCommandError(stderr, err)
 		}

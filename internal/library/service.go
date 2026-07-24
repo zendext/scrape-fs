@@ -40,6 +40,18 @@ type CreateRequest struct {
 	Modes   Modes
 }
 
+type RenameRequest struct {
+	Name    string
+	NewName string
+	Actor   namespace.Actor
+}
+
+type SetProfileRequest struct {
+	Name    string
+	Profile ProfileIdentifier
+	Actor   namespace.Actor
+}
+
 type Service struct {
 	repository *namespace.Repository
 }
@@ -96,4 +108,77 @@ func (service *Service) Get(ctx context.Context, name string) (namespace.Library
 
 func (service *Service) List(ctx context.Context) ([]namespace.Library, error) {
 	return service.repository.Libraries(ctx)
+}
+
+func (service *Service) Rename(
+	ctx context.Context,
+	request RenameRequest,
+) (namespace.Library, error) {
+	if err := validateName(request.Name); err != nil {
+		return namespace.Library{}, err
+	}
+	if err := validateName(request.NewName); err != nil {
+		return namespace.Library{}, err
+	}
+
+	var renamed namespace.Library
+	_, err := service.repository.Update(ctx, namespace.Operation{
+		Name:  "library.rename",
+		Actor: request.Actor,
+		Details: namespace.OperationDetails{
+			Paths:     []string{request.Name, request.NewName},
+			NodeKinds: []namespace.NodeKind{namespace.LibraryRoot, namespace.LibraryRoot},
+		},
+	}, func(transaction *namespace.Transaction) error {
+		var err error
+		renamed, err = transaction.RenameLibrary(ctx, request.Name, request.NewName)
+		return err
+	})
+	if err != nil {
+		if errors.Is(err, namespace.ErrConflict) {
+			return namespace.Library{}, fmt.Errorf("%w: %w", ErrAlreadyExists, err)
+		}
+		return namespace.Library{}, err
+	}
+	return renamed, nil
+}
+
+func (service *Service) SetProfile(
+	ctx context.Context,
+	request SetProfileRequest,
+) (namespace.Library, error) {
+	if err := validateName(request.Name); err != nil {
+		return namespace.Library{}, err
+	}
+
+	var updated namespace.Library
+	_, err := service.repository.Update(ctx, namespace.Operation{
+		Name:  "library.set-profile",
+		Actor: request.Actor,
+		Details: namespace.OperationDetails{
+			Paths:     []string{request.Name},
+			NodeKinds: []namespace.NodeKind{namespace.LibraryRoot},
+		},
+	}, func(transaction *namespace.Transaction) error {
+		var err error
+		updated, err = transaction.SetLibraryProfile(
+			ctx,
+			request.Name,
+			request.Profile.Name,
+			request.Profile.Version,
+		)
+		return err
+	})
+	if err != nil {
+		return namespace.Library{}, err
+	}
+	return updated, nil
+}
+
+func validateName(name string) error {
+	components, err := namespace.ValidateRelativePath(name)
+	if err != nil || len(components) != 1 {
+		return fmt.Errorf("%w: invalid name %q", namespace.ErrInvalidLibrary, name)
+	}
+	return nil
 }

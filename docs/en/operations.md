@@ -128,8 +128,8 @@ scrapefs doctor
 
 scrapefs library add <name> --profile <name>@<version>
 scrapefs library list
-scrapefs library rename
-scrapefs library set-profile
+scrapefs library rename <name> <new-name>
+scrapefs library set-profile <name> --profile <name>@<version>
 scrapefs library remove
 
 scrapefs projection add <source> <library:/target>
@@ -153,7 +153,11 @@ Daemon:
 scrapefsd
 ```
 
-Every implemented Library, Projection, and Projection Batch command writes machine-readable JSON. `library add` creates an ACTIVE Library with the invoking administrator's peer UID/GID and the fixed v1 modes `0775` for the LibraryRoot and directories, `0444` for Projections, and `0664` for OverlayFiles. Only the built-in `jellyfin@1` and `plex@1` Profiles are accepted. `library list` returns ACTIVE Libraries in deterministic name order and is available to administrators and control users.
+Every implemented Library, Projection, and Projection Batch command writes machine-readable JSON. Library mutations return `scrapefs.library-result/v1`; `library list` returns `scrapefs.library-list/v1`.
+
+`library add` creates an ACTIVE Library with the invoking administrator's peer UID/GID and the fixed v1 modes `0775` for the LibraryRoot and directories, `0444` for Projections, and `0664` for OverlayFiles. `library rename` atomically renames the ACTIVE Library record and its protected LibraryRoot, preserves both stable IDs, writes one operation-log entry, and increments namespace version once. A duplicate or invalid new name leaves the Library, LibraryRoot, namespace version, and operation log unchanged.
+
+`library set-profile` changes the Profile used by later direct Projection and Projection Batch validation/apply. It does not move or rename existing nodes, writes one operation-log entry, and does not increment namespace version. Only the built-in `jellyfin@1` and `plex@1` Profiles are accepted. `library add`, `library rename`, and `library set-profile` require administrator authorization. `library list` returns ACTIVE Libraries in deterministic name order and is available to administrators and control users.
 
 `projection add` returns the new Projection using `scrapefs.projection-result/v1`. Source selection, target validation, and namespace mutation run only after control authorization succeeds. `projection list` returns direct and batch Projections using `scrapefs.projection-list/v1`, ordered deterministically by Library, relative target, and node ID. `--library <name>` limits the result to that ACTIVE Library. Listing uses persisted cached metadata and does not open source files.
 
