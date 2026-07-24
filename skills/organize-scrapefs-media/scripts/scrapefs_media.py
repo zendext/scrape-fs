@@ -589,7 +589,36 @@ def enumerate_source(source):
             visit(path / child.name)
 
     visit(source)
+    if files == [source] and EPISODE_PATTERN.search(source.stem) is None:
+        try:
+            with os.scandir(source.parent) as iterator:
+                siblings = sorted(iterator, key=lambda item: item.name)
+        except OSError as error:
+            manual.append(
+                manual_item(
+                    "source_access_failed",
+                    f"cannot enumerate adjacent sidecars with invoking-user permissions: {error}",
+                    source.parent,
+                )
+            )
+        else:
+            for sibling in siblings:
+                path = source.parent / sibling.name
+                if path != source and is_adjacent_movie_sidecar(path, source):
+                    visit(path)
     return files, manual
+
+
+def is_adjacent_movie_sidecar(path, video):
+    extension = path.suffix.casefold()
+    if extension in SUBTITLE_EXTENSIONS:
+        return path.stem == video.stem or path.name.startswith(video.stem + ".")
+    if extension == ".nfo":
+        return path.name.casefold() == "movie.nfo" or path.stem == video.stem
+    return (
+        extension in ARTWORK_EXTENSIONS
+        and path.stem.casefold() in ARTWORK_STEMS
+    )
 
 
 def first_symlink_component(path):
@@ -691,6 +720,12 @@ def probe_video(path, ffprobe):
             f"ffprobe returned invalid JSON: {error}",
             path,
         ) from error
+    if not isinstance(document, dict):
+        raise ManualHandling(
+            "probe_failed",
+            "ffprobe returned JSON that is not an object",
+            path,
+        )
     streams = document.get("streams")
     if not isinstance(streams, list) or not any(
         stream.get("codec_type") == "video"
@@ -1473,15 +1508,39 @@ def validate_targets(entries, artifacts, profile):
             )
         sources.add(source)
         targets.add(target)
-        validate_relative_posix_path(target)
-        validate_profile_target(target, profile)
+        validate_generated_target(target, profile)
     for artifact in artifacts:
-        validate_relative_posix_path(artifact["target"])
-        validate_profile_target(artifact["target"], profile)
+        validate_generated_target(
+            artifact["target"],
+            profile,
+            includes_library=True,
+        )
 
 
-def validate_profile_target(target, profile):
-    for component in PurePosixPath(target).parts:
+def validate_generated_target(target, profile, includes_library=False):
+    try:
+        parts = validate_relative_posix_path(target)
+    except ValueError as error:
+        raise ManualHandling(
+            "unsafe_generated_name",
+            f"generated target path is invalid: {error}",
+            target,
+        ) from error
+    if includes_library:
+        if len(parts) < 2:
+            raise ManualHandling(
+                "unsafe_generated_name",
+                "generated artifact target must include a Library name and path",
+                target,
+            )
+        parts = parts[1:]
+    validate_profile_target(target, profile, parts)
+
+
+def validate_profile_target(target, profile, components=None):
+    if components is None:
+        components = PurePosixPath(target).parts
+    for component in components:
         if any(unicodedata.category(character) == "Cc" for character in component):
             raise ManualHandling(
                 "unsafe_generated_name",

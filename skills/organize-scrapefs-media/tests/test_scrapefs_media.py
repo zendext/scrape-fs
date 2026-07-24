@@ -208,6 +208,78 @@ class ScrapeFSMediaTests(unittest.TestCase):
         self.assertNotIn("source", artifact)
         self.assertIn("<title>Dune: Part One</title>", artifact["content"])
 
+    def test_plans_supported_sidecars_for_single_file_movie(self):
+        source = self.root / "Dune.2021.mkv"
+        source.write_text("fixture movie", encoding="utf-8")
+        subtitle = self.root / "Dune.2021.en.srt"
+        subtitle.write_text("fixture subtitle", encoding="utf-8")
+        nfo = self.root / "movie.nfo"
+        nfo.write_text(
+            "<movie><title>Dune</title><year>2021</year></movie>\n",
+            encoding="utf-8",
+        )
+        poster = self.root / "poster.jpg"
+        poster.write_text("fixture poster", encoding="utf-8")
+        (self.root / "Other.2020.mkv").write_text(
+            "unrelated sibling video",
+            encoding="utf-8",
+        )
+        batch = self.root / "single-sidecars.batch.json"
+        artifacts = self.root / "single-sidecars.artifacts.json"
+
+        result = self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+        )
+
+        self.assertEqual(json.loads(result.stdout)["status"], "ready")
+        batch_entries = json.loads(batch.read_text(encoding="utf-8"))["entries"]
+        self.assertEqual(
+            [(entry["source"], entry["target"]) for entry in batch_entries],
+            [
+                (
+                    str(source),
+                    "Movies/Dune (2021)/Dune (2021).mkv",
+                ),
+                (
+                    str(subtitle),
+                    "Movies/Dune (2021)/Dune (2021).en.srt",
+                ),
+            ],
+        )
+        artifact_entries = json.loads(
+            artifacts.read_text(encoding="utf-8")
+        )["artifacts"]
+        self.assertEqual(
+            [
+                (artifact["kind"], artifact.get("source"), artifact["target"])
+                for artifact in artifact_entries
+            ],
+            [
+                (
+                    "nfo",
+                    str(nfo),
+                    "media/Movies/Dune (2021)/movie.nfo",
+                ),
+                (
+                    "artwork",
+                    str(poster),
+                    "media/Movies/Dune (2021)/poster.jpg",
+                ),
+            ],
+        )
+
     def test_normalizes_parenthesized_and_bracketed_movie_years(self):
         cases = {
             "Dune (2021).mkv": "Movies/Dune (2021)/Dune (2021).mkv",
@@ -439,6 +511,46 @@ class ScrapeFSMediaTests(unittest.TestCase):
                 self.assertFalse(batch.exists())
                 self.assertFalse(artifacts.exists())
 
+    def test_returns_manual_when_ffprobe_json_is_not_an_object(self):
+        source = self.root / "invalid-probe.mkv"
+        source.write_text("fixture movie", encoding="utf-8")
+        ffprobe = self.root / "invalid-ffprobe"
+        ffprobe.write_text(
+            "#!/usr/bin/env python3\nprint('[]')\n",
+            encoding="utf-8",
+        )
+        ffprobe.chmod(0o755)
+        batch = self.root / "invalid-probe.batch.json"
+        artifacts = self.root / "invalid-probe.artifacts.json"
+
+        result = self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            ffprobe,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 3)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["status"], "manual")
+        self.assertIn(
+            "probe_failed",
+            [item["code"] for item in report["manual"]],
+        )
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(batch.exists())
+        self.assertFalse(artifacts.exists())
+
     def test_manual_rerun_invalidates_previous_plan_outputs(self):
         source = self.copy_fixture("movie-directory")
         report, batch, artifacts = self.plan(source, "jellyfin")
@@ -651,6 +763,107 @@ class ScrapeFSMediaTests(unittest.TestCase):
             [item["code"] for item in json.loads(result.stdout)["manual"]],
         )
         self.assertFalse(batch.exists())
+
+    def test_allows_profile_reserved_characters_in_library_name(self):
+        source = self.copy_fixture("movie-directory")
+        batch = self.root / "library-name.batch.json"
+        artifacts = self.root / "library-name.artifacts.json"
+
+        result = self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media:main",
+            "--profile",
+            "jellyfin",
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+        )
+
+        self.assertEqual(json.loads(result.stdout)["status"], "ready")
+        self.assertEqual(
+            json.loads(batch.read_text(encoding="utf-8"))["library"],
+            "media:main",
+        )
+        artifact_targets = [
+            artifact["target"]
+            for artifact in json.loads(
+                artifacts.read_text(encoding="utf-8")
+            )["artifacts"]
+        ]
+        self.assertTrue(artifact_targets)
+        self.assertTrue(
+            all(target.startswith("media:main/") for target in artifact_targets)
+        )
+
+    def test_returns_manual_for_overlong_generated_target_components(self):
+        cases = [
+            (
+                "episode",
+                "Show.S01E01.Pilot.mkv",
+                {
+                    "kind": "episodes",
+                    "show_title": "S" * 180,
+                    "episodes": {"S01E01": {"title": "E" * 180}},
+                },
+            ),
+            (
+                "provider",
+                "movie.mkv",
+                {
+                    "kind": "movie",
+                    "title": "Dune",
+                    "provider_ids": {"tmdb": "9" * 260},
+                },
+            ),
+        ]
+        for case, source_name, metadata_value in cases:
+            with self.subTest(case=case):
+                case_root = self.root / case
+                case_root.mkdir()
+                source = case_root / source_name
+                source.write_text("fixture video", encoding="utf-8")
+                metadata = case_root / "metadata.json"
+                metadata.write_text(
+                    json.dumps(metadata_value),
+                    encoding="utf-8",
+                )
+                batch = case_root / "batch.json"
+                artifacts = case_root / "artifacts.json"
+
+                result = self.run_tool(
+                    "plan",
+                    "--source",
+                    source,
+                    "--library",
+                    "media",
+                    "--profile",
+                    "jellyfin",
+                    "--metadata",
+                    metadata,
+                    "--batch",
+                    batch,
+                    "--artifacts",
+                    artifacts,
+                    "--ffprobe",
+                    self.ffprobe,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 3)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["status"], "manual")
+                self.assertIn(
+                    "unsafe_generated_name",
+                    [item["code"] for item in report["manual"]],
+                )
+                self.assertFalse(batch.exists())
+                self.assertFalse(artifacts.exists())
 
     def test_returns_manual_for_duplicate_episode_number(self):
         source = self.root / "duplicate-episode"
