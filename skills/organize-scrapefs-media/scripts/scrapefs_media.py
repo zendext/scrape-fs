@@ -745,15 +745,17 @@ def classify_layout(videos, nfos, metadata):
                 'metadata "kind" must be "movie" or "episodes"',
             )
         ]
-    if any(MULTI_EPISODE_PATTERN.search(video.stem) for video in videos):
+    multi_episode_videos = [
+        video for video in videos if is_multi_episode_filename(video.stem)
+    ]
+    if multi_episode_videos:
         return None, [
             manual_item(
                 "multi_episode_file",
                 "a file containing multiple episodes requires manual handling in v1",
                 video,
             )
-            for video in videos
-            if MULTI_EPISODE_PATTERN.search(video.stem)
+            for video in multi_episode_videos
         ]
 
     episode_matches = [EPISODE_PATTERN.search(video.stem) for video in videos]
@@ -887,13 +889,17 @@ def plan_episodes(
 ):
     tvshow_path = first_named(nfos, "tvshow.nfo")
     tvshow = parse_nfo(tvshow_path, "tvshow") if tvshow_path else {}
-    inferred_show_title = infer_episode_series_title(videos)
+    inferred_show_title, inferred_show_year = infer_episode_series(videos)
     show_title = (
         metadata_text(metadata, "show_title")
         or tvshow.get("title")
         or inferred_show_title
     )
-    show_year = metadata_year(metadata, "show_year") or tvshow.get("year")
+    show_year = (
+        metadata_year(metadata, "show_year")
+        or tvshow.get("year")
+        or inferred_show_year
+    )
     provider_ids = merge_provider_ids(
         tvshow.get("provider_ids"),
         metadata.get("provider_ids"),
@@ -1114,13 +1120,37 @@ def infer_movie_name(stem):
     return humanize_filename(title_part), year
 
 
-def infer_show_title(stem, episode_start):
-    return humanize_filename(stem[:episode_start])
+def is_multi_episode_filename(stem):
+    return bool(MULTI_EPISODE_PATTERN.search(stem)) or sum(
+        1 for _ in EPISODE_PATTERN.finditer(stem)
+    ) > 1
 
 
-def infer_episode_series_title(videos):
+def infer_show_title_and_year(stem, episode_start):
+    prefix = stem[:episode_start].rstrip(" ._-")
+    matches = list(YEAR_PATTERN.finditer(prefix))
+    if not matches:
+        return humanize_filename(prefix), None
+    year_match = matches[-1]
+    trailing = prefix[year_match.end() :].strip()
+    before = prefix[: year_match.start()].rstrip()
+    if trailing:
+        delimiters = {")": "(", "]": "[", "}": "{"}
+        if trailing not in delimiters or not before.endswith(delimiters[trailing]):
+            return humanize_filename(prefix), None
+        before = before[:-1].rstrip()
+    elif year_match.end() != len(prefix):
+        return humanize_filename(prefix), None
+    title = humanize_filename(before)
+    if not title:
+        return humanize_filename(prefix), None
+    return title, int(year_match.group(1))
+
+
+def infer_episode_series(videos):
     inferred = []
     identities: dict[str, tuple[str, Path]] = {}
+    years: dict[int, Path] = {}
     for video in sorted(videos, key=os.fspath):
         match = EPISODE_PATTERN.search(video.stem)
         if match is None:
@@ -1129,12 +1159,14 @@ def infer_episode_series_title(videos):
                 "episode planning requires standard SxxEyy filenames",
                 video,
             )
-        title = infer_show_title(video.stem, match.start())
+        title, year = infer_show_title_and_year(video.stem, match.start())
         if not title:
             continue
         identity = title.casefold()
         identities.setdefault(identity, (title, video))
         inferred.append(title)
+        if year is not None:
+            years.setdefault(year, video)
     if len(identities) > 1:
         titles = ", ".join(sorted(value[0] for value in identities.values()))
         conflicting = sorted(
@@ -1146,7 +1178,16 @@ def infer_episode_series_title(videos):
             f"episode directory contains multiple inferred series: {titles}",
             conflicting,
         )
-    return inferred[0] if inferred else None
+    if len(years) > 1:
+        values = ", ".join(str(year) for year in sorted(years))
+        conflicting = sorted(years.values(), key=os.fspath)[1]
+        raise ManualHandling(
+            "mixed_series",
+            f"episode directory contains multiple inferred show years: {values}",
+            conflicting,
+        )
+    year = next(iter(years), None)
+    return (inferred[0] if inferred else None), year
 
 
 def infer_episode_title(stem, episode_end):

@@ -325,6 +325,85 @@ class ScrapeFSMediaTests(unittest.TestCase):
         self.assertFalse(batch.exists())
         self.assertFalse(artifacts.exists())
 
+    def test_returns_manual_for_all_multi_episode_filename_forms(self):
+        names = [
+            "Show.S01E01E02.mkv",
+            "Show.S01E01-E02.mkv",
+            "Show.S01E01.S01E02.mkv",
+        ]
+        for index, name in enumerate(names):
+            with self.subTest(name=name):
+                source = self.root / f"multi-episode-{index}"
+                source.mkdir()
+                (source / name).write_text("fixture episode", encoding="utf-8")
+                batch = self.root / f"multi-episode-{index}.batch.json"
+                artifacts = self.root / f"multi-episode-{index}.artifacts.json"
+
+                result = self.run_tool(
+                    "plan",
+                    "--source",
+                    source,
+                    "--library",
+                    "media",
+                    "--profile",
+                    "jellyfin",
+                    "--batch",
+                    batch,
+                    "--artifacts",
+                    artifacts,
+                    "--ffprobe",
+                    self.ffprobe,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 3)
+                self.assertIn(
+                    "multi_episode_file",
+                    [item["code"] for item in json.loads(result.stdout)["manual"]],
+                )
+                self.assertFalse(batch.exists())
+                self.assertFalse(artifacts.exists())
+
+    def test_infers_filename_only_show_year_without_changing_numeric_title(self):
+        cases = {
+            "Show.2015.S01E01.Pilot.mkv": (
+                "Shows/Show (2015)/Season 01/"
+                "Show (2015) S01E01 Pilot.mkv"
+            ),
+            "1923.S01E01.Pilot.mkv": (
+                "Shows/1923/Season 01/1923 S01E01 Pilot.mkv"
+            ),
+        }
+        for index, (name, expected_target) in enumerate(cases.items()):
+            with self.subTest(name=name):
+                source = self.root / f"show-year-{index}"
+                source.mkdir()
+                (source / name).write_text("fixture episode", encoding="utf-8")
+                batch = self.root / f"show-year-{index}.batch.json"
+                artifacts = self.root / f"show-year-{index}.artifacts.json"
+
+                result = self.run_tool(
+                    "plan",
+                    "--source",
+                    source,
+                    "--library",
+                    "media",
+                    "--profile",
+                    "jellyfin",
+                    "--batch",
+                    batch,
+                    "--artifacts",
+                    artifacts,
+                    "--ffprobe",
+                    self.ffprobe,
+                )
+
+                self.assertEqual(json.loads(result.stdout)["status"], "ready")
+                self.assertEqual(
+                    json.loads(batch.read_text())["entries"][0]["target"],
+                    expected_target,
+                )
+
     def test_returns_explicit_manual_outcomes_for_unsupported_layouts(self):
         cases = {
             "multi-episode": "multi_episode_file",
