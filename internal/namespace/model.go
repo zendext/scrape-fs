@@ -172,6 +172,28 @@ type RenameResult struct {
 	Replaced *Node
 }
 
+type MoveProjectionNode struct {
+	OldParentID int64
+	OldName     string
+	NewParentID int64
+	NewName     string
+	ExpectedID  int64
+}
+
+type RemoveProjectionNode struct {
+	ParentID   int64
+	Name       string
+	ExpectedID int64
+}
+
+type RebindProjectionNode struct {
+	ParentID       int64
+	Name           string
+	ExpectedID     int64
+	ExpectedSource ProjectionSource
+	Source         ProjectionSource
+}
+
 type SetAttributes struct {
 	NodeID  int64
 	Mode    *fs.FileMode

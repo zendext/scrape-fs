@@ -506,17 +506,19 @@ scrapefs projection rebind \
 ### Main Flow
 
 1. The daemon safely opens the new source.
-2. The CLI displays old and new paths and identities.
-3. The user explicitly confirms.
-4. The daemon updates source path, identity, and cached attributes.
-5. It updates virtual ctime, writes the log, and invalidates attributes.
-6. New opens read from the new source.
+2. The CLI returns old and new paths and identities plus a confirmation digest.
+3. The user explicitly confirms by repeating the command with `--confirm <digest>`.
+4. The daemon reopens the source and rejects any changed Projection or source.
+5. The daemon updates source path, identity, and cached attributes.
+6. It updates virtual ctime, writes the log, and invalidates attributes.
+7. New opens read from the new source.
 
 ### Alternative Flows
 
 - New source is missing: return `ENOENT`.
 - New source path contains a symbolic link: reject it.
-- User cancels: do not modify the Projection.
+- The confirmation is omitted: return the preview without modifying the Projection.
+- The confirmation is stale: return `ConfirmationMismatch` without modifying the Projection.
 
 ### Result
 

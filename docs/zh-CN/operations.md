@@ -131,9 +131,9 @@ scrapefs library remove
 
 scrapefs projection add <source> <library:/target>
 scrapefs projection list [--library <name>]
-scrapefs projection mv
-scrapefs projection rm
-scrapefs projection rebind
+scrapefs projection mv <library:/target> <library:/new-target>
+scrapefs projection rm <library:/target>
+scrapefs projection rebind <library:/target> --source <path> [--confirm <digest>]
 
 scrapefs projection batch validate
 scrapefs projection batch apply
@@ -162,7 +162,13 @@ object 错误使用确定性顺序；计数区分 LIVE、STAGING、无数据库�
 
 `library set-profile` 修改后续 direct Projection 和 Projection Batch validate/apply 使用的 Profile，不移动或重命名已有节点，写一条 operation log，且不增加 namespace version。只接受内置的 `jellyfin@1` 和 `plex@1` Profile。`library add`、`library rename` 和 `library set-profile` 需要管理员授权。`library list` 按名称确定性排序返回 ACTIVE Library，管理员和控制用户均可调用。
 
-`projection add` 使用 `scrapefs.projection-result/v1` 返回新 Projection；源文件选择、目标校验与 namespace mutation 仅在 control 授权成功后执行。`projection list` 使用 `scrapefs.projection-list/v1` 返回 direct 与 Batch Projection，按 Library、相对 target 和 node ID 确定性排序。`--library <name>` 只返回指定 ACTIVE Library；列表使用持久化缓存 metadata，不打开源文件。
+`projection add`、`projection mv` 和 `projection rm` 返回 `scrapefs.projection-result/v1`；remove 返回已删除 Projection 的快照。源文件选择、目标校验与 namespace mutation 仅在 control 授权成功后执行。`projection list` 使用 `scrapefs.projection-list/v1` 返回 direct 与 Batch Projection，按 Library、相对 target 和 node ID 确定性排序。`--library <name>` 只返回指定 ACTIVE Library；列表使用持久化缓存 metadata，不打开源文件。
+
+`projection mv` 只接受同一 ACTIVE Library 内不存在的目标，保留 node ID 和 source metadata，在同一事务中创建缺失的 managed 目标目录，写一条 operation log，并使 namespace version 增加 1。跨 Library move 返回 `CrossLibrary`；目标已存在返回 `TargetConflict`。`projection rm` 只删除 Projection 节点，并向 LibraryRoot 清理空的 managed Directory；用户创建或非空目录必须保留。它写一条 operation log，并使 namespace version 增加 1。两个命令均不得打开、重命名或删除源文件。
+
+不带 `--confirm` 的 `projection rebind` 会安全打开候选源文件，并返回 `scrapefs.projection-rebind-result/v1`：status 为 `confirmation_required`，同时包含稳定 Projection 快照、完整的新旧缓存 source metadata，以及绑定 node ID、target、source path 和严格 identity 的 confirmation digest。使用 `--confirm <digest>` 重复执行时，daemon 会重新打开并重新校验 source，只应用与 preview 完全一致的变更，并返回 `applied`。Projection 或 source 已变化时返回 `ConfirmationMismatch`，不产生 mutation。成功 rebind 保留 node ID 和虚拟 target，更新 source metadata 与虚拟 ctime，写一条 audit 记录，但不增加 namespace version。
+
+所有 Projection 命令均要求管理员或控制用户授权。目标不存在返回 `ProjectionNotFound`；rebind 的不安全、缺失、无权限或非普通源文件沿用 `projection add` 的稳定 source error code。
 
 `projection batch validate` 和 `projection batch apply` 使用 `--file <path>` 读取 UTF-8 JSON，并使用 `--file -` 从 stdin 读取。非 TTY 或显式机器可读模式不得提示输入或自动 apply。CLI 默认连接 `/run/scrapefs/scrapefs.sock`，可使用全局 `--socket <path>` 覆盖为配置的路径。
 

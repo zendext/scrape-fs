@@ -55,9 +55,13 @@ scrapefs projection add \
   "jellyfin:/Movies/Dune (2021)/Dune (2021).mkv"
 
 scrapefs projection list --library jellyfin
+
+scrapefs projection mv \
+  "jellyfin:/Movies/Dune (2021)/Dune (2021).mkv" \
+  "jellyfin:/Films/Dune (2021).mkv"
 ```
 
-`projection add` safely opens the source and atomically creates the mapping. `projection list` returns stable IDs, virtual targets, and cached source identity from the persisted namespace without reopening sources. Removing or renaming the Projection does not modify the source file.
+`projection add` safely opens the source and atomically creates the mapping. `projection list` returns stable IDs, virtual targets, and cached source identity from the persisted namespace without reopening sources. `projection mv`, `projection rm`, and confirmed `projection rebind` preserve the stable node ID where applicable and never modify either source file.
 
 ## External Agent Skill
 

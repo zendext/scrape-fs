@@ -134,9 +134,9 @@ scrapefs library remove
 
 scrapefs projection add <source> <library:/target>
 scrapefs projection list [--library <name>]
-scrapefs projection mv
-scrapefs projection rm
-scrapefs projection rebind
+scrapefs projection mv <library:/target> <library:/new-target>
+scrapefs projection rm <library:/target>
+scrapefs projection rebind <library:/target> --source <path> [--confirm <digest>]
 
 scrapefs projection batch validate
 scrapefs projection batch apply
@@ -167,7 +167,13 @@ candidate eligible for unsafe deletion.
 
 `library set-profile` changes the Profile used by later direct Projection and Projection Batch validation/apply. It does not move or rename existing nodes, writes one operation-log entry, and does not increment namespace version. Only the built-in `jellyfin@1` and `plex@1` Profiles are accepted. `library add`, `library rename`, and `library set-profile` require administrator authorization. `library list` returns ACTIVE Libraries in deterministic name order and is available to administrators and control users.
 
-`projection add` returns the new Projection using `scrapefs.projection-result/v1`. Source selection, target validation, and namespace mutation run only after control authorization succeeds. `projection list` returns direct and batch Projections using `scrapefs.projection-list/v1`, ordered deterministically by Library, relative target, and node ID. `--library <name>` limits the result to that ACTIVE Library. Listing uses persisted cached metadata and does not open source files.
+`projection add`, `projection mv`, and `projection rm` return `scrapefs.projection-result/v1`; remove returns the deleted Projection snapshot. Source selection, target validation, and namespace mutation run only after control authorization succeeds. `projection list` returns direct and batch Projections using `scrapefs.projection-list/v1`, ordered deterministically by Library, relative target, and node ID. `--library <name>` limits the result to that ACTIVE Library. Listing uses persisted cached metadata and does not open source files.
+
+`projection mv` accepts only a missing target in the same ACTIVE Library, preserves the node ID and source metadata, creates missing managed target directories atomically, writes one operation-log entry, and increments namespace version once. Cross-Library moves return `CrossLibrary`; an existing target returns `TargetConflict`. `projection rm` deletes only the Projection node, prunes empty managed directories toward LibraryRoot, retains user-created or non-empty directories, writes one operation-log entry, and increments namespace version once. Neither command opens, renames, or removes the source file.
+
+`projection rebind` without `--confirm` securely opens the proposed source and returns `scrapefs.projection-rebind-result/v1` with status `confirmation_required`, the stable Projection snapshot, complete previous and proposed cached source metadata, and a confirmation digest bound to the node ID, target, source paths, and strict identities. Repeating the command with `--confirm <digest>` reopens and revalidates the source and applies only the exact preview, returning status `applied`. A changed Projection or source returns `ConfirmationMismatch` with no mutation. Successful rebind preserves the node ID and virtual target, updates source metadata and virtual ctime, writes one audit entry, and does not increment namespace version.
+
+All Projection commands require administrator or control-user authorization. Missing targets return `ProjectionNotFound`; unsafe, missing, denied, or non-regular rebind sources use the same stable source error codes as `projection add`.
 
 `projection batch validate` and `projection batch apply` read UTF-8 JSON through `--file <path>` and read stdin through `--file -`. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically. The CLI connects to `/run/scrapefs/scrapefs.sock` by default and accepts global `--socket <path>` for a configured override.
 
