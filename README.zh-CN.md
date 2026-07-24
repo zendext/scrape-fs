@@ -6,7 +6,7 @@ ScrapeFS 是一个面向 Linux 的外部 Agent 辅助媒体整理与虚拟目录
 
 它将一个或多个本地文件系统中的媒体文件投影为适合播放器识别的媒体库，同时不移动、不重命名、不修改源文件。
 
-> 当前状态：处于早期实现阶段。daemon 已支持加载并校验配置、获取宿主文件系统运行时锁、初始化 SQLite 和 Overlay object store、重建内存索引、挂载持久化 namespace，并通过 Unix 控制 socket 提供经过授权的 Library、direct Projection、Projection Batch、status 和只读 doctor 操作。readiness 只会在 index、mount 和 socket 可用后发送；已提交的 namespace 变更会触发 FUSE cache invalidation，正常停止会排空在途写入后再卸载。FUSE client 可以创建和修改普通 Directory 及 object-backed OverlayFile，通过经过身份校验的 source descriptor 读取 ProjectionFile，并通过共享 Projection lifecycle 操作 rename 或 unlink direct ProjectionFile。
+> 当前状态：处于早期实现阶段。daemon 已支持加载并校验配置、获取宿主文件系统运行时锁、初始化 SQLite 和 Overlay object store、重建内存索引、挂载持久化 namespace，并通过 Unix 控制 socket 提供经过授权的 Library、direct Projection、Projection Batch、status 和只读 doctor 操作。readiness 只会在 index、mount 和 socket 可用后发送；已提交的 namespace 变更会触发 FUSE cache invalidation，正常停止会排空在途写入后再卸载。FUSE client 可以创建和修改普通 Directory 及 object-backed OverlayFile，通过经过身份校验的 source descriptor 读取 ProjectionFile，并通过共享 Projection lifecycle 操作 rename 或 unlink direct ProjectionFile。仓库同时提供第一版可安装外部 Agent Skill，用于媒体枚举、探测、命名、Batch 确认与 FUSE artifact 工作流。
 
 ## 核心模型
 
@@ -35,8 +35,8 @@ ScrapeFS 可以提供：
 /mnt/scrapefs/jellyfin/
 └── Movies/
     └── Dune (2021) [tmdbid-438631]/
-        ├── Dune (2021).mkv
-        ├── Dune (2021).zh.ass
+        ├── Dune (2021) [tmdbid-438631].mkv
+        ├── Dune (2021) [tmdbid-438631].zh.ass
         ├── movie.nfo
         └── poster.jpg
 ```
@@ -65,16 +65,25 @@ scrapefs projection mv \
 
 ## 外部 Agent Skill
 
-需要识别媒体时，外部 Agent Skill 读取源目录、执行媒体探测和 metadata 查询，然后生成显式 Batch：
+需要识别媒体时，安装仓库中的
+[`organize-scrapefs-media`](skills/organize-scrapefs-media/SKILL.md) Skill。
+它以调用用户权限读取源目录、执行 `ffprobe`、读取 NFO，并生成显式 Batch：
 
 ```bash
-scrapefs projection batch validate --file /tmp/dune.batch.json --json
-scrapefs projection batch apply \
-  --file /tmp/dune.batch.json \
-  --expected-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/organize-scrapefs-media"
+
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" plan \
+  --source /mnt/disk1/downloads/Dune.2021.REMUX \
+  --library jellyfin \
+  --profile jellyfin \
+  --batch /tmp/dune.batch.json \
+  --artifacts /tmp/dune.artifacts.json
+
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" validate \
+  --batch /tmp/dune.batch.json
 ```
 
-`scrapefsd` 不运行模型，也不向 Agent 暴露文件读取、`ffprobe` 或网络工具。Validate 无状态检查 Batch；apply 重新安全打开源文件、执行路径和冲突校验，并原子创建全部 Projection。NFO 和海报由外部 Agent 在 apply 后通过普通 FUSE 文件操作创建。
+`scrapefsd` 不运行模型，也不向 Agent 暴露文件读取、`ffprobe` 或网络工具。Validate 无状态检查 Batch；用户必须原样确认 validate 返回的完整 digest，Skill 才会 fresh validate 并 apply。NFO 和海报在 apply 后由 Skill 通过普通 FUSE 文件操作创建。完整安装、确认和失败恢复流程见 [Projection Batch 与外部 Agent 工作流](docs/zh-CN/scrape.md)。
 
 早期规范中的 `scrapefs scrape <source> --library <name>` 假设 daemon 会主动枚举和识别媒体。该命令从目标 v1 CLI 中移除。ScrapeFS 也不持久化未应用 Plan、draft 或 revision；外部 Agent 保存工作上下文，daemon 只保存成功 apply 后用于审计和 undo 的最小 Batch provenance。
 

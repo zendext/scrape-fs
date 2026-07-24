@@ -6,7 +6,7 @@ ScrapeFS is an external-agent-assisted media organization and virtual directory 
 
 It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
 
-> Status: early implementation. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite and the Overlay object store, rebuilds the in-memory index, mounts the persisted namespace, and serves authenticated Library, direct Projection, Projection Batch, status, and read-only doctor operations through the Unix control socket. Readiness is emitted only after the index, mount, and socket are usable; committed namespace changes trigger FUSE cache invalidation, and normal shutdown drains admitted writes before unmounting. FUSE clients can create and modify ordinary directories and object-backed OverlayFiles, read ProjectionFiles through verified source descriptors, and rename or unlink direct ProjectionFiles through shared Projection lifecycle operations.
+> Status: early implementation. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite and the Overlay object store, rebuilds the in-memory index, mounts the persisted namespace, and serves authenticated Library, direct Projection, Projection Batch, status, and read-only doctor operations through the Unix control socket. Readiness is emitted only after the index, mount, and socket are usable; committed namespace changes trigger FUSE cache invalidation, and normal shutdown drains admitted writes before unmounting. FUSE clients can create and modify ordinary directories and object-backed OverlayFiles, read ProjectionFiles through verified source descriptors, and rename or unlink direct ProjectionFiles through shared Projection lifecycle operations. The repository also ships the first installable external Agent skill for media enumeration, probing, naming, batch confirmation, and FUSE artifact workflows.
 
 ## Core Model
 
@@ -35,8 +35,8 @@ ScrapeFS can expose:
 /mnt/scrapefs/jellyfin/
 └── Movies/
     └── Dune (2021) [tmdbid-438631]/
-        ├── Dune (2021).mkv
-        ├── Dune (2021).zh.ass
+        ├── Dune (2021) [tmdbid-438631].mkv
+        ├── Dune (2021) [tmdbid-438631].zh.ass
         ├── movie.nfo
         └── poster.jpg
 ```
@@ -65,16 +65,26 @@ scrapefs projection mv \
 
 ## External Agent Skill
 
-When media identification is needed, an external Agent skill reads the source directory, probes media, queries metadata, and generates an explicit batch:
+When media identification is needed, install the repository's
+[`organize-scrapefs-media`](skills/organize-scrapefs-media/SKILL.md) Skill. It
+reads sources with the invoking user's permissions, runs `ffprobe`, reads NFO,
+and generates an explicit batch:
 
 ```bash
-scrapefs projection batch validate --file /tmp/dune.batch.json --json
-scrapefs projection batch apply \
-  --file /tmp/dune.batch.json \
-  --expected-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+SKILL_DIR="${CODEX_HOME:-$HOME/.codex}/skills/organize-scrapefs-media"
+
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" plan \
+  --source /mnt/disk1/downloads/Dune.2021.REMUX \
+  --library jellyfin \
+  --profile jellyfin \
+  --batch /tmp/dune.batch.json \
+  --artifacts /tmp/dune.artifacts.json
+
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" validate \
+  --batch /tmp/dune.batch.json
 ```
 
-`scrapefsd` does not run a model or expose file-read, `ffprobe`, or network tools to an Agent. Validate checks the batch without persistence. Apply safely reopens the sources, validates paths and conflicts, and creates every Projection atomically. The external Agent creates NFO files and artwork through ordinary FUSE operations after apply.
+`scrapefsd` does not run a model or expose file-read, `ffprobe`, or network tools to an Agent. Validate checks the batch without persistence. The user must return the complete validation digest verbatim before the Skill freshly validates and applies. The Skill creates NFO and artwork through ordinary FUSE operations after apply. See [Projection batches and the external Agent workflow](docs/en/scrape.md) for installation, confirmation, and recovery details.
 
 The earlier specification used `scrapefs scrape <source> --library <name>` and assumed the daemon would enumerate and identify media. That command is removed from the target v1 CLI. ScrapeFS also does not persist unapplied plans, drafts, or revisions. The external Agent owns work context, while the daemon stores only minimal provenance for a successfully applied batch and later undo.
 

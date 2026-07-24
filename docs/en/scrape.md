@@ -63,11 +63,11 @@ scrapefs projection batch validate --file -
   "entries": [
     {
       "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.2021.REMUX.mkv",
-      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).mkv"
+      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021) [tmdbid-438631].mkv"
     },
     {
       "source": "/mnt/disk1/downloads/Dune.2021.REMUX/Dune.zh.ass",
-      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021).zh.ass"
+      "target": "Movies/Dune (2021) [tmdbid-438631]/Dune (2021) [tmdbid-438631].zh.ass"
     }
   ]
 }
@@ -258,17 +258,162 @@ These files follow ordinary FUSE create, write, rename, and permission semantics
 - batch undo does not automatically remove OverlayFiles;
 - ScrapeFS does not distinguish files created by a person, script, or Agent.
 
-## 10. Agent Skill Contract
+## 10. Agent Skill Package
 
-The external Agent skill documents:
+The repository includes the installable
+[`organize-scrapefs-media`](../../skills/organize-scrapefs-media/SKILL.md) Skill.
+Its standard-library Python tool performs deterministic source enumeration,
+sample exclusion, `ffprobe` probing, NFO reading, Plex/Jellyfin naming, batch
+generation, CLI orchestration, and FUSE artifact writes.
 
-- supported media, subtitle, and local metadata formats;
-- source enumeration and sample-ignore rules;
-- `ffprobe` and metadata-query behavior;
-- Plex and Jellyfin Profile naming rules;
-- `scrapefs.projection-batch/v1` generation;
-- validate, user confirmation, apply, show, and undo workflows;
-- FUSE OverlayFile creation after apply;
-- recovery from source changes, path conflicts, and partial artifact failures.
+The Skill is not a daemon plugin. It contains no model provider, Agent session,
+shared credential, daemon-side pending state, or privileged read capability.
+Metadata-provider and model selection remain with the invoking Agent; the
+deterministic tool accepts only local metadata JSON already resolved by that
+Agent.
 
-The skill is not a daemon plugin. Updating the skill cannot change the ScrapeFS authorization model, batch schema, or path-safety rules.
+### 10.1 Installation And Prerequisites
+
+The first version requires:
+
+- Linux;
+- Python 3.9 or newer;
+- `ffprobe`;
+- `scrapefs`;
+- a ready `scrapefsd`;
+- an ACTIVE `jellyfin@1` or `plex@1` Library;
+- the invoking user's ordinary source, control-socket, and FUSE permissions.
+
+Install from the repository root into the Codex Skill directory:
+
+```bash
+destination="${CODEX_HOME:-$HOME/.codex}/skills/organize-scrapefs-media"
+test ! -e "$destination"
+mkdir -p "$(dirname "$destination")"
+cp -R skills/organize-scrapefs-media "$destination"
+python3 "$destination/scripts/scrapefs_media.py" --help
+SKILL_DIR="$destination"
+```
+
+Installation does not modify daemon configuration or install model/provider
+credentials. Do not use `sudo` or another identity to bypass the invoking
+user's source permissions.
+
+### 10.2 Supported Scope
+
+The Skill supports:
+
+- a single movie file;
+- one non-sample movie in a directory;
+- episodes containing exactly one standard `SxxEyy` token per file;
+- multiple independent episode files in one season;
+- ordinary external subtitles matching a media basename;
+- `movie.nfo`, `tvshow.nfo`, and episode-basename NFO files;
+- one `poster`, `folder`, `cover`, or `movie` artwork candidate;
+- deterministic Plex and Jellyfin movie/show/season/episode naming.
+
+Files containing a complete `sample` token or below a `sample`/`samples`
+directory are ignored. Every selected video is probed directly by the invoking
+user and must contain at least one video stream. Source NFO and artwork do not
+enter the batch; they become OverlayFiles through FUSE after apply. When no NFO
+exists, the Skill can generate a minimal NFO from resolved metadata.
+
+BDMV/DVD, anime absolute numbering, multi-episode files, automatic edition
+detection, complex extras, music/image-only sources, remote URLs, symlinks,
+non-regular sources, and ambiguous multi-video layouts return an explicit
+`manual` result. The Skill never silently drops a non-sample video.
+
+### 10.3 Plan And Metadata Boundary
+
+Read the actual Profile through `library list`, then generate a local batch and
+artifact manifest:
+
+```bash
+scrapefs library list
+
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" plan \
+  --source /srv/downloads/Dune.2021 \
+  --library media \
+  --profile jellyfin \
+  --batch /tmp/dune.batch.json \
+  --artifacts /tmp/dune.artifacts.json
+```
+
+`plan` does not connect to the control socket, apply, or query a network
+provider. Existing NFO takes precedence over filename inference; explicit
+Agent-resolved metadata JSON takes precedence over NFO:
+
+```json
+{
+  "kind": "movie",
+  "title": "Dune: Part One",
+  "year": 2021,
+  "provider_ids": {
+    "tmdb": "438631"
+  }
+}
+```
+
+For `status: manual`, stop and present every code, message, and path. After
+resolving ambiguity, regenerate with `--metadata <file>`; do not modify or
+relax the batch schema.
+
+### 10.4 Validate, Digest Confirmation, And Apply
+
+```bash
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" validate \
+  --batch /tmp/dune.batch.json
+```
+
+The Agent must present the complete validation JSON, including entries,
+warnings, namespace version, and digest, then stop and require the user to
+return the complete `sha256:<64 lowercase hex>` digest verbatim. `yes`, `looks
+good`, a digest copied into the Agent's own message, or inferred intent is not
+confirmation.
+
+`plan` and `validate` never apply in TTY or non-TTY use and never prompt. The
+Skill has no combined plan/validate/apply command. Only after the user returns
+the exact digest may the Agent run:
+
+```bash
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" apply \
+  --batch /tmp/dune.batch.json \
+  --confirm-digest sha256:<exact-user-confirmed-value>
+```
+
+`apply` first validates again, compares the fresh digest byte-for-byte with
+`--confirm-digest`, and only then calls `projection batch apply
+--expected-digest`. A changed digest, changed source, target conflict,
+permission failure, or any other validate/apply error stops the workflow. Show
+the new result and request confirmation again; never retry or apply
+automatically.
+
+### 10.5 Artifacts, Show, And Undo
+
+The batch digest confirms only the Projection Batch; it does not bind the
+artifact manifest. After successful apply and artifact-list review, create
+OverlayFiles through the mount:
+
+```bash
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" artifacts \
+  --manifest /tmp/dune.artifacts.json \
+  --mountpoint /mnt/scrapefs
+```
+
+The tool uses the invoking user's permissions to create a temporary OverlayFile
+in the destination directory, fsync it, and publish it with no-replace rename.
+It never overwrites an existing file. Each artifact reports independently; a
+partial NFO or artwork failure does not roll back the successful batch or other
+artifacts. Resolve the cause and retry only failed entries.
+
+```bash
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" show batch-42
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" undo batch-42
+```
+
+Undo removes only remaining batch-owned Projections. NFO, artwork, and other
+OverlayFiles remain and must be handled by the user through ordinary FUSE
+operations based on the undo result.
+
+Issue #39 owns shared status, doctor, and runtime diagnostics. This Skill does
+not duplicate or replace those commands.

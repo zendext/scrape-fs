@@ -1,0 +1,4 @@
+interface:
+  display_name: "Organize ScrapeFS Media"
+  short_description: "Plan and apply ScrapeFS media batches"
+  default_prompt: "Use $organize-scrapefs-media to inspect local media and prepare a confirmed ScrapeFS Projection Batch."

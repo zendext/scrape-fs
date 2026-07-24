@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+import json
+
+
+print(json.dumps({
+    "streams": [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 1, "codec_type": "audio", "codec_name": "aac"}
+    ],
+    "format": {"duration": "7200.0", "tags": {}}
+}))

@@ -1,0 +1,150 @@
+---
+name: organize-scrapefs-media
+description: Inspect local movie and standard SxxEyy episode sources, exclude samples, read NFO metadata, probe media with ffprobe, generate deterministic Plex or Jellyfin ScrapeFS Projection Batches, obtain exact digest confirmation, apply or undo batches, and create NFO or artwork OverlayFiles through FUSE. Use when organizing local media into an existing ScrapeFS Library or diagnosing a media source that the v1 workflow may require manual handling.
+---
+
+# Organize ScrapeFS Media
+
+Use the bundled tool for deterministic filesystem work. Keep metadata-provider
+selection and any model interaction in the current Agent session.
+
+## Prerequisites
+
+Verify all of the following before planning:
+
+- Linux with Python 3.9 or newer;
+- `ffprobe` on `PATH`;
+- `scrapefs` on `PATH`;
+- a ready `scrapefsd`;
+- an ACTIVE `jellyfin@1` or `plex@1` Library;
+- invoking-user read permission on every source;
+- invoking-user control permission and FUSE write permission.
+
+Never use `sudo` or another identity to enumerate or probe sources. Do not store
+provider credentials, prompts, sessions, or pending plans in the daemon.
+
+Set `SKILL_DIR` to the directory containing this file:
+
+```bash
+TOOL="$SKILL_DIR/scripts/scrapefs_media.py"
+```
+
+Read [media-contract.md](references/media-contract.md) when deciding whether a
+layout is supported or when supplying Agent-resolved metadata. Read
+[failure-handling.md](references/failure-handling.md) before recovering from a
+manual result, CLI error, source change, conflict, or partial artifact failure.
+
+## Plan
+
+First inspect the Library and use its actual Profile:
+
+```bash
+scrapefs library list
+```
+
+Generate a local batch and artifact manifest:
+
+```bash
+python3 "$TOOL" plan \
+  --source /srv/downloads/Dune.2021 \
+  --library media \
+  --profile jellyfin \
+  --batch /tmp/dune.batch.json \
+  --artifacts /tmp/dune.artifacts.json
+```
+
+The command only reads local sources and writes local JSON files. It never calls
+the control CLI, mounts filesystems, queries a metadata provider, or applies a
+batch.
+
+If the result status is `manual`, stop. Present every `manual` item and obtain
+corrected metadata or a user decision. Do not silently omit unsupported video
+content. For resolved ambiguity, write a strict metadata JSON file and rerun:
+
+```bash
+python3 "$TOOL" plan \
+  --source /srv/downloads/unidentified.mkv \
+  --library media \
+  --profile plex \
+  --metadata /tmp/resolved-metadata.json \
+  --batch /tmp/media.batch.json \
+  --artifacts /tmp/media.artifacts.json
+```
+
+Review the generated batch and artifact manifest before validation.
+
+## Validate
+
+Run stateless validation:
+
+```bash
+python3 "$TOOL" validate --batch /tmp/media.batch.json
+```
+
+Present the complete validation JSON, including every entry, warning,
+`namespace_version`, and `digest`.
+
+Stop and ask the user to confirm the exact digest string. Require the user's
+response to contain the complete `sha256:<64 lowercase hex>` value returned by
+validate. Do not treat `yes`, `looks good`, an inferred intent, or a digest
+copied by the Agent into its own message as confirmation.
+
+`plan` and `validate` never apply, including in non-TTY use. The tool contains no
+combined plan/validate/apply command and never prompts.
+
+## Apply
+
+Only after the user returns the exact digest, pass that value unchanged:
+
+```bash
+python3 "$TOOL" apply \
+  --batch /tmp/media.batch.json \
+  --confirm-digest sha256:<exact-user-confirmed-digest>
+```
+
+The apply command:
+
+1. runs a fresh `projection batch validate`;
+2. compares its digest byte-for-byte with `--confirm-digest`;
+3. stops before apply if they differ;
+4. calls `projection batch apply` with that exact expected digest;
+5. returns both fresh validation and apply result JSON.
+
+Never retry a mismatch or CLI failure automatically. Present the new validation
+or stable daemon error and return to the validation step.
+
+## Create Artifacts
+
+The digest confirms only the Projection Batch. Present the artifact manifest
+separately before writing it.
+
+After a successful apply, create NFO and selected poster files through the
+mounted filesystem:
+
+```bash
+python3 "$TOOL" artifacts \
+  --manifest /tmp/media.artifacts.json \
+  --mountpoint /mnt/scrapefs
+```
+
+The tool opens the mounted path with the invoking user's permissions, writes a
+temporary OverlayFile, fsyncs it, and renames with no-replace semantics. It does
+not overwrite an existing artifact. Treat each artifact result independently;
+do not undo a successful Projection Batch because one optional artifact failed.
+
+## Inspect Or Undo
+
+Inspect provenance after apply:
+
+```bash
+python3 "$TOOL" show batch-42
+```
+
+Undo only after the user requests it:
+
+```bash
+python3 "$TOOL" undo batch-42
+```
+
+Explain that undo removes remaining batch-owned Projections but retains
+OverlayFiles, including NFO and artwork created after apply.

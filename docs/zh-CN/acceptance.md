@@ -100,9 +100,9 @@
 - 管理员与控制用户可以执行 status/doctor；其他调用者在业务检查前被拒绝。
 - CLI 只通过控制 socket 调用，不直接读取 SQLite 或 object store。
 
-## 9. 第一版 Agent Skill 范围
+## 9. 第一版 Agent Skill
 
-Skill 应当覆盖：
+仓库提供可安装、可执行的 `organize-scrapefs-media` Skill，并覆盖：
 
 - 单文件电影；
 - 一目录一电影；
@@ -116,7 +116,15 @@ Skill 应当覆盖：
 - Batch validate、用户确认、apply、show 和 undo；
 - apply 后通过 FUSE 创建 NFO 和海报。
 
-Skill 可以拒绝或要求人工处理：
+此外：
+
+- plan 和 validate 在 TTY 与非 TTY 下都不得 apply 或提示输入；
+- apply 必须先 fresh validate，并要求用户显式返回与 validate 结果完全相同的 digest；
+- 代表性 Plex/Jellyfin fixtures 必须通过真实 Projection Batch parser 和 validation service；
+- clean-copy 安装后无需仓库内隐式依赖即可运行；
+- Skill 不保存 daemon-side session、pending plan、provider credential，也不执行提权读取。
+
+Skill 必须拒绝或要求人工处理：
 
 - BDMV、DVD；
 - 动画绝对集数；
