@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -355,6 +356,7 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 		libraryService control.LibraryService,
 		projectionService control.ProjectionService,
 		gcService control.GCService,
+		diagnosticsService control.DiagnosticsService,
 	) (controlRuntime, error) {
 		if service == nil {
 			t.Fatal("control service is nil")
@@ -367,6 +369,9 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 		}
 		if gcService == nil {
 			t.Fatal("GC control service is nil")
+		}
+		if diagnosticsService == nil {
+			t.Fatal("diagnostics control service is nil")
 		}
 		events = append(events, "control")
 		return server, nil
@@ -396,6 +401,121 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 	want := "index,mount,control,ready,stop,wait,unmount,close"
 	if got := strings.Join(events, ","); got != want {
 		t.Fatalf("runtime events = %q, want %q", got, want)
+	}
+}
+
+func TestServeRuntimePublishesDiagnosticsBeforeAndAfterReadiness(t *testing.T) {
+	root := t.TempDir()
+	configuration := config.Config{
+		Storage: config.Storage{
+			OverlayStorePath: filepath.Join(root, "objects"),
+		},
+		FUSE: config.FUSE{Mountpoint: filepath.Join(root, "mount")},
+		Control: config.Control{
+			SocketPath: filepath.Join(root, "control.sock"),
+			SocketMode: 0o660,
+		},
+	}
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer opened.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &recordingControlRuntime{done: make(chan struct{})}
+	notified := make(chan error, 1)
+	var diagnosticService control.DiagnosticsService
+	runtimeDone := make(chan error, 1)
+	go func() {
+		runtimeDone <- serveRuntimeWithDependencies(
+			ctx,
+			configuration,
+			opened,
+			runtimeDependencies{
+				newIndex: func(repository *namespace.Repository) runtimeIndex {
+					return namespace.NewIndex(repository)
+				},
+				mount: func(
+					context.Context,
+					config.FUSE,
+					*namespace.Repository,
+					*objectstore.Store,
+				) (mountedFilesystem, error) {
+					return recordingMount{}, nil
+				},
+				startControl: func(
+					_ string,
+					_ os.FileMode,
+					_ uint32,
+					_ control.BatchService,
+					_ control.LibraryService,
+					_ control.ProjectionService,
+					_ control.GCService,
+					current control.DiagnosticsService,
+				) (controlRuntime, error) {
+					diagnosticService = current
+					return server, nil
+				},
+				notifyReady: func() error {
+					if diagnosticService == nil {
+						notified <- errors.New("diagnostics service was not passed to control startup")
+						return nil
+					}
+					status := diagnosticService.Status(context.Background())
+					if status.Daemon.Ready {
+						notified <- errors.New(
+							"status.ready became true before readiness notification succeeded",
+						)
+						return nil
+					}
+					if status.Mount.State != "ready" || status.Socket.State != "ready" {
+						notified <- fmt.Errorf(
+							"pre-readiness runtime status = mount %#v socket %#v",
+							status.Mount,
+							status.Socket,
+						)
+						return nil
+					}
+					notified <- nil
+					return nil
+				},
+				warnings: io.Discard,
+			},
+		)
+	}()
+
+	select {
+	case err := <-notified:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not invoke readiness notification")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if diagnosticService != nil &&
+			diagnosticService.Status(context.Background()).Daemon.Ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("status.ready did not become true after readiness notification succeeded")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-runtimeDone:
+		if err != nil {
+			t.Fatalf("serveRuntimeWithDependencies: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runtime did not stop")
 	}
 }
 
@@ -451,6 +571,7 @@ func TestServeRuntimeRejectsUnsafeObjectStoreBeforeControl(t *testing.T) {
 				control.LibraryService,
 				control.ProjectionService,
 				control.GCService,
+				control.DiagnosticsService,
 			) (controlRuntime, error) {
 				controlCalled = true
 				return nil, nil
@@ -522,6 +643,7 @@ func TestServeRuntimeDoesNotSignalReadyAfterControlStops(t *testing.T) {
 				control.LibraryService,
 				control.ProjectionService,
 				control.GCService,
+				control.DiagnosticsService,
 			) (controlRuntime, error) {
 				events = append(events, "control")
 				return server, nil
@@ -592,6 +714,7 @@ func TestServeRuntimeDoesNotSignalReadyAfterStartupCancellation(t *testing.T) {
 				control.LibraryService,
 				control.ProjectionService,
 				control.GCService,
+				control.DiagnosticsService,
 			) (controlRuntime, error) {
 				events = append(events, "control")
 				cancel()
@@ -663,6 +786,7 @@ func TestServeRuntimeOrdersReadinessAndGracefulShutdown(t *testing.T) {
 				control.LibraryService,
 				control.ProjectionService,
 				control.GCService,
+				control.DiagnosticsService,
 			) (controlRuntime, error) {
 				events = append(events, "control")
 				return server, nil
@@ -776,6 +900,7 @@ func TestServeRuntimeStartupFailureMatrixDoesNotSignalReady(t *testing.T) {
 						control.LibraryService,
 						control.ProjectionService,
 						control.GCService,
+						control.DiagnosticsService,
 					) (controlRuntime, error) {
 						events = append(events, "control")
 						if test.controlErr != nil {
@@ -865,6 +990,7 @@ func TestServeRuntimeWarnsWithoutFailingCommittedMutations(t *testing.T) {
 				control.LibraryService,
 				control.ProjectionService,
 				control.GCService,
+				control.DiagnosticsService,
 			) (controlRuntime, error) {
 				return server, nil
 			},
@@ -990,6 +1116,7 @@ func TestServeRuntimeDrainsAdmittedWriteBeforeUnmount(t *testing.T) {
 					control.LibraryService,
 					control.ProjectionService,
 					control.GCService,
+					control.DiagnosticsService,
 				) (controlRuntime, error) {
 					return server, nil
 				},
@@ -1196,6 +1323,7 @@ func TestServeRuntimeRebuildsPersistedStateAcrossRestarts(t *testing.T) {
 					control.LibraryService,
 					control.ProjectionService,
 					control.GCService,
+					control.DiagnosticsService,
 				) (controlRuntime, error) {
 					return server, nil
 				},

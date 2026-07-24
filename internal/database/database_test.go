@@ -109,6 +109,87 @@ func TestOpenInitializesDatabase(t *testing.T) {
 	}
 }
 
+func TestSchemaVersionReportsCurrentMigration(t *testing.T) {
+	opened := openNamespaceTestDatabase(t)
+
+	version, err := opened.SchemaVersion(context.Background())
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	if version != SupportedSchemaVersion() {
+		t.Errorf(
+			"SchemaVersion = %d, want supported version %d",
+			version,
+			SupportedSchemaVersion(),
+		)
+	}
+}
+
+func TestIntegrityCheckReportsHealthyDatabase(t *testing.T) {
+	opened := openNamespaceTestDatabase(t)
+
+	results, err := opened.IntegrityCheck(context.Background())
+	if err != nil {
+		t.Fatalf("IntegrityCheck: %v", err)
+	}
+	if len(results) != 1 || results[0] != "ok" {
+		t.Errorf("IntegrityCheck = %#v, want [ok]", results)
+	}
+}
+
+func TestIntegrityCheckReportsForeignKeyViolation(t *testing.T) {
+	opened := openNamespaceTestDatabase(t)
+	ctx := context.Background()
+	if _, err := opened.conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		t.Fatalf("disable foreign keys: %v", err)
+	}
+	if _, err := opened.conn.ExecContext(ctx, `
+		INSERT INTO libraries (
+			name,
+			status,
+			root_node_id,
+			profile_name,
+			profile_version,
+			uid,
+			gid,
+			root_mode,
+			directory_mode,
+			projection_file_mode,
+			overlay_file_mode,
+			created_at,
+			updated_at
+		) VALUES (
+			'broken',
+			'ACTIVE',
+			999,
+			'jellyfin',
+			1,
+			1000,
+			1000,
+			509,
+			509,
+			292,
+			436,
+			1,
+			1
+		)
+	`); err != nil {
+		t.Fatalf("insert foreign-key violation: %v", err)
+	}
+	if _, err := opened.conn.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+
+	results, err := opened.IntegrityCheck(ctx)
+	if err != nil {
+		t.Fatalf("IntegrityCheck: %v", err)
+	}
+	if len(results) != 1 ||
+		results[0] != "foreign key violation: table=libraries row=1 parent=nodes foreign_key=0" {
+		t.Errorf("IntegrityCheck = %#v", results)
+	}
+}
+
 func TestOpenCurrentDatabaseIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 	databasePath := filepath.Join(root, "state", "scrapefs.db")

@@ -88,7 +88,19 @@
 - 正常停止不使用 lazy unmount。
 - daemon 重启后可以从 SQLite 和 object store 恢复。
 
-## 8. 第一版 Agent Skill 范围
+## 8. Status 和 Doctor
+
+- `status` 返回 `scrapefs.status/v1`，包含 daemon version/readiness、database schema、namespace、index、mount、socket、object store 和 ACTIVE Library summary。
+- control socket 启动后、readiness 通知成功前，`status` 仍报告 `ready=false`。
+- mount 或 socket runtime metadata 校验失败时，`status` 不得继续报告 ready。
+- `doctor` 返回 `scrapefs.doctor/v1` 和稳定的 healthy、warning、blocking severity。
+- doctor 识别 missing/stale Projection、missing Overlay object、orphan/conflicting object、invalid Library/namespace、database corruption、index divergence 和 unsafe runtime metadata。
+- findings 使用确定性顺序和稳定 code。
+- doctor 不调用 recovery、GC、rebind 或 repair，也不修改 SQLite、object store、source file 或 runtime metadata。
+- 管理员与控制用户可以执行 status/doctor；其他调用者在业务检查前被拒绝。
+- CLI 只通过控制 socket 调用，不直接读取 SQLite 或 object store。
+
+## 9. 第一版 Agent Skill 范围
 
 Skill 应当覆盖：
 

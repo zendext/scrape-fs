@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 
@@ -209,6 +211,86 @@ func Open(ctx context.Context, databasePath string) (*DB, error) {
 
 func OpenWithOptions(ctx context.Context, databasePath string, options Options) (*DB, error) {
 	return open(ctx, databasePath, options, defaultMigrations)
+}
+
+func SupportedSchemaVersion() int {
+	return currentVersion
+}
+
+func (database *DB) SchemaVersion(ctx context.Context) (int, error) {
+	var version int
+	err := database.UseConnection(ctx, func(connection *Connection) error {
+		return connection.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("read database schema version: %w", err)
+	}
+	return version, nil
+}
+
+func (database *DB) IntegrityCheck(ctx context.Context) ([]string, error) {
+	results := []string{}
+	err := database.UseConnection(ctx, func(connection *Connection) error {
+		rows, err := connection.lease.connection.QueryContext(ctx, "PRAGMA quick_check")
+		if err != nil {
+			return fmt.Errorf("run database integrity check: %w", err)
+		}
+		for rows.Next() {
+			var result string
+			if err := rows.Scan(&result); err != nil {
+				return fmt.Errorf("read database integrity result: %w", err)
+			}
+			results = append(results, result)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("read database integrity results: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close database integrity results: %w", err)
+		}
+
+		rows, err = connection.lease.connection.QueryContext(ctx, "PRAGMA foreign_key_check")
+		if err != nil {
+			return fmt.Errorf("run database foreign-key check: %w", err)
+		}
+		for rows.Next() {
+			var table string
+			var rowID sql.NullInt64
+			var parent string
+			var foreignKeyID int64
+			if err := rows.Scan(&table, &rowID, &parent, &foreignKeyID); err != nil {
+				return fmt.Errorf("read database foreign-key result: %w", err)
+			}
+			row := "without-rowid"
+			if rowID.Valid {
+				row = fmt.Sprintf("%d", rowID.Int64)
+			}
+			results = append(results, fmt.Sprintf(
+				"foreign key violation: table=%s row=%s parent=%s foreign_key=%d",
+				table,
+				row,
+				parent,
+				foreignKeyID,
+			))
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("read database foreign-key results: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close database foreign-key results: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(results)
+	if len(results) > 1 {
+		results = slices.DeleteFunc(results, func(result string) bool {
+			return result == "ok"
+		})
+	}
+	return results, nil
 }
 
 func open(ctx context.Context, databasePath string, options Options, migrations []migration) (_ *DB, err error) {

@@ -2,6 +2,7 @@ package namespace
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"sync"
 	"testing"
@@ -62,6 +63,145 @@ func TestIndexRebuildsNamespaceAndObjectMappings(t *testing.T) {
 	stats := index.Stats()
 	if stats.Nodes != 3 || stats.Objects != 1 || stats.Libraries != 1 {
 		t.Errorf("Index stats = %#v, want 3 nodes, 1 object, 1 Library", stats)
+	}
+}
+
+func TestIndexInspectDetectsRepositoryDivergenceWithoutRebuild(t *testing.T) {
+	opened := openTestDatabase(t)
+	repository := NewRepository(opened)
+	ctx := context.Background()
+	createIndexedLibrary(t, repository, "media")
+
+	index := NewIndex(repository)
+	if _, err := index.Rebuild(ctx); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	createIndexedLibrary(t, repository, "archive")
+
+	inspection, err := index.Inspect(ctx)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !inspection.Diverged {
+		t.Fatal("Inspect Diverged = false, want true")
+	}
+	if inspection.Index != (IndexStats{Libraries: 1, Nodes: 2}) {
+		t.Errorf("indexed stats = %#v", inspection.Index)
+	}
+	if inspection.Repository != (IndexStats{Libraries: 2, Nodes: 3}) {
+		t.Errorf("Repository stats = %#v", inspection.Repository)
+	}
+	if got := index.Stats(); got != inspection.Index {
+		t.Errorf("Inspect mutated index stats to %#v, want %#v", got, inspection.Index)
+	}
+}
+
+func TestIndexInspectDoesNotReportCommitListenerRebuildWindow(t *testing.T) {
+	opened := openTestDatabase(t)
+	repository := NewRepository(opened)
+	ctx := context.Background()
+	createIndexedLibrary(t, repository, "media")
+
+	index := NewIndex(repository)
+	if _, err := index.Rebuild(ctx); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	listenerEntered := make(chan struct{})
+	releaseListener := make(chan struct{})
+	repository.AddCommitListener(func(Commit) {
+		close(listenerEntered)
+		<-releaseListener
+		if _, err := index.Rebuild(context.Background()); err != nil {
+			t.Errorf("listener Rebuild: %v", err)
+		}
+	})
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := repository.Update(
+			context.Background(),
+			testOperation("library.create"),
+			func(transaction *Transaction) error {
+				_, err := transaction.CreateLibrary(
+					context.Background(),
+					CreateLibrary{
+						Name:           "archive",
+						ProfileName:    "jellyfin",
+						ProfileVersion: 1,
+						Creator:        Actor{Kind: ActorSystem},
+						UID:            1000,
+						GID:            1000,
+						RootMode:       0o775,
+						DirectoryMode:  0o775,
+						ProjectionMode: 0o444,
+						OverlayMode:    0o664,
+					},
+				)
+				return err
+			},
+		)
+		writeDone <- err
+	}()
+	<-listenerEntered
+
+	inspectDone := make(chan IndexInspection, 1)
+	go func() {
+		inspection, err := index.Inspect(ctx)
+		if err != nil {
+			t.Errorf("Inspect: %v", err)
+		}
+		inspectDone <- inspection
+	}()
+	time.Sleep(time.Millisecond)
+	close(releaseListener)
+
+	inspection := <-inspectDone
+	if err := <-writeDone; err != nil {
+		t.Fatalf("create archive Library: %v", err)
+	}
+	if inspection.Diverged {
+		t.Errorf("Inspect reported listener rebuild window as divergence: %#v", inspection)
+	}
+}
+
+func TestRepositoryInspectValidatesLibraryRootRelationships(t *testing.T) {
+	opened := openTestDatabase(t)
+	repository := NewRepository(opened)
+	ctx := context.Background()
+	library := createIndexedLibrary(t, repository, "media")
+
+	inspection, err := repository.Inspect(ctx)
+	if err != nil {
+		t.Fatalf("healthy Inspect: %v", err)
+	}
+	if inspection.NamespaceVersion != 1 ||
+		inspection.ActiveLibraries != 1 ||
+		inspection.RetiredLibraries != 0 ||
+		inspection.Nodes != 2 ||
+		inspection.Projections != 0 ||
+		inspection.OverlayFiles != 0 {
+		t.Errorf("healthy inspection = %#v", inspection)
+	}
+
+	if err := opened.UseConnection(ctx, func(connection *database.Connection) error {
+		transaction, err := connection.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err := transaction.ExecContext(
+			ctx,
+			"UPDATE nodes SET name = 'mismatched' WHERE id = ?",
+			library.RootNodeID,
+		); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}); err != nil {
+		t.Fatalf("corrupt LibraryRoot relationship: %v", err)
+	}
+
+	if _, err := repository.Inspect(ctx); !errors.Is(err, ErrInvalidLibrary) {
+		t.Fatalf("corrupt Inspect error = %v, want ErrInvalidLibrary", err)
 	}
 }
 

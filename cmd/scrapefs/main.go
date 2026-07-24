@@ -13,6 +13,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/zendext/scrape-fs/internal/buildinfo"
 	"github.com/zendext/scrape-fs/internal/control"
+	"github.com/zendext/scrape-fs/internal/diagnostics"
 	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/objectstore"
@@ -21,12 +22,18 @@ import (
 )
 
 type cli struct {
+	Status     statusCLI        `cmd:"" help:"Report daemon and component status."`
+	Doctor     doctorCLI        `cmd:"" help:"Run read-only integrity diagnostics."`
 	Library    libraryCLI       `cmd:"" help:"Manage Libraries."`
 	Projection projectionCLI    `cmd:"" help:"Manage Projections."`
 	GC         gcCLI            `cmd:"" help:"Reclaim eligible object-store orphans."`
 	Socket     string           `help:"Path to the ScrapeFS control socket." default:"${default_socket}"`
 	Version    kong.VersionFlag `help:"Print version and exit."`
 }
+
+type statusCLI struct{}
+
+type doctorCLI struct{}
 
 type libraryCLI struct {
 	Add        libraryAddCLI        `cmd:"" help:"Create a Library."`
@@ -122,6 +129,8 @@ type projectionBatchUndoCLI struct {
 type gcCLI struct{}
 
 type controlService interface {
+	Status(context.Context) (diagnostics.StatusResult, error)
+	Doctor(context.Context) (diagnostics.DoctorResult, error)
 	CreateLibrary(
 		context.Context,
 		string,
@@ -241,6 +250,16 @@ func runWithBatchService(
 	actor := namespace.Actor{Kind: namespace.ActorControl, ID: &actorID}
 	var result any
 	switch {
+	case command == "status":
+		result, err = service.Status(ctx)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case command == "doctor":
+		result, err = service.Doctor(ctx)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
 	case strings.HasPrefix(command, "library add"):
 		profile, err := parseProfileIdentifier(commandLine.Library.Add.Profile)
 		if err != nil {

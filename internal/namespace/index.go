@@ -2,10 +2,12 @@ package namespace
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/zendext/scrape-fs/internal/database"
 )
@@ -33,6 +35,22 @@ type IndexStats struct {
 	Libraries int
 	Nodes     int
 	Objects   int
+}
+
+type IndexInspection struct {
+	Index      IndexStats
+	Repository IndexStats
+	Diverged   bool
+}
+
+type RepositoryInspection struct {
+	NamespaceVersion int64
+	ActiveLibraries  int
+	RetiredLibraries int
+	Nodes            int
+	Projections      int
+	OverlayFiles     int
+	Libraries        []Library
 }
 
 type Index struct {
@@ -82,9 +100,188 @@ func (index *Index) Stats() IndexStats {
 	}
 }
 
+func (index *Index) Inspect(ctx context.Context) (IndexInspection, error) {
+	if index == nil || index.repository == nil {
+		return IndexInspection{}, errors.New("namespace index repository is required")
+	}
+	var inspection IndexInspection
+	for attempt := 0; attempt < 3; attempt++ {
+		var err error
+		inspection, err = index.inspectOnce(ctx)
+		if err != nil || !inspection.Diverged {
+			return inspection, err
+		}
+		if attempt == 2 {
+			break
+		}
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return IndexInspection{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return inspection, nil
+}
+
+func (index *Index) inspectOnce(ctx context.Context) (IndexInspection, error) {
+	snapshot, err := index.repository.snapshot(ctx)
+	if err != nil {
+		return IndexInspection{}, err
+	}
+	libraries, nodes, objects, err := buildIndex(snapshot)
+	if err != nil {
+		return IndexInspection{}, err
+	}
+
+	index.mu.RLock()
+	defer index.mu.RUnlock()
+	return IndexInspection{
+		Index:      indexStats(index.libraries, index.nodes, index.objects),
+		Repository: indexStats(libraries, nodes, objects),
+		Diverged: !equalLibraries(index.libraries, libraries) ||
+			!equalNodes(index.nodes, nodes) ||
+			!equalObjects(index.objects, objects),
+	}, nil
+}
+
+func (repository *Repository) Inspect(ctx context.Context) (RepositoryInspection, error) {
+	var inspection RepositoryInspection
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		version, err := namespaceVersion(ctx, connection)
+		if err != nil {
+			return err
+		}
+		inspection.NamespaceVersion = version
+
+		var snapshot repositorySnapshot
+		var libraryCursorID int64
+		for {
+			var libraryID int64
+			err := connection.QueryRowContext(ctx, `
+				SELECT id
+				FROM libraries
+				WHERE id > ?
+				ORDER BY id
+				LIMIT 1
+			`, libraryCursorID).Scan(&libraryID)
+			if errors.Is(err, sql.ErrNoRows) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("list diagnostic Libraries: %w", err)
+			}
+			library, err := queryLibrary(
+				ctx,
+				connection,
+				"libraries.id = ?",
+				libraryID,
+			)
+			if err != nil {
+				return fmt.Errorf("inspect Library %d: %w", libraryID, err)
+			}
+			switch library.Status {
+			case LibraryActive:
+				inspection.ActiveLibraries++
+				snapshot.libraries = append(snapshot.libraries, library)
+				inspection.Libraries = append(inspection.Libraries, library)
+			case LibraryRetired:
+				inspection.RetiredLibraries++
+			}
+			libraryCursorID = libraryID
+		}
+
+		var nodeCursorID int64
+		for {
+			node, err := queryNode(ctx, connection, `
+				id > ?
+				ORDER BY id
+				LIMIT 1
+			`, nodeCursorID)
+			if errors.Is(err, ErrNotFound) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("inspect namespace nodes: %w", err)
+			}
+			snapshot.nodes = append(snapshot.nodes, node)
+			inspection.Nodes++
+			switch node.Kind {
+			case ProjectionFile:
+				inspection.Projections++
+			case OverlayFile:
+				inspection.OverlayFiles++
+			}
+			nodeCursorID = node.ID
+		}
+		_, _, _, err = buildIndex(snapshot)
+		return err
+	})
+	if err != nil {
+		return RepositoryInspection{}, err
+	}
+	return inspection, nil
+}
+
 type repositorySnapshot struct {
 	libraries []Library
 	nodes     []Node
+}
+
+func indexStats(
+	libraries map[int64]Library,
+	nodes map[int64]Node,
+	objects map[int64][]int64,
+) IndexStats {
+	return IndexStats{
+		Libraries: len(libraries),
+		Nodes:     len(nodes),
+		Objects:   len(objects),
+	}
+}
+
+func equalLibraries(left, right map[int64]Library) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for id, library := range left {
+		if other, exists := right[id]; !exists || other != library {
+			return false
+		}
+	}
+	return true
+}
+
+func equalNodes(left, right map[int64]Node) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for id, node := range left {
+		other, exists := right[id]
+		if !exists || !equalNode(node, other) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalObjects(left, right map[int64][]int64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for id, nodeIDs := range left {
+		other, exists := right[id]
+		if !exists || len(other) != len(nodeIDs) {
+			return false
+		}
+		for index := range nodeIDs {
+			if nodeIDs[index] != other[index] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (repository *Repository) snapshot(ctx context.Context) (repositorySnapshot, error) {

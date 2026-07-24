@@ -635,7 +635,7 @@ Find persistent or source-file problems that ScrapeFS does not repair automatica
 
 ### Preconditions
 
-- The daemon is ready, or doctor supports a read-only offline mode.
+- The daemon control socket is reachable and the control user is authorized.
 
 ### Trigger
 
@@ -645,11 +645,13 @@ scrapefs doctor
 
 ### Main Flow
 
-1. Check Projection source paths and identities.
-2. Check that each OverlayFile has its live object.
-3. Check for orphan objects with no node reference.
-4. Check Library and namespace-tree constraints.
-5. Output structured findings and suggested actions.
+1. Check the SQLite schema, quick check, and foreign-key check.
+2. Check Projection source paths and identities.
+3. Check that each OverlayFile has its live object.
+4. Check for orphan objects with no node reference.
+5. Check Library, namespace-tree, and in-memory index constraints.
+6. Check mount/socket runtime metadata.
+7. Output structured findings and suggested actions in stable order.
 
 ### Example Findings
 

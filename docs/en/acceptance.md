@@ -90,7 +90,19 @@
 - Normal shutdown does not use lazy unmount.
 - Daemon restart recovers from SQLite and the object store.
 
-## 8. First-Version Agent Skill Scope
+## 8. Status and Doctor
+
+- `status` returns `scrapefs.status/v1` with daemon version/readiness, database schema, namespace, index, mount, socket, object-store, and ACTIVE Library summaries.
+- After the control socket starts and before readiness notification succeeds, `status` still reports `ready=false`.
+- Mount or socket runtime metadata validation failure prevents `status` from continuing to report ready.
+- `doctor` returns `scrapefs.doctor/v1` with stable healthy, warning, and blocking severities.
+- Doctor identifies missing/stale Projections, missing Overlay objects, orphaned/conflicting objects, invalid Library/namespace state, database corruption, index divergence, and unsafe runtime metadata.
+- Findings use deterministic ordering and stable codes.
+- Doctor does not invoke recovery, GC, rebind, or repair and does not modify SQLite, object-store, source-file, or runtime metadata.
+- Administrators and control users can run status/doctor; other callers are rejected before business checks.
+- The CLI calls only the control socket and does not read SQLite or the object store directly.
+
+## 9. First-Version Agent Skill Scope
 
 The skill should cover:
 

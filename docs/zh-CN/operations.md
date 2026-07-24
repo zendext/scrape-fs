@@ -158,6 +158,60 @@ scrapefsd
 
 所有已实现的 Library、Projection 和 Projection Batch 命令都输出机器可读 JSON。Library 修改命令返回 `scrapefs.library-result/v1`，`library list` 返回 `scrapefs.library-list/v1`。
 
+`scrapefs status` 和 `scrapefs doctor` 需要管理员或控制用户授权，且只能通过 daemon 控制 socket 执行。CLI 不得直接打开 SQLite、object store 或 FUSE runtime metadata，也不提供 offline doctor。
+
+`status` 返回稳定的 `scrapefs.status/v1` JSON。顶层 `state` 使用 `ready`、`degraded` 或 `unavailable`，并包含：
+
+- daemon version 与当前 `ready`；
+- database 当前和支持的 schema version；
+- namespace version、node、Projection 和 OverlayFile 计数；
+- 内存 index 的 Library、node 和 object 计数；
+- 配置的 mount/socket path 及其当前状态；
+- object store 启动恢复 issue 数；
+- 来自同一 Repository inspection 快照的 ACTIVE Library 数量、稳定 ID、root node 和 Profile。
+
+control socket 可以在 daemon 通知 service manager 之前接受请求；该窗口内 `daemon.ready` 必须为 `false`。只有 `READY=1` 成功后该值才可以变为 `true`。如果后续 mount 或 socket 的 descriptor-anchored metadata 校验失败，`ready` 必须重新表现为 `false`，对应组件不得继续报告 `ready`。
+
+`doctor` 返回稳定的 `scrapefs.doctor/v1` JSON，包含同一 status 快照、整体 severity、severity 计数和 findings。severity 固定为 `healthy`、`warning` 或 `blocking`。findings 先按 blocking、warning、healthy 排序，再按 component、code、Library、target、node ID、node ID 列表、object ID 和 message 排序。
+
+doctor 通过 daemon 内部 API 执行只读检查：
+
+- SQLite schema、`PRAGMA quick_check` 与 `PRAGMA foreign_key_check`；
+- ACTIVE/RETIRED Library、LibraryRoot 和 namespace tree 关系；
+- Projection source 的安全 reopen 与 device/inode/size/mtime identity；
+- Overlay reference、LIVE/STAGING object、缺失 object、冲突文件和 orphan；
+- Repository 快照与当前内存 index 的完整值比较；
+- mount path、ScrapeFS mount ownership、socket inode、mode、owner/group 和角色 ACL。
+
+稳定 finding code 包括：
+
+```text
+DATABASE_OK
+DATABASE_UNAVAILABLE
+DATABASE_SCHEMA_MISMATCH
+DATABASE_CORRUPT
+NAMESPACE_OK
+INVALID_NAMESPACE
+LIBRARIES_OK
+INVALID_LIBRARY
+PROJECTIONS_OK
+BROKEN_PROJECTION
+STALE_PROJECTION
+OBJECT_STORE_OK
+OBJECT_STORE_UNAVAILABLE
+MISSING_OBJECT
+ORPHAN_OBJECT
+INVALID_OBJECT_STORE
+INDEX_OK
+INDEX_UNAVAILABLE
+INDEX_DIVERGENCE
+RUNTIME_OK
+RUNTIME_UNAVAILABLE
+UNSAFE_RUNTIME
+```
+
+doctor 禁止调用 startup recovery、GC、Projection rebind 或任何 repair 路径。它不得修改 namespace version、operation log、Library、node、object record、backing file 或 source file。repair 和显式回收仍由独立的管理员操作完成。
+
 `scrapefs gc` 需要管理员授权，并返回 `scrapefs.gc-result/v1`。数组和逐
 object 错误使用确定性顺序；计数区分 LIVE、STAGING、无数据库记录、仍被引用、
 活动 handle、grace period 和缺失但仍被引用等结果。结果同时包含 daemon 的启动

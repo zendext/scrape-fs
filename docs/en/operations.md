@@ -162,6 +162,60 @@ scrapefsd
 
 Every implemented Library, Projection, and Projection Batch command writes machine-readable JSON. Library mutations return `scrapefs.library-result/v1`; `library list` returns `scrapefs.library-list/v1`.
 
+`scrapefs status` and `scrapefs doctor` require administrator or control-user authorization and run only through the daemon control socket. The CLI does not open SQLite, the object store, or FUSE runtime metadata directly, and there is no offline doctor mode.
+
+`status` returns stable `scrapefs.status/v1` JSON. Its top-level `state` is `ready`, `degraded`, or `unavailable`, and it includes:
+
+- daemon version and current `ready` state;
+- current and supported database schema versions;
+- namespace version and node, Projection, and OverlayFile counts;
+- in-memory index Library, node, and object counts;
+- configured mount/socket paths and their current states;
+- the object-store startup recovery issue count;
+- ACTIVE Library count, stable IDs, root nodes, and Profiles from one Repository inspection snapshot.
+
+The control socket can accept requests before the daemon notifies its service manager. `daemon.ready` remains `false` in that window and can become `true` only after `READY=1` succeeds. If later descriptor-anchored mount or socket metadata validation fails, readiness is reported as false again and the affected component is not reported as ready.
+
+`doctor` returns stable `scrapefs.doctor/v1` JSON containing the same status snapshot, an overall severity, severity counts, and findings. Severities are `healthy`, `warning`, and `blocking`. Findings are ordered first by blocking, warning, and healthy severity, then by component, code, Library, target, node ID, node-ID list, object ID, and message.
+
+Doctor performs these read-only checks through daemon APIs:
+
+- SQLite schema, `PRAGMA quick_check`, and `PRAGMA foreign_key_check`;
+- ACTIVE/RETIRED Library, LibraryRoot, and namespace-tree relationships;
+- secure Projection source reopen and device/inode/size/mtime identity;
+- Overlay references, LIVE/STAGING objects, missing objects, conflicting files, and orphans;
+- full-value comparison between a Repository snapshot and the current in-memory index;
+- mount path, ScrapeFS mount ownership, socket inode, mode, owner/group, and role ACLs.
+
+Stable finding codes include:
+
+```text
+DATABASE_OK
+DATABASE_UNAVAILABLE
+DATABASE_SCHEMA_MISMATCH
+DATABASE_CORRUPT
+NAMESPACE_OK
+INVALID_NAMESPACE
+LIBRARIES_OK
+INVALID_LIBRARY
+PROJECTIONS_OK
+BROKEN_PROJECTION
+STALE_PROJECTION
+OBJECT_STORE_OK
+OBJECT_STORE_UNAVAILABLE
+MISSING_OBJECT
+ORPHAN_OBJECT
+INVALID_OBJECT_STORE
+INDEX_OK
+INDEX_UNAVAILABLE
+INDEX_DIVERGENCE
+RUNTIME_OK
+RUNTIME_UNAVAILABLE
+UNSAFE_RUNTIME
+```
+
+Doctor does not invoke startup recovery, GC, Projection rebind, or any repair path. It does not modify namespace version, operation logs, Libraries, nodes, object records, backing files, or source files. Repair and explicit reclamation remain separate administrator operations.
+
 `scrapefs gc` requires administrator authorization and returns
 `scrapefs.gc-result/v1`. Its arrays and per-object errors are deterministic, and
 its counts distinguish LIVE, STAGING, untracked, referenced, active, grace-period,
