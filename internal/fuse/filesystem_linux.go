@@ -1131,6 +1131,14 @@ func errorNumber(err error) syscall.Errno {
 		return syscall.EFBIG
 	case errors.Is(err, syscall.EIO):
 		return syscall.EIO
+	case errors.Is(err, syscall.ENOENT):
+		return syscall.ENOENT
+	case errors.Is(err, syscall.ENOTDIR):
+		return syscall.ENOTDIR
+	case errors.Is(err, syscall.ENODEV):
+		return syscall.ENODEV
+	case errors.Is(err, syscall.ESTALE):
+		return syscall.ESTALE
 	case errors.Is(err, namespace.ErrConflict):
 		return syscall.EEXIST
 	case errors.Is(err, namespace.ErrNotEmpty):
@@ -1158,6 +1166,6 @@ func errorNumber(err error) syscall.Errno {
 		errors.Is(err, context.DeadlineExceeded):
 		return syscall.EINTR
 	default:
-		return gofs.ToErrno(err)
+		return syscall.EIO
 	}
 }

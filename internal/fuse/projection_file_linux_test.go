@@ -479,6 +479,23 @@ func TestProjectionFuseMapsBatchOwnedMutationToReadOnly(t *testing.T) {
 	}
 }
 
+func TestErrorNumberFailsClosedAndPreservesSourceErrnos(t *testing.T) {
+	if errno := errorNumber(errors.New("opaque database failure")); errno != syscall.EIO {
+		t.Errorf("opaque error errno = %v, want EIO", errno)
+	}
+	for _, want := range []syscall.Errno{
+		syscall.ENOENT,
+		syscall.ENOTDIR,
+		syscall.ENODEV,
+		syscall.ESTALE,
+	} {
+		err := &os.PathError{Op: "open", Path: "/source", Err: want}
+		if errno := errorNumber(err); errno != want {
+			t.Errorf("wrapped %v errno = %v, want %v", want, errno, want)
+		}
+	}
+}
+
 func projectionNodeForSource(
 	t *testing.T,
 	id int64,
