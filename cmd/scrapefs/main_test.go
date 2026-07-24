@@ -11,6 +11,7 @@ import (
 	"github.com/zendext/scrape-fs/internal/control"
 	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"github.com/zendext/scrape-fs/internal/objectstore"
 	"github.com/zendext/scrape-fs/internal/projection"
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
 )
@@ -206,6 +207,45 @@ func TestErrorCodeReturnsPermissionDenied(t *testing.T) {
 
 	if got := errorCode(control.ErrPermissionDenied); got != "PermissionDenied" {
 		t.Errorf("errorCode = %q, want PermissionDenied", got)
+	}
+}
+
+func TestRunGarbageCollectWritesDeterministicJSON(t *testing.T) {
+	service := &fakeBatchService{
+		gcResult: objectstore.GCResult{
+			Schema:              objectstore.GCResultSchema,
+			Examined:            4,
+			DeletedLive:         1,
+			DeletedStaging:      1,
+			RetainedReferenced:  1,
+			RetainedGracePeriod: 1,
+			Errors:              []objectstore.GCError{},
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithBatchService(
+		[]string{"gc"},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+		service,
+		projectionbatch.Caller{UID: 1000, GID: 1001},
+	)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	var result objectstore.GCResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("Unmarshal stdout: %v", err)
+	}
+	if !reflect.DeepEqual(result, service.gcResult) {
+		t.Errorf("stdout result = %#v, want %#v", result, service.gcResult)
+	}
+	if service.gcCalls != 1 {
+		t.Errorf("GC calls = %d, want 1", service.gcCalls)
 	}
 }
 
@@ -555,6 +595,8 @@ type fakeBatchService struct {
 	projectionsListed       control.ProjectionListResult
 	projectionCreateRequest projection.CreateRequest
 	projectionLibrary       string
+	gcResult                objectstore.GCResult
+	gcCalls                 int
 }
 
 func (service *fakeBatchService) CreateLibrary(
@@ -647,6 +689,13 @@ func (service *fakeBatchService) Undo(
 ) (projectionbatch.UndoResult, error) {
 	service.undoRequest = request
 	return service.undone, service.err
+}
+
+func (service *fakeBatchService) GarbageCollect(
+	context.Context,
+) (objectstore.GCResult, error) {
+	service.gcCalls++
+	return service.gcResult, service.err
 }
 
 var _ controlService = (*fakeBatchService)(nil)

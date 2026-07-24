@@ -155,6 +155,14 @@ scrapefsd
 
 Every implemented Library, Projection, and Projection Batch command writes machine-readable JSON. Library mutations return `scrapefs.library-result/v1`; `library list` returns `scrapefs.library-list/v1`.
 
+`scrapefs gc` requires administrator authorization and returns
+`scrapefs.gc-result/v1`. Its arrays and per-object errors are deterministic, and
+its counts distinguish LIVE, STAGING, untracked, referenced, active, grace-period,
+and missing-referenced outcomes. The result also includes the daemon's startup
+recovery report, including missing referenced object IDs and node IDs. An
+object-level cleanup failure is reported in the result without making another
+candidate eligible for unsafe deletion.
+
 `library add` creates an ACTIVE Library with the invoking administrator's peer UID/GID and the fixed v1 modes `0775` for the LibraryRoot and directories, `0444` for Projections, and `0664` for OverlayFiles. `library rename` atomically renames the ACTIVE Library record and its protected LibraryRoot, preserves both stable IDs, writes one operation-log entry, and increments namespace version once. A duplicate or invalid new name leaves the Library, LibraryRoot, namespace version, and operation log unchanged.
 
 `library set-profile` changes the Profile used by later direct Projection and Projection Batch validation/apply. It does not move or rename existing nodes, writes one operation-log entry, and does not increment namespace version. Only the built-in `jellyfin@1` and `plex@1` Profiles are accepted. `library add`, `library rename`, and `library set-profile` require administrator authorization. `library list` returns ACTIVE Libraries in deterministic name order and is available to administrators and control users.

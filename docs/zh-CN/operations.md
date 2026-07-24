@@ -152,6 +152,12 @@ scrapefsd
 
 所有已实现的 Library、Projection 和 Projection Batch 命令都输出机器可读 JSON。Library 修改命令返回 `scrapefs.library-result/v1`，`library list` 返回 `scrapefs.library-list/v1`。
 
+`scrapefs gc` 需要管理员授权，并返回 `scrapefs.gc-result/v1`。数组和逐
+object 错误使用确定性顺序；计数区分 LIVE、STAGING、无数据库记录、仍被引用、
+活动 handle、grace period 和缺失但仍被引用等结果。结果同时包含 daemon 的启动
+恢复报告，其中包括缺失 object ID 和引用它的 node ID。单个 object 清理失败会记录
+在结果中，不得因此放宽其他候选 object 的删除条件。
+
 `library add` 使用调用管理员的 peer UID/GID 创建 ACTIVE Library，并使用固定的 v1 mode：LibraryRoot 和目录为 `0775`，Projection 为 `0444`，OverlayFile 为 `0664`。`library rename` 在一个事务中同时重命名 ACTIVE Library 记录及其受保护的 LibraryRoot，保留二者稳定 ID，写一条 operation log，并只增加一次 namespace version。新名称重复或无效时，Library、LibraryRoot、namespace version 和 operation log 均保持不变。
 
 `library set-profile` 修改后续 direct Projection 和 Projection Batch validate/apply 使用的 Profile，不移动或重命名已有节点，写一条 operation log，且不增加 namespace version。只接受内置的 `jellyfin@1` 和 `plex@1` Profile。`library add`、`library rename` 和 `library set-profile` 需要管理员授权。`library list` 按名称确定性排序返回 ACTIVE Library，管理员和控制用户均可调用。

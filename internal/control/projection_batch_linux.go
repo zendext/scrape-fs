@@ -88,6 +88,7 @@ type serverOptions struct {
 	security          serverSecurity
 	readPeerIdentity  peerIdentityReader
 	ready             chan<- struct{}
+	gcService         GCService
 	libraryService    LibraryService
 	projectionService ProjectionService
 }
@@ -226,12 +227,16 @@ func Serve(
 	service BatchService,
 	libraryService LibraryService,
 	projectionService ProjectionService,
+	gcService GCService,
 ) error {
 	if libraryService == nil {
 		return fmt.Errorf("Library control service must not be nil")
 	}
 	if projectionService == nil {
 		return fmt.Errorf("Projection control service must not be nil")
+	}
+	if gcService == nil {
+		return fmt.Errorf("GC control service must not be nil")
 	}
 	controlGroupID, err := resolveGroupID(ControlGroupName, systemGroupLookup)
 	if err != nil {
@@ -245,6 +250,7 @@ func Serve(
 			controlGroupID:   controlGroupID,
 		},
 		readPeerIdentity:  readPeerIdentity,
+		gcService:         gcService,
 		libraryService:    libraryService,
 		projectionService: projectionService,
 	})
@@ -591,6 +597,12 @@ func handleConnection(
 			Actor:   actor,
 			Caller:  caller,
 		})
+	case "gc":
+		if options.gcService == nil {
+			err = fmt.Errorf("GC control service is unavailable")
+			break
+		}
+		result, err = options.gcService.GarbageCollect(ctx)
 	default:
 		err = fmt.Errorf("unsupported control command %q", request.Command)
 	}
