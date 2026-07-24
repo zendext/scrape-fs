@@ -74,6 +74,9 @@ func TestMountProjectionFileIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
+	if err := mounted.Check(); err != nil {
+		t.Fatalf("Check active mount: %v", err)
+	}
 	t.Cleanup(func() {
 		if err := mounted.Unmount(); err != nil {
 			t.Errorf("cleanup Unmount: %v", err)

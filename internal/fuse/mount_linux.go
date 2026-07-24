@@ -222,18 +222,22 @@ func (mounted *Mounted) Unmount() error {
 }
 
 func (mounted *Mounted) Check() error {
+	return mounted.check(verifyMounted)
+}
+
+func (mounted *Mounted) check(verify func(string) error) error {
 	if mounted == nil || mounted.mountpoint == nil {
 		return errors.New("FUSE mount runtime is unavailable")
+	}
+	if verify == nil {
+		return errors.New("FUSE mount verifier is unavailable")
 	}
 	mounted.mu.Lock()
 	defer mounted.mu.Unlock()
 	if mounted.finished {
 		return errors.New("FUSE mount is not active")
 	}
-	return errors.Join(
-		mounted.mountpoint.verifyPath(),
-		verifyMounted(mounted.mountpoint.path),
-	)
+	return verify(mounted.mountpoint.path)
 }
 
 func verifyMounted(path string) error {

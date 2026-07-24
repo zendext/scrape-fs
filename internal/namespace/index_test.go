@@ -143,23 +143,42 @@ func TestIndexInspectDoesNotReportCommitListenerRebuildWindow(t *testing.T) {
 	}()
 	<-listenerEntered
 
-	inspectDone := make(chan IndexInspection, 1)
+	type inspectResult struct {
+		inspection IndexInspection
+		err        error
+	}
+	inspectDone := make(chan inspectResult, 1)
 	go func() {
 		inspection, err := index.Inspect(ctx)
-		if err != nil {
-			t.Errorf("Inspect: %v", err)
-		}
-		inspectDone <- inspection
+		inspectDone <- inspectResult{inspection: inspection, err: err}
 	}()
-	time.Sleep(time.Millisecond)
+
+	select {
+	case result := <-inspectDone:
+		close(releaseListener)
+		<-writeDone
+		t.Fatalf(
+			"Inspect completed during an active commit listener after %v: %#v/%v",
+			20*time.Millisecond,
+			result.inspection,
+			result.err,
+		)
+	case <-time.After(20 * time.Millisecond):
+	}
 	close(releaseListener)
 
-	inspection := <-inspectDone
+	result := <-inspectDone
+	if result.err != nil {
+		t.Fatalf("Inspect: %v", result.err)
+	}
 	if err := <-writeDone; err != nil {
 		t.Fatalf("create archive Library: %v", err)
 	}
-	if inspection.Diverged {
-		t.Errorf("Inspect reported listener rebuild window as divergence: %#v", inspection)
+	if result.inspection.Diverged {
+		t.Errorf(
+			"Inspect reported listener rebuild window as divergence: %#v",
+			result.inspection,
+		)
 	}
 }
 
@@ -202,6 +221,146 @@ func TestRepositoryInspectValidatesLibraryRootRelationships(t *testing.T) {
 
 	if _, err := repository.Inspect(ctx); !errors.Is(err, ErrInvalidLibrary) {
 		t.Fatalf("corrupt Inspect error = %v, want ErrInvalidLibrary", err)
+	}
+}
+
+func TestRepositoryInspectRejectsChildrenBelowFileNodesWithoutMutation(t *testing.T) {
+	for _, kind := range []NodeKind{ProjectionFile, OverlayFile} {
+		t.Run(string(kind), func(t *testing.T) {
+			opened := openTestDatabase(t)
+			repository := NewRepository(opened)
+			ctx := context.Background()
+			library := createIndexedLibrary(t, repository, "media")
+			parent := createIndexedFileNode(t, opened, repository, library, kind)
+
+			var child Node
+			if _, err := repository.Update(
+				ctx,
+				testOperation("directory.create"),
+				func(transaction *Transaction) error {
+					var err error
+					child, err = transaction.CreateNode(ctx, CreateNode{
+						ParentID: library.RootNodeID,
+						Name:     "nested",
+						Kind:     Directory,
+						Creator:  Actor{Kind: ActorSystem},
+						Attributes: Attributes{
+							Mode: 0o755,
+							UID:  1000,
+							GID:  1000,
+						},
+					})
+					return err
+				},
+			); err != nil {
+				t.Fatalf("create child Directory: %v", err)
+			}
+			if err := opened.UseConnection(ctx, func(connection *database.Connection) error {
+				transaction, err := connection.BeginTx(ctx, nil)
+				if err != nil {
+					return err
+				}
+				defer transaction.Rollback()
+				if _, err := transaction.ExecContext(
+					ctx,
+					"UPDATE nodes SET parent_id = ? WHERE id = ?",
+					parent.ID,
+					child.ID,
+				); err != nil {
+					return err
+				}
+				return transaction.Commit()
+			}); err != nil {
+				t.Fatalf("corrupt child parent: %v", err)
+			}
+
+			versionBefore, err := repository.NamespaceVersion(ctx)
+			if err != nil {
+				t.Fatalf("NamespaceVersion before Inspect: %v", err)
+			}
+			if _, err := repository.Inspect(ctx); !errors.Is(err, ErrInvalidNode) {
+				t.Fatalf("Inspect error = %v, want ErrInvalidNode", err)
+			}
+			versionAfter, err := repository.NamespaceVersion(ctx)
+			if err != nil {
+				t.Fatalf("NamespaceVersion after Inspect: %v", err)
+			}
+			if versionAfter != versionBefore {
+				t.Errorf(
+					"Inspect changed namespace version from %d to %d",
+					versionBefore,
+					versionAfter,
+				)
+			}
+			got, err := repository.Node(ctx, child.ID)
+			if err != nil {
+				t.Fatalf("read corrupt child after Inspect: %v", err)
+			}
+			if got.ParentID == nil || *got.ParentID != parent.ID {
+				t.Errorf("Inspect changed corrupt child parent: %#v", got.ParentID)
+			}
+		})
+	}
+}
+
+func TestRepositoryInspectRejectsUnassociatedNestedLibraryRootWithoutMutation(t *testing.T) {
+	opened := openTestDatabase(t)
+	repository := NewRepository(opened)
+	ctx := context.Background()
+	media := createIndexedLibrary(t, repository, "media")
+	nested := createIndexedLibrary(t, repository, "nested")
+
+	if err := opened.UseConnection(ctx, func(connection *database.Connection) error {
+		transaction, err := connection.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		now := time.Now().UTC().UnixNano()
+		if _, err := transaction.ExecContext(ctx, `
+			UPDATE libraries
+			SET status = 'RETIRED', root_node_id = NULL, updated_at = ?, retired_at = ?
+			WHERE id = ?
+		`, now, now, nested.ID); err != nil {
+			return err
+		}
+		if _, err := transaction.ExecContext(
+			ctx,
+			"UPDATE nodes SET parent_id = ? WHERE id = ?",
+			media.RootNodeID,
+			nested.RootNodeID,
+		); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}); err != nil {
+		t.Fatalf("corrupt nested LibraryRoot: %v", err)
+	}
+
+	versionBefore, err := repository.NamespaceVersion(ctx)
+	if err != nil {
+		t.Fatalf("NamespaceVersion before Inspect: %v", err)
+	}
+	if _, err := repository.Inspect(ctx); !errors.Is(err, ErrInvalidNode) {
+		t.Fatalf("Inspect error = %v, want ErrInvalidNode", err)
+	}
+	versionAfter, err := repository.NamespaceVersion(ctx)
+	if err != nil {
+		t.Fatalf("NamespaceVersion after Inspect: %v", err)
+	}
+	if versionAfter != versionBefore {
+		t.Errorf(
+			"Inspect changed namespace version from %d to %d",
+			versionBefore,
+			versionAfter,
+		)
+	}
+	got, err := repository.Node(ctx, nested.RootNodeID)
+	if err != nil {
+		t.Fatalf("read nested LibraryRoot after Inspect: %v", err)
+	}
+	if got.ParentID == nil || *got.ParentID != media.RootNodeID {
+		t.Errorf("Inspect changed nested LibraryRoot parent: %#v", got.ParentID)
 	}
 }
 
@@ -428,6 +587,95 @@ func createIndexedLibrary(
 		t.Fatalf("CreateLibrary: %v", err)
 	}
 	return library
+}
+
+func createIndexedFileNode(
+	t *testing.T,
+	opened *database.DB,
+	repository *Repository,
+	library Library,
+	kind NodeKind,
+) Node {
+	t.Helper()
+
+	var objectID int64
+	if kind == OverlayFile {
+		if err := opened.UseConnection(
+			context.Background(),
+			func(connection *database.Connection) error {
+				transaction, err := connection.BeginTx(context.Background(), nil)
+				if err != nil {
+					return err
+				}
+				defer transaction.Rollback()
+				now := time.Now().UTC().UnixNano()
+				result, err := transaction.ExecContext(context.Background(), `
+					INSERT INTO objects (state, created_at_ns, live_at_ns, updated_at_ns)
+					VALUES ('STAGING', ?, NULL, ?)
+				`, now, now)
+				if err != nil {
+					return err
+				}
+				objectID, err = result.LastInsertId()
+				if err != nil {
+					return err
+				}
+				return transaction.Commit()
+			},
+		); err != nil {
+			t.Fatalf("create object row: %v", err)
+		}
+	}
+
+	var node Node
+	if _, err := repository.Update(
+		context.Background(),
+		testOperation("file.create"),
+		func(transaction *Transaction) error {
+			var err error
+			switch kind {
+			case ProjectionFile:
+				node, err = transaction.CreateNode(context.Background(), CreateNode{
+					ParentID: library.RootNodeID,
+					Name:     "parent.projection",
+					Kind:     ProjectionFile,
+					Source: &ProjectionSource{
+						Path:     "/source/parent.projection",
+						DeviceID: 1,
+						Inode:    2,
+						Size:     3,
+					},
+					Creator: Actor{Kind: ActorSystem},
+					Attributes: Attributes{
+						Mode: 0o444,
+						UID:  1000,
+						GID:  1000,
+					},
+				})
+			case OverlayFile:
+				node, err = transaction.CreateOverlay(
+					context.Background(),
+					objectID,
+					CreateOverlay{
+						ParentID: library.RootNodeID,
+						Name:     "parent.overlay",
+						Creator:  Actor{Kind: ActorSystem},
+						Attributes: Attributes{
+							Mode: 0o644,
+							UID:  1000,
+							GID:  1000,
+						},
+					},
+				)
+			default:
+				t.Fatalf("unsupported file kind %q", kind)
+			}
+			return err
+		},
+	); err != nil {
+		t.Fatalf("create %s: %v", kind, err)
+	}
+	return node
 }
 
 func equalEntryChanges(got, want []EntryChange) bool {

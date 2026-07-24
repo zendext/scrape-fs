@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zendext/scrape-fs/internal/database"
 	"github.com/zendext/scrape-fs/internal/library"
@@ -427,6 +428,102 @@ func TestDoctorDoesNotMisclassifyNamespaceCorruptionAsInvalidLibrary(t *testing.
 	}
 	if hasFindingCode(result.Findings, CodeInvalidLibrary) {
 		t.Fatalf("doctor findings = %#v, do not want invalid Library", result.Findings)
+	}
+}
+
+func TestDoctorReportsInvalidNamespaceForNestedUnassociatedLibraryRootWithoutMutation(
+	t *testing.T,
+) {
+	root := t.TempDir()
+	opened, err := database.OpenWithOptions(
+		context.Background(),
+		filepath.Join(root, "state", "scrapefs.db"),
+		database.Options{LockPath: filepath.Join(root, "run", "scrapefsd.lock")},
+	)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := opened.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	repository := namespace.NewRepository(opened)
+	media := createDiagnosticLibrary(t, repository, "media")
+	nested := createDiagnosticLibrary(t, repository, "nested")
+	if err := opened.UseConnection(
+		context.Background(),
+		func(connection *database.Connection) error {
+			transaction, err := connection.BeginTx(context.Background(), nil)
+			if err != nil {
+				return err
+			}
+			defer transaction.Rollback()
+			now := time.Now().UTC().UnixNano()
+			if _, err := transaction.ExecContext(context.Background(), `
+				UPDATE libraries
+				SET status = 'RETIRED', root_node_id = NULL, updated_at = ?, retired_at = ?
+				WHERE id = ?
+			`, now, now, nested.ID); err != nil {
+				return err
+			}
+			if _, err := transaction.ExecContext(
+				context.Background(),
+				"UPDATE nodes SET parent_id = ? WHERE id = ?",
+				media.RootNodeID,
+				nested.RootNodeID,
+			); err != nil {
+				return err
+			}
+			return transaction.Commit()
+		},
+	); err != nil {
+		t.Fatalf("corrupt nested LibraryRoot: %v", err)
+	}
+
+	runtime := NewRuntime("/mnt/scrapefs", "/run/scrapefs/scrapefs.sock")
+	runtime.SetMount(nil)
+	runtime.SetSocket(nil)
+	runtime.SetReady(true)
+	service := newService(
+		fakeDatabase{version: database.SupportedSchemaVersion()},
+		repository,
+		fakeIndex{},
+		fakeObjectStore{},
+		runtime,
+		"dev",
+		nil,
+	)
+	versionBefore, err := repository.NamespaceVersion(context.Background())
+	if err != nil {
+		t.Fatalf("NamespaceVersion before doctor: %v", err)
+	}
+
+	result := service.Doctor(context.Background())
+
+	if !hasFindingCode(result.Findings, CodeInvalidNamespace) {
+		t.Fatalf("doctor findings = %#v, want INVALID_NAMESPACE", result.Findings)
+	}
+	if hasFindingCode(result.Findings, CodeNamespaceOK) {
+		t.Fatalf("doctor findings = %#v, do not want NAMESPACE_OK", result.Findings)
+	}
+	versionAfter, err := repository.NamespaceVersion(context.Background())
+	if err != nil {
+		t.Fatalf("NamespaceVersion after doctor: %v", err)
+	}
+	if versionAfter != versionBefore {
+		t.Errorf(
+			"doctor changed namespace version from %d to %d",
+			versionBefore,
+			versionAfter,
+		)
+	}
+	got, err := repository.Node(context.Background(), nested.RootNodeID)
+	if err != nil {
+		t.Fatalf("read nested LibraryRoot after doctor: %v", err)
+	}
+	if got.ParentID == nil || *got.ParentID != media.RootNodeID {
+		t.Errorf("doctor changed nested LibraryRoot parent: %#v", got.ParentID)
 	}
 }
 

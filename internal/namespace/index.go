@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/zendext/scrape-fs/internal/database"
 )
@@ -104,35 +103,36 @@ func (index *Index) Inspect(ctx context.Context) (IndexInspection, error) {
 	if index == nil || index.repository == nil {
 		return IndexInspection{}, errors.New("namespace index repository is required")
 	}
-	var inspection IndexInspection
-	for attempt := 0; attempt < 3; attempt++ {
-		var err error
-		inspection, err = index.inspectOnce(ctx)
+	for {
+		inspection, generation, err := index.inspectOnce(ctx)
 		if err != nil || !inspection.Diverged {
 			return inspection, err
 		}
-		if attempt == 2 {
-			break
+		currentGeneration, notification := index.repository.commitListenerState()
+		if currentGeneration != generation {
+			continue
 		}
-		timer := time.NewTimer(5 * time.Millisecond)
+		if notification == nil {
+			return inspection, nil
+		}
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return IndexInspection{}, ctx.Err()
-		case <-timer.C:
+		case <-notification:
 		}
 	}
-	return inspection, nil
 }
 
-func (index *Index) inspectOnce(ctx context.Context) (IndexInspection, error) {
+func (index *Index) inspectOnce(
+	ctx context.Context,
+) (IndexInspection, uint64, error) {
 	snapshot, err := index.repository.snapshot(ctx)
 	if err != nil {
-		return IndexInspection{}, err
+		return IndexInspection{}, 0, err
 	}
 	libraries, nodes, objects, err := buildIndex(snapshot)
 	if err != nil {
-		return IndexInspection{}, err
+		return IndexInspection{}, 0, err
 	}
 
 	index.mu.RLock()
@@ -143,7 +143,7 @@ func (index *Index) inspectOnce(ctx context.Context) (IndexInspection, error) {
 		Diverged: !equalLibraries(index.libraries, libraries) ||
 			!equalNodes(index.nodes, nodes) ||
 			!equalObjects(index.objects, objects),
-	}, nil
+	}, snapshot.listenerGeneration, nil
 }
 
 func (repository *Repository) Inspect(ctx context.Context) (RepositoryInspection, error) {
@@ -225,8 +225,9 @@ func (repository *Repository) Inspect(ctx context.Context) (RepositoryInspection
 }
 
 type repositorySnapshot struct {
-	libraries []Library
-	nodes     []Node
+	libraries          []Library
+	nodes              []Node
+	listenerGeneration uint64
 }
 
 func indexStats(
@@ -287,6 +288,8 @@ func equalObjects(left, right map[int64][]int64) bool {
 func (repository *Repository) snapshot(ctx context.Context) (repositorySnapshot, error) {
 	var snapshot repositorySnapshot
 	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		snapshot.listenerGeneration, _ = repository.commitListenerState()
+
 		var libraryCursorName string
 		var libraryCursorID int64
 		for {
@@ -346,6 +349,15 @@ func buildIndex(
 		if _, duplicate := libraries[library.ID]; duplicate {
 			return nil, nil, nil, fmt.Errorf("%w: duplicate Library %d", ErrInvalidLibrary, library.ID)
 		}
+		if existing, duplicate := rootLibraries[library.RootNodeID]; duplicate {
+			return nil, nil, nil, fmt.Errorf(
+				"%w: Libraries %d and %d share root node %d",
+				ErrInvalidLibrary,
+				existing.ID,
+				library.ID,
+				library.RootNodeID,
+			)
+		}
 		libraries[library.ID] = library
 		rootLibraries[library.RootNodeID] = library
 	}
@@ -365,7 +377,7 @@ func buildIndex(
 	if !exists || root.Kind != GlobalRoot || root.ParentID != nil {
 		return nil, nil, nil, fmt.Errorf("%w: missing GlobalRoot", ErrInvalidRoot)
 	}
-	for _, library := range libraries {
+	for _, library := range snapshot.libraries {
 		rootNode, exists := nodes[library.RootNodeID]
 		if !exists ||
 			rootNode.Kind != LibraryRoot ||
@@ -379,19 +391,38 @@ func buildIndex(
 			)
 		}
 	}
-	for id, node := range nodes {
+	for _, node := range snapshot.nodes {
+		id := node.ID
 		if id == root.ID {
 			continue
 		}
 		if node.ParentID == nil {
 			return nil, nil, nil, fmt.Errorf("%w: node %d has no parent", ErrInvalidNode, id)
 		}
-		if _, exists := nodes[*node.ParentID]; !exists {
+		parent, exists := nodes[*node.ParentID]
+		if !exists {
 			return nil, nil, nil, fmt.Errorf(
 				"%w: node %d parent %d is missing",
 				ErrInvalidNode,
 				id,
 				*node.ParentID,
+			)
+		}
+		if node.Kind == LibraryRoot {
+			if _, active := rootLibraries[id]; !active {
+				return nil, nil, nil, fmt.Errorf(
+					"%w: LibraryRoot node %d is not bound to an active Library",
+					ErrInvalidNode,
+					id,
+				)
+			}
+		} else if parent.Kind != LibraryRoot && parent.Kind != Directory {
+			return nil, nil, nil, fmt.Errorf(
+				"%w: node %d parent %d is %s, want LibraryRoot or Directory",
+				ErrInvalidNode,
+				id,
+				parent.ID,
+				parent.Kind,
 			)
 		}
 		if err := validateIndexedAncestry(id, nodes, rootLibraries); err != nil {

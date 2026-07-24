@@ -18,10 +18,13 @@ import (
 )
 
 type Repository struct {
-	database    *database.DB
-	now         func() time.Time
-	listenersMu sync.RWMutex
-	listeners   []CommitListener
+	database           *database.DB
+	now                func() time.Time
+	listenersMu        sync.RWMutex
+	listeners          []CommitListener
+	listenerStateMu    sync.Mutex
+	listenerGeneration uint64
+	listenerDone       chan struct{}
 }
 
 func NewRepository(opened *database.DB) *Repository {
@@ -47,6 +50,31 @@ func (repository *Repository) notifyCommit(commit Commit) {
 	for _, listener := range listeners {
 		listener(commit)
 	}
+}
+
+func (repository *Repository) beginCommitListenerWindow() func() {
+	// Mark the window before the transaction so inspection cannot observe a
+	// committed snapshot in the gap before synchronous listeners start.
+	repository.listenerStateMu.Lock()
+	repository.listenerGeneration++
+	done := make(chan struct{})
+	repository.listenerDone = done
+	repository.listenerStateMu.Unlock()
+
+	return func() {
+		repository.listenerStateMu.Lock()
+		if repository.listenerDone == done {
+			repository.listenerDone = nil
+		}
+		close(done)
+		repository.listenerStateMu.Unlock()
+	}
+}
+
+func (repository *Repository) commitListenerState() (uint64, <-chan struct{}) {
+	repository.listenerStateMu.Lock()
+	defer repository.listenerStateMu.Unlock()
+	return repository.listenerGeneration, repository.listenerDone
 }
 
 func (repository *Repository) GlobalRoot(ctx context.Context) (Node, error) {
@@ -158,6 +186,9 @@ func (repository *Repository) SetAttributes(
 
 	var updated Node
 	err = repository.database.UseWrite(ctx, func() error {
+		finishNotification := repository.beginCommitListenerWindow()
+		defer finishNotification()
+
 		if err := repository.useConnection(ctx, func(connection *database.Connection) error {
 			transaction, err := connection.BeginTx(ctx, nil)
 			if err != nil {
@@ -622,6 +653,9 @@ func (repository *Repository) Update(
 
 	var version int64
 	err = repository.database.UseWrite(ctx, func() error {
+		finishNotification := repository.beginCommitListenerWindow()
+		defer finishNotification()
+
 		var err error
 		version, err = repository.updateWithConnection(
 			ctx,
@@ -652,6 +686,9 @@ func (repository *Repository) TryUpdate(
 
 	var version int64
 	err = repository.database.TryUseWrite(ctx, func() error {
+		finishNotification := repository.beginCommitListenerWindow()
+		defer finishNotification()
+
 		var err error
 		version, err = repository.updateWithConnection(
 			ctx,
