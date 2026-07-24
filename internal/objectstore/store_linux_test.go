@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zendext/scrape-fs/internal/database"
 	"github.com/zendext/scrape-fs/internal/namespace"
@@ -552,7 +553,7 @@ func TestCreateWithFlagsConfiguresAppendBeforeReturningHandle(t *testing.T) {
 	}
 }
 
-func TestDeleteObjectKeepsOpenedDescriptorsValid(t *testing.T) {
+func TestDeleteObjectDefersUntilOpenedDescriptorsClose(t *testing.T) {
 	fixture := newFixture(t)
 	content := []byte("content")
 	created, _, err := fixture.store.Create(
@@ -564,12 +565,24 @@ func TestDeleteObjectKeepsOpenedDescriptorsValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	defer created.Close()
 	opened, err := fixture.store.OpenObject(context.Background(), created.ObjectID, unix.O_RDONLY)
 	if err != nil {
 		t.Fatalf("OpenObject: %v", err)
 	}
-	defer opened.Close()
+	if _, err := fixture.repository.Update(
+		context.Background(),
+		overlayOperation("library/poster.jpg"),
+		func(transaction *namespace.Transaction) error {
+			_, err := transaction.RemoveOverlay(
+				context.Background(),
+				fixture.libraryRootID,
+				"poster.jpg",
+			)
+			return err
+		},
+	); err != nil {
+		t.Fatalf("RemoveOverlay: %v", err)
+	}
 
 	if err := fixture.store.DeleteObject(created.ObjectID); err != nil {
 		t.Fatalf("DeleteObject: %v", err)
@@ -589,12 +602,31 @@ func TestDeleteObjectKeepsOpenedDescriptorsValid(t *testing.T) {
 			t.Errorf("%s content = %q, want %q", name, got, content)
 		}
 	}
-	reopened, err := fixture.store.OpenObject(context.Background(), created.ObjectID, unix.O_RDONLY)
-	if reopened != nil {
-		reopened.Close()
+	stillLive, err := fixture.store.OpenObject(context.Background(), created.ObjectID, unix.O_RDONLY)
+	if err != nil {
+		t.Fatalf("OpenObject while handles are active: %v", err)
 	}
+	if err := stillLive.Close(); err != nil {
+		t.Fatalf("Close still-live handle: %v", err)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatalf("Close opened handle: %v", err)
+	}
+	if err := created.Close(); err != nil {
+		t.Fatalf("Close created handle: %v", err)
+	}
+	fixture.store.now = func() time.Time {
+		return time.Now().Add(defaultOrphanGracePeriod + time.Hour)
+	}
+	if err := fixture.store.DeleteObject(created.ObjectID); err != nil {
+		t.Fatalf("DeleteObject after handles close: %v", err)
+	}
+	reopened, err := fixture.store.OpenObject(context.Background(), created.ObjectID, unix.O_RDONLY)
 	if !errors.Is(err, unix.EIO) {
 		t.Fatalf("OpenObject after delete error = %v, want EIO", err)
+	}
+	if reopened != nil {
+		reopened.Close()
 	}
 }
 

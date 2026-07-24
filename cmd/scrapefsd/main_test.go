@@ -347,6 +347,7 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 		service control.BatchService,
 		libraryService control.LibraryService,
 		projectionService control.ProjectionService,
+		gcService control.GCService,
 	) error {
 		if service == nil {
 			t.Fatal("control service is nil")
@@ -356,6 +357,9 @@ func TestServeRuntimeInitializesObjectStoreBeforeControl(t *testing.T) {
 		}
 		if projectionService == nil {
 			t.Fatal("Projection control service is nil")
+		}
+		if gcService == nil {
+			t.Fatal("GC control service is nil")
 		}
 		events = append(events, "control")
 		return stop
@@ -424,6 +428,7 @@ func TestServeRuntimeRejectsUnsafeObjectStoreBeforeControl(t *testing.T) {
 			control.BatchService,
 			control.LibraryService,
 			control.ProjectionService,
+			control.GCService,
 		) error {
 			controlCalled = true
 			return nil

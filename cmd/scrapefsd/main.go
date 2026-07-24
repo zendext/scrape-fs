@@ -86,6 +86,7 @@ type controlServer func(
 	control.BatchService,
 	control.LibraryService,
 	control.ProjectionService,
+	control.GCService,
 ) error
 
 func serveRuntime(
@@ -99,7 +100,13 @@ func serveRuntime(
 	if !ok {
 		return fmt.Errorf("unsupported database implementation %T", opened)
 	}
-	store, err := objectstore.Open(configuration.Storage.OverlayStorePath, database)
+	store, err := objectstore.OpenWithOptions(
+		configuration.Storage.OverlayStorePath,
+		database,
+		objectstore.Options{
+			OrphanGracePeriod: configuration.GC.OrphanGracePeriod,
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("initialize object store: %w", err)
 	}
@@ -120,6 +127,7 @@ func serveRuntime(
 		projectionbatch.NewService(repository),
 		library.NewService(repository),
 		projection.NewService(repository),
+		store,
 	)
 	return errors.Join(serveErr, mounted.Unmount())
 }

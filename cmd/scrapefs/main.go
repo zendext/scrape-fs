@@ -15,6 +15,7 @@ import (
 	"github.com/zendext/scrape-fs/internal/control"
 	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"github.com/zendext/scrape-fs/internal/objectstore"
 	"github.com/zendext/scrape-fs/internal/projection"
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
 )
@@ -22,6 +23,7 @@ import (
 type cli struct {
 	Library    libraryCLI       `cmd:"" help:"Manage Libraries."`
 	Projection projectionCLI    `cmd:"" help:"Manage Projections."`
+	GC         gcCLI            `cmd:"" help:"Reclaim eligible object-store orphans."`
 	Socket     string           `help:"Path to the ScrapeFS control socket." default:"${default_socket}"`
 	Version    kong.VersionFlag `help:"Print version and exit."`
 }
@@ -93,6 +95,8 @@ type projectionBatchUndoCLI struct {
 	BatchID string `arg:"" name:"batch-id" help:"Stable Projection Batch ID."`
 }
 
+type gcCLI struct{}
+
 type controlService interface {
 	CreateLibrary(
 		context.Context,
@@ -116,6 +120,7 @@ type controlService interface {
 	List(context.Context) (projectionbatch.ListResult, error)
 	Show(context.Context, string) (projectionbatch.DetailResult, error)
 	Undo(context.Context, projectionbatch.UndoRequest) (projectionbatch.UndoResult, error)
+	GarbageCollect(context.Context) (objectstore.GCResult, error)
 }
 
 type errorResponse struct {
@@ -292,6 +297,11 @@ func runWithBatchService(
 			Actor:   actor,
 			Caller:  caller,
 		})
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case command == "gc":
+		result, err = service.GarbageCollect(ctx)
 		if err != nil {
 			return writeCommandError(stderr, err)
 		}

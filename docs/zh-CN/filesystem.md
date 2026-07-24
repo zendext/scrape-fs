@@ -211,6 +211,16 @@ LIVE
 
 数据库提交失败时不得返回成功。未引用 object 由恢复流程或 GC 清理。
 
+启动恢复必须对照 descriptor-anchored staging/live 目录检查每一条数据库记录：
+
+- 没有对应文件的 STAGING 记录可以删除；
+- 文件已经进入 live 的 STAGING 记录必须完成为 LIVE；
+- 仍有 staging 文件的 STAGING 记录保留给 GC；
+- LIVE 记录被节点引用但 live 文件缺失时，必须报告完整性问题，并保持节点和数据库记录不变；
+- 文件冲突或没有数据库记录的文件必须报告并保持不变，等待显式 GC 或管理员检查。
+
+恢复流程不得为缺失但仍被引用的 object 创建替代内容。
+
 ### Unlink
 
 1. SQLite 事务删除节点、记录日志并增加 namespace version。
@@ -245,6 +255,16 @@ orphan_grace_period = 24h
 ```
 
 创建和 GC 必须共享进程级 coordinator。删除前必须再次检查 object 状态、节点引用和活动 handle。
+
+create/open 返回的每一个 object handle 都必须跟踪到第一次 close。unlink/replacement
+后的即时清理在存在活动 handle 或仍处于 grace period 时必须保留 object；handle
+关闭且 grace period 到期后，后续 GC 才可以回收。
+
+`scrapefs gc` 仅允许管理员执行。命令使用 `scrapefs.gc-result/v1` JSON
+返回确定性的 examined、deleted、retained 计数，以及按 object ID 排序的错误。
+符合条件的废弃 STAGING 记录、未引用 LIVE 记录和没有数据库记录的文件可以删除；
+仍被引用、仍有活动 handle、仍在 grace period、文件状态冲突或缺失但仍被引用的
+object 必须保留。
 
 ## 8. Missing Object
 

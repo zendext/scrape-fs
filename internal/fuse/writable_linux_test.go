@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -599,8 +600,12 @@ func TestWritableFuseMissingObjectFailsClosed(t *testing.T) {
 	if record.ObjectID == nil {
 		t.Fatal("created Overlay has no object ID")
 	}
-	if err := fixture.store.DeleteObject(*record.ObjectID); err != nil {
-		t.Fatalf("DeleteObject: %v", err)
+	if err := os.Remove(filepath.Join(
+		fixture.storePath,
+		"live",
+		strconv.FormatInt(*record.ObjectID, 10),
+	)); err != nil {
+		t.Fatalf("Remove backing object: %v", err)
 	}
 	fileNode := inode.Operations().(*node)
 	if opened, _, errno := fileNode.Open(ctx, unix.O_RDONLY); errno != syscall.EIO || opened != nil {
@@ -614,6 +619,7 @@ func TestWritableFuseMissingObjectFailsClosed(t *testing.T) {
 type writableFuseFixture struct {
 	repository  *namespace.Repository
 	store       *objectstore.Store
+	storePath   string
 	library     namespace.Library
 	root        *node
 	libraryRoot *node
@@ -635,7 +641,8 @@ func newWritableFuseFixture(t *testing.T) writableFuseFixture {
 			t.Errorf("database Close: %v", err)
 		}
 	})
-	store, err := objectstore.Open(filepath.Join(root, "objects"), opened)
+	storePath := filepath.Join(root, "objects")
+	store, err := objectstore.Open(storePath, opened)
 	if err != nil {
 		t.Fatalf("objectstore Open: %v", err)
 	}
@@ -687,6 +694,7 @@ func newWritableFuseFixture(t *testing.T) writableFuseFixture {
 	return writableFuseFixture{
 		repository:  repository,
 		store:       store,
+		storePath:   storePath,
 		library:     library,
 		root:        rootNode,
 		libraryRoot: libraryInode.Operations().(*node),

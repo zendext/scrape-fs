@@ -17,11 +17,17 @@ import (
 )
 
 const (
-	stateStaging = "STAGING"
-	stateLive    = "LIVE"
+	stateStaging             = "STAGING"
+	stateLive                = "LIVE"
+	defaultOrphanGracePeriod = 24 * time.Hour
 )
 
 var ErrClosed = errors.New("object store is closed")
+
+type Options struct {
+	OrphanGracePeriod time.Duration
+	Now               func() time.Time
+}
 
 type Store struct {
 	database    *database.DB
@@ -30,6 +36,9 @@ type Store struct {
 	staging     *os.File
 	live        *os.File
 	now         func() time.Time
+	gracePeriod time.Duration
+	active      map[int64]int
+	recovery    RecoveryReport
 	coordinator sync.Mutex
 	closeOnce   sync.Once
 	closeErr    error
@@ -40,6 +49,23 @@ type Store struct {
 type File struct {
 	*os.File
 	ObjectID int64
+	store    *Store
+	closeMu  sync.Mutex
+	closed   bool
+}
+
+func (file *File) Close() error {
+	file.closeMu.Lock()
+	defer file.closeMu.Unlock()
+	if file.closed {
+		return os.ErrClosed
+	}
+	file.closed = true
+	err := file.File.Close()
+	if file.store != nil {
+		file.store.releaseHandle(file.ObjectID)
+	}
+	return err
 }
 
 func (file *File) EnableAppend() error {
@@ -58,11 +84,25 @@ type hooks struct {
 	afterStagingSync   func(int64) error
 	afterRename        func(int64) error
 	prepareHandle      func(*File) error
+	beforeDelete       func(int64) error
 }
 
 func Open(path string, opened *database.DB) (_ *Store, err error) {
+	return OpenWithOptions(path, opened, Options{})
+}
+
+func OpenWithOptions(path string, opened *database.DB, options Options) (_ *Store, err error) {
 	if opened == nil {
 		return nil, fmt.Errorf("open object store: database must not be nil")
+	}
+	if options.OrphanGracePeriod == 0 {
+		options.OrphanGracePeriod = defaultOrphanGracePeriod
+	}
+	if options.OrphanGracePeriod < 0 {
+		return nil, fmt.Errorf("open object store: orphan grace period must be positive")
+	}
+	if options.Now == nil {
+		options.Now = time.Now
 	}
 	root, err := prepareRoot(path)
 	if err != nil {
@@ -99,14 +139,22 @@ func Open(path string, opened *database.DB) (_ *Store, err error) {
 	if err := validateStoredObjects(live, liveDirectory); err != nil {
 		return nil, fmt.Errorf("open object store %q: %w", path, err)
 	}
-	return &Store{
-		database:   opened,
-		repository: namespace.NewRepository(opened),
-		root:       root,
-		staging:    staging,
-		live:       live,
-		now:        time.Now,
-	}, nil
+	store := &Store{
+		database:    opened,
+		repository:  namespace.NewRepository(opened),
+		root:        root,
+		staging:     staging,
+		live:        live,
+		now:         options.Now,
+		gracePeriod: options.OrphanGracePeriod,
+		active:      make(map[int64]int),
+	}
+	report, err := store.recover(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("recover object store %q: %w", path, err)
+	}
+	store.recovery = report
+	return store, nil
 }
 
 func (store *Store) Create(
@@ -204,6 +252,7 @@ func (store *Store) CreateWithFlags(
 	}); err != nil {
 		return nil, namespace.Node{}, err
 	}
+	store.trackHandle(handle)
 	return handle, node, nil
 }
 
@@ -250,6 +299,7 @@ func (store *Store) OpenObject(
 			)
 		}
 	}
+	store.trackHandle(handle)
 	return handle, nil
 }
 
@@ -281,24 +331,8 @@ func (store *Store) DeleteObject(objectID int64) error {
 	if objectID <= 0 {
 		return fmt.Errorf("delete object %d: %w", objectID, unix.EINVAL)
 	}
-	object, err := openExistingObject(store.live, objectID, unix.O_RDONLY)
-	if err != nil {
-		return fmt.Errorf("validate live object %d before deletion: %w", objectID, err)
-	}
-	if err := object.Close(); err != nil {
-		return fmt.Errorf("close live object %d before deletion: %w", objectID, err)
-	}
-	if err := unix.Unlinkat(
-		int(store.live.Fd()),
-		strconv.FormatInt(objectID, 10),
-		0,
-	); err != nil {
-		return fmt.Errorf("delete live object %d: %w", objectID, err)
-	}
-	if err := store.live.Sync(); err != nil {
-		return fmt.Errorf("fsync live directory after deleting object %d: %w", objectID, err)
-	}
-	return nil
+	_, err := store.reclaimRecord(context.Background(), objectID, true)
+	return err
 }
 
 func (store *Store) Close() error {
@@ -379,4 +413,25 @@ func (store *Store) prepareHandle(handle *File) error {
 		return fmt.Errorf("rewind live object %d: %w", handle.ObjectID, err)
 	}
 	return nil
+}
+
+func (store *Store) trackHandle(handle *File) {
+	handle.store = store
+	store.active[handle.ObjectID]++
+}
+
+func (store *Store) releaseHandle(objectID int64) {
+	store.coordinator.Lock()
+	defer store.coordinator.Unlock()
+	if store.active[objectID] <= 1 {
+		delete(store.active, objectID)
+		return
+	}
+	store.active[objectID]--
+}
+
+func (store *Store) activeHandles(objectID int64) int {
+	store.coordinator.Lock()
+	defer store.coordinator.Unlock()
+	return store.active[objectID]
 }

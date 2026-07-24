@@ -213,6 +213,19 @@ LIVE
 
 A database failure does not return success. Recovery or GC removes unreferenced objects.
 
+At startup, recovery compares every database record with the descriptor-anchored
+staging and live directories:
+
+- a STAGING record with no file is removed;
+- a STAGING record whose file already reached live is completed as LIVE;
+- a STAGING record with a staging file remains available to GC;
+- a referenced LIVE record with no live file is reported as an integrity issue,
+  while its node and database record remain unchanged;
+- conflicting or untracked files are reported and left untouched for explicit GC
+  or administrator investigation.
+
+Recovery never creates replacement contents for a missing referenced object.
+
 ### Unlink
 
 1. Delete the node, log the operation, and increment namespace version in one SQLite transaction.
@@ -245,6 +258,18 @@ orphan_grace_period = 24h
 ```
 
 Object creation and GC share a process-level coordinator. GC rechecks object state, node references, and active handles immediately before deletion.
+
+Every object handle returned by create or open is tracked until its first close.
+Immediate unlink/replacement cleanup retains an object while any such handle is
+active or while it remains inside the grace period. A later GC run may reclaim
+it after the handle closes and the grace period expires.
+
+`scrapefs gc` is administrator-only. It returns
+`scrapefs.gc-result/v1` JSON with deterministic examined, deleted, and retained
+counts plus object-ID-ordered errors. Eligible abandoned STAGING records,
+unreferenced LIVE records, and filesystem entries without database records are
+removed. Referenced, active, recent, conflicting, and missing referenced objects
+are retained.
 
 ## 8. Missing Object
 
