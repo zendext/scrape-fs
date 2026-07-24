@@ -43,6 +43,17 @@ The built-in `jellyfin@1` and `plex@1` Profiles reject Unicode control character
 
 A conflict leaves no partial directory or node.
 
+Successful `projection add` returns `scrapefs.projection-result/v1` JSON containing the stable Projection node ID, Library, full virtual target, and cached source identity and attributes.
+
+List Projections across every ACTIVE Library or scope the query to one Library:
+
+```bash
+scrapefs projection list
+scrapefs projection list --library jellyfin
+```
+
+`projection list` returns `scrapefs.projection-list/v1` JSON. Results are deterministically ordered by Library name, relative target within the Library, and node ID, and include Projections created directly or by a batch. A missing requested Library returns `LibraryNotFound`. Listing reads only the persisted namespace and cached source metadata; it does not reopen sources, so a currently unavailable source does not remove its Projection from the result.
+
 After `projection rm`, ScrapeFS should remove empty managed directories toward LibraryRoot. Directories created by users or players are retained.
 
 ## 2. Source-Path Safety

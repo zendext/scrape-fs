@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"sort"
 	"strings"
 	"time"
 
@@ -193,6 +194,109 @@ func (repository *Repository) Libraries(ctx context.Context) ([]Library, error) 
 		return nil, err
 	}
 	return libraries, nil
+}
+
+func (repository *Repository) Projections(
+	ctx context.Context,
+	libraryName string,
+) ([]Projection, error) {
+	if libraryName != "" {
+		if err := validateName(libraryName); err != nil {
+			return nil, fmt.Errorf("%w: invalid name: %v", ErrInvalidLibrary, err)
+		}
+	}
+
+	var projections []Projection
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		libraries := make(map[int64]Library)
+		if libraryName != "" {
+			library, err := queryLibrary(
+				ctx,
+				connection,
+				"libraries.status = 'ACTIVE' AND libraries.name = ?",
+				libraryName,
+			)
+			if errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("%w: %q", ErrLibraryNotFound, libraryName)
+			}
+			if err != nil {
+				return fmt.Errorf("get Library %q: %w", libraryName, err)
+			}
+			libraries[library.RootNodeID] = library
+		} else {
+			var cursorName string
+			var cursorID int64
+			for {
+				library, err := queryLibrary(ctx, connection, `
+					libraries.status = 'ACTIVE'
+					AND (
+						libraries.name > ?
+						OR (libraries.name = ? AND libraries.id > ?)
+					)
+					ORDER BY libraries.name, libraries.id
+					LIMIT 1
+				`, cursorName, cursorName, cursorID)
+				if errors.Is(err, ErrNotFound) {
+					break
+				}
+				if err != nil {
+					return fmt.Errorf("list Projection Libraries: %w", err)
+				}
+				libraries[library.RootNodeID] = library
+				cursorName = library.Name
+				cursorID = library.ID
+			}
+		}
+		if len(libraries) == 0 {
+			return nil
+		}
+
+		var cursorID int64
+		for {
+			node, err := queryNode(ctx, connection, `
+				kind = 'PROJECTION_FILE'
+				AND id > ?
+				ORDER BY id
+				LIMIT 1
+			`, cursorID)
+			if errors.Is(err, ErrNotFound) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("list Projection nodes: %w", err)
+			}
+			cursorID = node.ID
+
+			rootID, target, err := nodePathToLibraryRoot(ctx, connection, node.ID)
+			if err != nil {
+				return err
+			}
+			library, included := libraries[rootID]
+			if !included {
+				continue
+			}
+			projections = append(projections, Projection{
+				LibraryID:   library.ID,
+				LibraryName: library.Name,
+				Target:      target,
+				Node:        node,
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(projections, func(left, right int) bool {
+		if projections[left].LibraryName != projections[right].LibraryName {
+			return projections[left].LibraryName < projections[right].LibraryName
+		}
+		if projections[left].Target != projections[right].Target {
+			return projections[left].Target < projections[right].Target
+		}
+		return projections[left].Node.ID < projections[right].Node.ID
+	})
+	return projections, nil
 }
 
 func (repository *Repository) ProjectionBatches(
@@ -2139,6 +2243,42 @@ func nodePathToRoot(
 		components[left], components[right] = components[right], components[left]
 	}
 	return strings.Join(components, "/"), nil
+}
+
+func nodePathToLibraryRoot(
+	ctx context.Context,
+	query nodeQuery,
+	nodeID int64,
+) (int64, string, error) {
+	var components []string
+	seen := map[int64]struct{}{}
+	currentID := nodeID
+	for {
+		if _, duplicate := seen[currentID]; duplicate {
+			return 0, "", fmt.Errorf("%w: node ancestry contains a cycle", ErrInvalidRoot)
+		}
+		seen[currentID] = struct{}{}
+
+		node, err := queryNode(ctx, query, "id = ?", currentID)
+		if err != nil {
+			return 0, "", fmt.Errorf("read Projection path: %w", err)
+		}
+		if node.Kind == LibraryRoot {
+			for left, right := 0, len(components)-1; left < right; left, right = left+1, right-1 {
+				components[left], components[right] = components[right], components[left]
+			}
+			return node.ID, strings.Join(components, "/"), nil
+		}
+		if node.ParentID == nil {
+			return 0, "", fmt.Errorf(
+				"%w: Projection node %d is outside a LibraryRoot",
+				ErrInvalidRoot,
+				nodeID,
+			)
+		}
+		components = append(components, node.Name)
+		currentID = *node.ParentID
+	}
 }
 
 func queryNode(

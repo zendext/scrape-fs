@@ -41,6 +41,17 @@ scrapefs projection add \
 
 目标冲突时不得留下部分目录或节点。
 
+成功的 `projection add` 返回 `scrapefs.projection-result/v1` JSON，其中包含稳定的 Projection node ID、Library、完整虚拟 target，以及缓存的 source identity 和属性。
+
+可以列出全部 ACTIVE Library 中的 Projection，或限制到一个 Library：
+
+```bash
+scrapefs projection list
+scrapefs projection list --library jellyfin
+```
+
+`projection list` 返回 `scrapefs.projection-list/v1` JSON。结果必须按 Library 名、Library 内相对 target 和 node ID 确定性排序，并同时包含 direct 与 Batch 创建的 Projection。指定的 Library 不存在时返回 `LibraryNotFound`。列表只读取持久化 namespace 和缓存 source metadata，不重新打开源文件，因此源文件当前不可用不会使 Projection 从列表消失。
+
 `projection rm` 删除 ProjectionFile 后，应向 LibraryRoot 清理空的 managed Directory。用户或播放器创建的目录不得自动删除。
 
 ## 2. 源路径安全

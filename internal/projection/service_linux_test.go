@@ -234,6 +234,13 @@ func TestServiceCreateProjectionRejectsInvalidInputsBeforeMutation(t *testing.T)
 			target: "media:/Movies/Dune.mkv",
 			want:   ErrUnsafeSource,
 		},
+		"missing source": {
+			source: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing.mkv")
+			},
+			target: "media:/Movies/Dune.mkv",
+			want:   ErrSourceNotFound,
+		},
 		"non-regular source": {
 			source: func(t *testing.T) string {
 				return t.TempDir()

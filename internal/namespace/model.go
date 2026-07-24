@@ -169,6 +169,13 @@ type Node struct {
 	UpdatedAt        int64
 }
 
+type Projection struct {
+	LibraryID   int64
+	LibraryName string
+	Target      string
+	Node        Node
+}
+
 type ProjectionBatchStatus string
 
 const (

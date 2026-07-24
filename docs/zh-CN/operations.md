@@ -129,8 +129,8 @@ scrapefs library rename
 scrapefs library set-profile
 scrapefs library remove
 
-scrapefs projection add
-scrapefs projection list
+scrapefs projection add <source> <library:/target>
+scrapefs projection list [--library <name>]
 scrapefs projection mv
 scrapefs projection rm
 scrapefs projection rebind
@@ -150,7 +150,9 @@ daemon：
 scrapefsd
 ```
 
-所有已实现的 Library 和 Projection Batch 命令都输出机器可读 JSON。`library add` 使用调用管理员的 peer UID/GID 创建 ACTIVE Library，并使用固定的 v1 mode：LibraryRoot 和目录为 `0775`，Projection 为 `0444`，OverlayFile 为 `0664`。只接受内置的 `jellyfin@1` 和 `plex@1` Profile。`library list` 按名称确定性排序返回 ACTIVE Library，管理员和控制用户均可调用。
+所有已实现的 Library、Projection 和 Projection Batch 命令都输出机器可读 JSON。`library add` 使用调用管理员的 peer UID/GID 创建 ACTIVE Library，并使用固定的 v1 mode：LibraryRoot 和目录为 `0775`，Projection 为 `0444`，OverlayFile 为 `0664`。只接受内置的 `jellyfin@1` 和 `plex@1` Profile。`library list` 按名称确定性排序返回 ACTIVE Library，管理员和控制用户均可调用。
+
+`projection add` 使用 `scrapefs.projection-result/v1` 返回新 Projection；源文件选择、目标校验与 namespace mutation 仅在 control 授权成功后执行。`projection list` 使用 `scrapefs.projection-list/v1` 返回 direct 与 Batch Projection，按 Library、相对 target 和 node ID 确定性排序。`--library <name>` 只返回指定 ACTIVE Library；列表使用持久化缓存 metadata，不打开源文件。
 
 `projection batch validate` 和 `projection batch apply` 使用 `--file <path>` 读取 UTF-8 JSON，并使用 `--file -` 从 stdin 读取。非 TTY 或显式机器可读模式不得提示输入或自动 apply。CLI 默认连接 `/run/scrapefs/scrapefs.sock`，可使用全局 `--socket <path>` 覆盖为配置的路径。
 

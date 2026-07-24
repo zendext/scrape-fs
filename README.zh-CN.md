@@ -6,7 +6,7 @@ ScrapeFS 是一个面向 Linux 的外部 Agent 辅助媒体整理与虚拟目录
 
 它将一个或多个本地文件系统中的媒体文件投影为适合播放器识别的媒体库，同时不移动、不重命名、不修改源文件。
 
-> 当前状态：处于早期实现阶段。daemon 已支持加载并校验配置、获取宿主文件系统运行时锁、初始化 SQLite 和 Overlay object store、挂载持久化 namespace 并提供只读遍历，并通过 Unix 控制 socket 提供经过授权的 Library 和 Projection Batch 操作。direct Projection 服务已经存在，但尚未通过控制 CLI 暴露；ProjectionFile 内容访问和可写 OverlayFile 行为尚未实现。
+> 当前状态：处于早期实现阶段。daemon 已支持加载并校验配置、获取宿主文件系统运行时锁、初始化 SQLite 和 Overlay object store、挂载持久化 namespace 并提供只读遍历，并通过 Unix 控制 socket 提供经过授权的 Library、direct Projection 和 Projection Batch 操作。ProjectionFile 内容访问和可写 OverlayFile 行为尚未实现。
 
 ## 核心模型
 
@@ -53,9 +53,11 @@ scrapefs library add jellyfin --profile jellyfin@1
 scrapefs projection add \
   /mnt/disk1/downloads/Dune.mkv \
   "jellyfin:/Movies/Dune (2021)/Dune (2021).mkv"
+
+scrapefs projection list --library jellyfin
 ```
 
-删除或重命名 Projection 不会修改源文件。
+`projection add` 安全打开源文件并原子创建映射；`projection list` 从持久化 namespace 返回稳定 ID、虚拟目标和缓存的源文件身份，不重新打开源文件。删除或重命名 Projection 不会修改源文件。
 
 ## 外部 Agent Skill
 

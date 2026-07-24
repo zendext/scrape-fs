@@ -132,8 +132,8 @@ scrapefs library rename
 scrapefs library set-profile
 scrapefs library remove
 
-scrapefs projection add
-scrapefs projection list
+scrapefs projection add <source> <library:/target>
+scrapefs projection list [--library <name>]
 scrapefs projection mv
 scrapefs projection rm
 scrapefs projection rebind
@@ -153,7 +153,9 @@ Daemon:
 scrapefsd
 ```
 
-Every implemented Library and Projection Batch command writes machine-readable JSON. `library add` creates an ACTIVE Library with the invoking administrator's peer UID/GID and the fixed v1 modes `0775` for the LibraryRoot and directories, `0444` for Projections, and `0664` for OverlayFiles. Only the built-in `jellyfin@1` and `plex@1` Profiles are accepted. `library list` returns ACTIVE Libraries in deterministic name order and is available to administrators and control users.
+Every implemented Library, Projection, and Projection Batch command writes machine-readable JSON. `library add` creates an ACTIVE Library with the invoking administrator's peer UID/GID and the fixed v1 modes `0775` for the LibraryRoot and directories, `0444` for Projections, and `0664` for OverlayFiles. Only the built-in `jellyfin@1` and `plex@1` Profiles are accepted. `library list` returns ACTIVE Libraries in deterministic name order and is available to administrators and control users.
+
+`projection add` returns the new Projection using `scrapefs.projection-result/v1`. Source selection, target validation, and namespace mutation run only after control authorization succeeds. `projection list` returns direct and batch Projections using `scrapefs.projection-list/v1`, ordered deterministically by Library, relative target, and node ID. `--library <name>` limits the result to that ACTIVE Library. Listing uses persisted cached metadata and does not open source files.
 
 `projection batch validate` and `projection batch apply` read UTF-8 JSON through `--file <path>` and read stdin through `--file -`. A non-TTY invocation or explicit machine-readable mode does not prompt or apply automatically. The CLI connects to `/run/scrapefs/scrapefs.sock` by default and accepts global `--socket <path>` for a configured override.
 

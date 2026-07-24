@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 	"time"
 	"unicode"
@@ -13,17 +14,23 @@ import (
 )
 
 var (
-	ErrLibraryNotFound  = namespace.ErrLibraryNotFound
-	ErrInvalidPath      = namespace.ErrInvalidPath
-	ErrTargetConflict   = namespace.ErrConflict
-	ErrUnsafeSource     = errors.New("unsafe projection source")
-	ErrSourceNotRegular = errors.New("projection source is not a regular file")
+	ErrLibraryNotFound        = namespace.ErrLibraryNotFound
+	ErrInvalidPath            = namespace.ErrInvalidPath
+	ErrTargetConflict         = namespace.ErrConflict
+	ErrUnsafeSource           = errors.New("unsafe projection source")
+	ErrSourceNotFound         = errors.New("projection source not found")
+	ErrSourcePermissionDenied = errors.New("projection source permission denied")
+	ErrSourceNotRegular       = errors.New("projection source is not a regular file")
 )
 
 type CreateRequest struct {
 	SourcePath string
 	Target     string
 	Actor      namespace.Actor
+}
+
+type ListRequest struct {
+	LibraryName string
 }
 
 type Service struct {
@@ -36,6 +43,13 @@ func NewService(repository *namespace.Repository) *Service {
 		repository: repository,
 		now:        time.Now,
 	}
+}
+
+func (service *Service) List(
+	ctx context.Context,
+	request ListRequest,
+) ([]namespace.Projection, error) {
+	return service.repository.Projections(ctx, request.LibraryName)
 }
 
 func (service *Service) Create(
@@ -255,6 +269,10 @@ func classifySourceError(err error) error {
 		return fmt.Errorf("%w: %w", ErrUnsafeSource, err)
 	case errors.Is(err, sourcefile.ErrNotRegular):
 		return fmt.Errorf("%w: %w", ErrSourceNotRegular, err)
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("%w: %w", ErrSourceNotFound, err)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("%w: %w", ErrSourcePermissionDenied, err)
 	default:
 		return err
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/objectstore"
+	"github.com/zendext/scrape-fs/internal/projection"
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
 )
 
@@ -84,6 +85,7 @@ type controlServer func(
 	uint32,
 	control.BatchService,
 	control.LibraryService,
+	control.ProjectionService,
 ) error
 
 func serveRuntime(
@@ -117,6 +119,7 @@ func serveRuntime(
 		configuration.Control.AdministratorUID,
 		projectionbatch.NewService(repository),
 		library.NewService(repository),
+		projection.NewService(repository),
 	)
 	return errors.Join(serveErr, mounted.Unmount())
 }
