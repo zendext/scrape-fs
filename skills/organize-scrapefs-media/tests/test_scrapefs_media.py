@@ -280,6 +280,49 @@ class ScrapeFSMediaTests(unittest.TestCase):
             ],
         )
 
+    def test_rejects_non_regular_adjacent_single_file_sidecars(self):
+        for sidecar_name in ("poster.jpg", "movie.nfo"):
+            with self.subTest(sidecar=sidecar_name):
+                case_root = self.root / sidecar_name
+                case_root.mkdir()
+                source = case_root / "Dune.2021.mkv"
+                source.write_text("fixture movie", encoding="utf-8")
+                sidecar = case_root / sidecar_name
+                sidecar.mkdir()
+                batch = case_root / "batch.json"
+                artifacts = case_root / "artifacts.json"
+
+                result = self.run_tool(
+                    "plan",
+                    "--source",
+                    source,
+                    "--library",
+                    "media",
+                    "--profile",
+                    "jellyfin",
+                    "--batch",
+                    batch,
+                    "--artifacts",
+                    artifacts,
+                    "--ffprobe",
+                    self.ffprobe,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 3)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["status"], "manual")
+                self.assertIn(
+                    {
+                        "code": "non_regular_source",
+                        "message": "source contains a non-regular filesystem object",
+                        "path": str(sidecar),
+                    },
+                    report["manual"],
+                )
+                self.assertFalse(batch.exists())
+                self.assertFalse(artifacts.exists())
+
     def test_normalizes_parenthesized_and_bracketed_movie_years(self):
         cases = {
             "Dune (2021).mkv": "Movies/Dune (2021)/Dune (2021).mkv",
@@ -550,6 +593,66 @@ class ScrapeFSMediaTests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertFalse(batch.exists())
         self.assertFalse(artifacts.exists())
+
+    def test_returns_manual_when_ffprobe_stream_fields_are_malformed(self):
+        cases = {
+            "codec-type": {
+                "streams": [
+                    {"codec_type": ["video"], "codec_name": "h264"},
+                    {"codec_type": "video", "codec_name": "h265"},
+                ],
+                "format": {},
+            },
+            "codec-name": {
+                "streams": [
+                    {"codec_type": "video", "codec_name": ["h264"]},
+                ],
+                "format": {},
+            },
+        }
+        for case, probe_document in cases.items():
+            with self.subTest(case=case):
+                case_root = self.root / case
+                case_root.mkdir()
+                source = case_root / "movie.mkv"
+                source.write_text("fixture movie", encoding="utf-8")
+                ffprobe = case_root / "ffprobe"
+                ffprobe.write_text(
+                    "#!/usr/bin/env python3\n"
+                    f"print({json.dumps(probe_document)!r})\n",
+                    encoding="utf-8",
+                )
+                ffprobe.chmod(0o755)
+                batch = case_root / "batch.json"
+                artifacts = case_root / "artifacts.json"
+
+                result = self.run_tool(
+                    "plan",
+                    "--source",
+                    source,
+                    "--library",
+                    "media",
+                    "--profile",
+                    "jellyfin",
+                    "--batch",
+                    batch,
+                    "--artifacts",
+                    artifacts,
+                    "--ffprobe",
+                    ffprobe,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 3)
+                report = json.loads(result.stdout)
+                self.assertEqual(report["status"], "manual")
+                self.assertIn(
+                    "probe_failed",
+                    [item["code"] for item in report["manual"]],
+                )
+                self.assertEqual(result.stderr, "")
+                self.assertFalse(batch.exists())
+                self.assertFalse(artifacts.exists())
 
     def test_manual_rerun_invalidates_previous_plan_outputs(self):
         source = self.copy_fixture("movie-directory")

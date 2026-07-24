@@ -540,7 +540,7 @@ def enumerate_source(source):
     manual = []
     files = []
 
-    def visit(path):
+    def visit(path, recurse_directories=True):
         try:
             status = path.lstat()
         except OSError as error:
@@ -564,7 +564,7 @@ def enumerate_source(source):
         if stat.S_ISREG(status.st_mode):
             files.append(path)
             return
-        if not stat.S_ISDIR(status.st_mode):
+        if not stat.S_ISDIR(status.st_mode) or not recurse_directories:
             manual.append(
                 manual_item(
                     "non_regular_source",
@@ -605,7 +605,7 @@ def enumerate_source(source):
             for sibling in siblings:
                 path = source.parent / sibling.name
                 if path != source and is_adjacent_movie_sidecar(path, source):
-                    visit(path)
+                    visit(path, recurse_directories=False)
     return files, manual
 
 
@@ -727,11 +727,34 @@ def probe_video(path, ffprobe):
             path,
         )
     streams = document.get("streams")
-    if not isinstance(streams, list) or not any(
-        stream.get("codec_type") == "video"
-        for stream in streams
-        if isinstance(stream, dict)
-    ):
+    if not isinstance(streams, list):
+        raise ManualHandling(
+            "probe_failed",
+            "ffprobe streams must be an array",
+            path,
+        )
+    for stream in streams:
+        if not isinstance(stream, dict):
+            raise ManualHandling(
+                "probe_failed",
+                "ffprobe stream entries must be objects",
+                path,
+            )
+        codec_type = stream.get("codec_type")
+        codec_name = stream.get("codec_name")
+        if codec_type is not None and not isinstance(codec_type, str):
+            raise ManualHandling(
+                "probe_failed",
+                "ffprobe stream codec_type must be a string",
+                path,
+            )
+        if codec_name is not None and not isinstance(codec_name, str):
+            raise ManualHandling(
+                "probe_failed",
+                "ffprobe stream codec_name must be a string",
+                path,
+            )
+    if not any(stream.get("codec_type") == "video" for stream in streams):
         raise ManualHandling(
             "probe_failed",
             "ffprobe found no video stream",
