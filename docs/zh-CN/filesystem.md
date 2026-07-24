@@ -4,7 +4,7 @@
 
 本文定义 Directory、OverlayFile、权限、rename、object store 和缓存语义。ProjectionFile 的专用语义见 [Projection 模型](projection.md)。
 
-实现状态：Directory 和 OverlayFile 的 FUSE mutation 与 I/O 已实现。ProjectionFile 内容、rename 和 unlink 仍是独立实现单元。
+实现状态：Directory、OverlayFile 和 ProjectionFile 的 FUSE I/O 及受支持的 namespace mutation 均已实现。
 
 ## 1. 文件属性
 

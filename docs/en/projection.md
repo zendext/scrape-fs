@@ -207,6 +207,7 @@ unlink
 | fallocate | EOPNOTSUPP |
 | chmod/chown/utimens | EROFS |
 | link/symlink | EOPNOTSUPP |
+| rename/unlink of a Batch-owned Projection | EROFS |
 
 Rename changes only the virtual path. Unlink removes only the namespace node. An already opened source fd remains readable.
 

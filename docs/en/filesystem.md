@@ -6,7 +6,7 @@
 
 This document defines Directory and OverlayFile behavior, permissions, rename rules, object storage, and caching. Projection-specific behavior is defined in the [Projection model](projection.md).
 
-Implementation status: Directory and OverlayFile FUSE mutation and I/O are implemented. ProjectionFile content, rename, and unlink remain a separate implementation unit.
+Implementation status: Directory, OverlayFile, and ProjectionFile FUSE I/O and the supported namespace mutations are implemented.
 
 ## 1. Attributes
 

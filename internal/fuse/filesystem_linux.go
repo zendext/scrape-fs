@@ -16,6 +16,8 @@ import (
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/objectstore"
+	"github.com/zendext/scrape-fs/internal/projection"
+	"github.com/zendext/scrape-fs/internal/sourcefile"
 	"golang.org/x/sys/unix"
 )
 
@@ -53,12 +55,18 @@ type objectWriter interface {
 	DeleteObject(int64) error
 }
 
+type projectionLifecycle interface {
+	Move(context.Context, projection.MoveRequest) (namespace.Projection, error)
+	Remove(context.Context, projection.RemoveRequest) (namespace.Projection, error)
+}
+
 type node struct {
 	gofs.Inode
 	reader       namespaceReader
 	writer       namespaceWriter
 	objects      objectMetadataReader
 	objectWriter objectWriter
+	projections  projectionLifecycle
 	record       namespace.Node
 }
 
@@ -82,11 +90,16 @@ func newRoot(
 	}
 	writer, _ := reader.(namespaceWriter)
 	objectWriter, _ := objects.(objectWriter)
+	var projections projectionLifecycle
+	if repository, ok := reader.(*namespace.Repository); ok {
+		projections = projection.NewService(repository)
+	}
 	return &node{
 		reader:       reader,
 		writer:       writer,
 		objects:      objects,
 		objectWriter: objectWriter,
+		projections:  projections,
 		record:       root,
 	}, nil
 }
@@ -148,6 +161,7 @@ func (current *node) Lookup(
 		writer:       current.writer,
 		objects:      current.objects,
 		objectWriter: current.objectWriter,
+		projections:  current.projections,
 		record:       child,
 	}
 	inode := current.NewInode(ctx, operations, stableAttr(child))
@@ -161,9 +175,13 @@ func (current *node) Getattr(
 ) syscall.Errno {
 	record, err := current.reader.Node(ctx, current.record.ID)
 	if err != nil {
-		if handle, ok := file.(*overlayHandle); ok &&
-			errors.Is(err, namespace.ErrNotFound) {
-			return handle.Getattr(ctx, out)
+		if errors.Is(err, namespace.ErrNotFound) {
+			switch handle := file.(type) {
+			case *overlayHandle:
+				return handle.Getattr(ctx, out)
+			case *projectionHandle:
+				return handle.Getattr(ctx, out)
+			}
 		}
 		return errorNumber(err)
 	}
@@ -499,7 +517,7 @@ func (current *node) Unlink(ctx context.Context, name string) syscall.Errno {
 	if !directoryKind(current.record.Kind) {
 		return syscall.ENOTDIR
 	}
-	if current.writer == nil || current.objectWriter == nil {
+	if current.writer == nil {
 		return syscall.EIO
 	}
 	child, err := current.reader.Child(ctx, current.record.ID, name)
@@ -509,12 +527,32 @@ func (current *node) Unlink(ctx context.Context, name string) syscall.Errno {
 	if child.Kind == namespace.Directory {
 		return syscall.EISDIR
 	}
-	if child.Kind != namespace.OverlayFile {
-		return syscall.EROFS
-	}
 	_, actor, errno := fuseActor(ctx)
 	if errno != 0 {
 		return errno
+	}
+	if child.Kind == namespace.ProjectionFile {
+		if current.projections == nil {
+			return syscall.EIO
+		}
+		target, err := current.projectionTarget(ctx, name)
+		if err != nil {
+			return syscall.EIO
+		}
+		if _, err := current.projections.Remove(ctx, projection.RemoveRequest{
+			Target: target,
+			Actor:  actor,
+		}); err != nil {
+			return errorNumber(err)
+		}
+		current.invalidateAttributes()
+		return 0
+	}
+	if child.Kind != namespace.OverlayFile {
+		return syscall.EROFS
+	}
+	if current.objectWriter == nil {
+		return syscall.EIO
 	}
 	operation := current.operation(ctx, "fuse.overlay.unlink", name, child.Kind, actor)
 	var removed namespace.Node
@@ -589,7 +627,35 @@ func (current *node) Rename(
 		return errorNumber(err)
 	}
 	if source.Kind == namespace.ProjectionFile {
-		return syscall.EROFS
+		if current.projections == nil {
+			return syscall.EIO
+		}
+		sourceTarget, err := current.projectionTarget(ctx, name)
+		if err != nil {
+			return syscall.EIO
+		}
+		target, err := targetParent.projectionTarget(ctx, newName)
+		if err != nil {
+			return syscall.EIO
+		}
+		sourceInode := current.GetChild(name)
+		_, actor, errno := fuseActor(ctx)
+		if errno != 0 {
+			return errno
+		}
+		if _, err := current.projections.Move(ctx, projection.MoveRequest{
+			Target:    sourceTarget,
+			NewTarget: target,
+			Actor:     actor,
+		}); err != nil {
+			return errorNumber(err)
+		}
+		current.invalidateAttributes()
+		targetParent.invalidateAttributes()
+		if sourceInode != nil {
+			_ = sourceInode.NotifyContent(0, 0)
+		}
+		return 0
 	}
 	if source.Kind != namespace.Directory && source.Kind != namespace.OverlayFile {
 		return syscall.EPERM
@@ -650,7 +716,26 @@ func (current *node) Open(
 		if flags&(unix.O_WRONLY|unix.O_RDWR|unix.O_APPEND|unix.O_TRUNC) != 0 {
 			return nil, 0, syscall.EROFS
 		}
-		return nil, 0, syscall.EOPNOTSUPP
+		record, err := current.reader.Node(ctx, current.record.ID)
+		if err != nil {
+			return nil, 0, errorNumber(err)
+		}
+		if record.ID != current.record.ID ||
+			record.Kind != namespace.ProjectionFile ||
+			record.Source == nil {
+			return nil, 0, syscall.EIO
+		}
+		opened, err := sourcefile.OpenVerified(
+			record.Source.Path,
+			projectionIdentity(*record.Source),
+		)
+		if err != nil {
+			return nil, 0, errorNumber(err)
+		}
+		return &projectionHandle{
+			file:   opened,
+			record: record,
+		}, gofuse.FOPEN_DIRECT_IO, 0
 	}
 	if current.record.Kind != namespace.OverlayFile ||
 		current.objectWriter == nil {
@@ -707,6 +792,7 @@ func (current *node) newChild(
 		writer:       current.writer,
 		objects:      current.objects,
 		objectWriter: current.objectWriter,
+		projections:  current.projections,
 		record:       record,
 	}
 	return current.NewInode(ctx, operations, stableAttr(record)), 0
@@ -782,6 +868,42 @@ func (current *node) childPath(ctx context.Context, name string) string {
 	return strings.Join(components, "/")
 }
 
+func (current *node) projectionTarget(
+	ctx context.Context,
+	name string,
+) (string, error) {
+	components := []string{name}
+	record, err := current.reader.Node(ctx, current.record.ID)
+	if err != nil {
+		return "", err
+	}
+	seen := make(map[int64]struct{})
+	for {
+		if record.ID <= 0 {
+			return "", namespace.ErrInvalidNode
+		}
+		if _, duplicate := seen[record.ID]; duplicate {
+			return "", namespace.ErrInvalidNode
+		}
+		seen[record.ID] = struct{}{}
+		if record.Kind == namespace.LibraryRoot {
+			for left, right := 0, len(components)-1; left < right; left, right = left+1, right-1 {
+				components[left], components[right] = components[right], components[left]
+			}
+			return record.Name + ":/" + strings.Join(components, "/"), nil
+		}
+		if record.Kind != namespace.Directory || record.ParentID == nil {
+			return "", namespace.ErrInvalidNode
+		}
+		components = append(components, record.Name)
+		parent, err := current.reader.Node(ctx, *record.ParentID)
+		if err != nil {
+			return "", err
+		}
+		record = parent
+	}
+}
+
 func (current *node) invalidateAttributes() {
 	_ = current.NotifyContent(0, 0)
 }
@@ -817,6 +939,27 @@ func fillAttr(
 	if mode == 0 || record.ID <= 0 {
 		return namespace.ErrInvalidNode
 	}
+	if record.Kind == namespace.ProjectionFile {
+		if record.Source == nil {
+			return namespace.ErrInvalidNode
+		}
+		size := record.Source.Size
+		atime := record.Source.AtimeNS
+		mtime := record.Source.MtimeNS
+		opened, err := sourcefile.OpenVerified(
+			record.Source.Path,
+			projectionIdentity(*record.Source),
+		)
+		if err == nil {
+			size = opened.Size
+			atime = opened.AtimeNS
+			mtime = opened.MtimeNS
+			if err := opened.Close(); err != nil {
+				return err
+			}
+		}
+		return fillProjectionAttr(record, size, atime, mtime, attr)
+	}
 
 	attr.Ino = uint64(record.ID)
 	attr.Mode = mode | uint32(record.Attributes.Mode.Perm())
@@ -830,14 +973,6 @@ func fillAttr(
 	switch record.Kind {
 	case namespace.GlobalRoot, namespace.LibraryRoot, namespace.Directory:
 		attr.Nlink = 2
-	case namespace.ProjectionFile:
-		if record.Source == nil || record.Source.Size < 0 {
-			return namespace.ErrInvalidNode
-		}
-		attr.Size = uint64(record.Source.Size)
-		atime = record.Source.AtimeNS
-		mtime = record.Source.MtimeNS
-		ctime = max(record.Source.SourceCtimeNS, record.VirtualCtimeNS)
 	case namespace.OverlayFile:
 		if record.ObjectID == nil || *record.ObjectID <= 0 {
 			return namespace.ErrInvalidNode
@@ -859,6 +994,43 @@ func fillAttr(
 	attr.Mtime, attr.Mtimensec = splitNanoseconds(mtime)
 	attr.Ctime, attr.Ctimensec = splitNanoseconds(ctime)
 	return nil
+}
+
+func fillProjectionAttr(
+	record namespace.Node,
+	size int64,
+	atime int64,
+	mtime int64,
+	attr *gofuse.Attr,
+) error {
+	if record.ID <= 0 ||
+		record.Kind != namespace.ProjectionFile ||
+		record.Source == nil ||
+		size < 0 {
+		return namespace.ErrInvalidNode
+	}
+	attr.Ino = uint64(record.ID)
+	attr.Mode = syscall.S_IFREG | uint32(record.Attributes.Mode.Perm())
+	attr.Uid = record.Attributes.UID
+	attr.Gid = record.Attributes.GID
+	attr.Nlink = 1
+	attr.Size = uint64(size)
+	attr.Atime, attr.Atimensec = splitNanoseconds(atime)
+	attr.Mtime, attr.Mtimensec = splitNanoseconds(mtime)
+	attr.Ctime, attr.Ctimensec = splitNanoseconds(max(
+		record.Source.SourceCtimeNS,
+		record.VirtualCtimeNS,
+	))
+	return nil
+}
+
+func projectionIdentity(source namespace.ProjectionSource) sourcefile.Identity {
+	return sourcefile.Identity{
+		DeviceID: source.DeviceID,
+		Inode:    source.Inode,
+		Size:     source.Size,
+		MtimeNS:  source.MtimeNS,
+	}
 }
 
 func fillOverlayAttr(
@@ -969,6 +1141,8 @@ func errorNumber(err error) syscall.Errno {
 		return syscall.EPERM
 	case errors.Is(err, namespace.ErrReadOnly):
 		return syscall.EROFS
+	case errors.Is(err, namespace.ErrBatchOwnedProjection):
+		return syscall.EROFS
 	case errors.Is(err, namespace.ErrIsDirectory):
 		return syscall.EISDIR
 	case errors.Is(err, namespace.ErrNotDirectory):
@@ -977,12 +1151,13 @@ func errorNumber(err error) syscall.Errno {
 		return syscall.EINVAL
 	case errors.Is(err, namespace.ErrNotFound),
 		errors.Is(err, namespace.ErrLibraryNotFound),
+		errors.Is(err, projection.ErrProjectionNotFound),
 		errors.Is(err, namespace.ErrInvalidPath):
 		return syscall.ENOENT
 	case errors.Is(err, context.Canceled),
 		errors.Is(err, context.DeadlineExceeded):
 		return syscall.EINTR
 	default:
-		return syscall.EIO
+		return gofs.ToErrno(err)
 	}
 }
