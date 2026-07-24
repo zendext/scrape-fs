@@ -635,7 +635,7 @@ Library 从 FUSE 根目录消失，命令返回其 RETIRED 快照。源文件与
 
 ### 前置条件
 
-- daemon 已 ready，或者 doctor 支持离线只读检查。
+- daemon 控制 socket 可连接；控制用户已经通过授权。
 
 ### 触发
 
@@ -645,11 +645,13 @@ scrapefs doctor
 
 ### 主流程
 
-1. doctor 检查 Projection 源路径和身份。
-2. doctor 检查 OverlayFile 是否存在对应 live object。
-3. doctor 检查无节点引用的 orphan object。
-4. doctor 检查 Library 和节点树约束。
-5. doctor 输出结构化问题列表和建议操作。
+1. doctor 检查 SQLite schema、quick check 和 foreign-key check。
+2. doctor 检查 Projection 源路径和身份。
+3. doctor 检查 OverlayFile 是否存在对应 live object。
+4. doctor 检查无节点引用的 orphan object。
+5. doctor 检查 Library、节点树和内存 index 约束。
+6. doctor 检查 mount/socket runtime metadata。
+7. doctor 输出按稳定顺序排列的结构化问题列表和建议操作。
 
 ### 报告示例
 

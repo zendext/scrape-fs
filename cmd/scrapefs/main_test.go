@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/zendext/scrape-fs/internal/control"
+	"github.com/zendext/scrape-fs/internal/diagnostics"
 	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/objectstore"
@@ -51,8 +52,72 @@ func TestRunHelp(t *testing.T) {
 	if !strings.Contains(stdout.String(), "--version") {
 		t.Errorf("help output = %q, want version flag", stdout.String())
 	}
+	for _, command := range []string{"status", "doctor"} {
+		if !strings.Contains(stdout.String(), command) {
+			t.Errorf("help output = %q, want %s command", stdout.String(), command)
+		}
+	}
 	if stderr.Len() != 0 {
 		t.Errorf("help stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunStatusAndDoctorWriteDaemonJSON(t *testing.T) {
+	service := &fakeBatchService{
+		status: diagnostics.StatusResult{
+			Schema: diagnostics.StatusSchema,
+			State:  diagnostics.StateReady,
+			Daemon: diagnostics.DaemonStatus{Version: "1.2.3", Ready: true},
+		},
+		doctor: diagnostics.DoctorResult{
+			Schema:   diagnostics.DoctorSchema,
+			Severity: diagnostics.SeverityHealthy,
+			Findings: []diagnostics.Finding{},
+		},
+	}
+	for _, test := range []struct {
+		command string
+		schema  string
+	}{
+		{command: "status", schema: diagnostics.StatusSchema},
+		{command: "doctor", schema: diagnostics.DoctorSchema},
+	} {
+		t.Run(test.command, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+
+			exitCode := runWithBatchService(
+				[]string{test.command},
+				strings.NewReader(""),
+				&stdout,
+				&stderr,
+				service,
+				projectionbatch.Caller{UID: 1000, GID: 1001},
+			)
+
+			if exitCode != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+			}
+			var envelope struct {
+				Schema string `json:"schema"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+				t.Fatalf("Unmarshal output: %v; output=%q", err, stdout.String())
+			}
+			if envelope.Schema != test.schema {
+				t.Errorf("schema = %q, want %q", envelope.Schema, test.schema)
+			}
+			if stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+	if service.statusCalls != 1 || service.doctorCalls != 1 {
+		t.Errorf(
+			"diagnostics calls = status %d doctor %d, want 1/1",
+			service.statusCalls,
+			service.doctorCalls,
+		)
 	}
 }
 
@@ -812,6 +877,24 @@ type fakeBatchService struct {
 	projectionRebindRequest projection.RebindRequest
 	gcResult                objectstore.GCResult
 	gcCalls                 int
+	status                  diagnostics.StatusResult
+	doctor                  diagnostics.DoctorResult
+	statusCalls             int
+	doctorCalls             int
+}
+
+func (service *fakeBatchService) Status(
+	context.Context,
+) (diagnostics.StatusResult, error) {
+	service.statusCalls++
+	return service.status, service.err
+}
+
+func (service *fakeBatchService) Doctor(
+	context.Context,
+) (diagnostics.DoctorResult, error) {
+	service.doctorCalls++
+	return service.doctor, service.err
 }
 
 func (service *fakeBatchService) CreateLibrary(

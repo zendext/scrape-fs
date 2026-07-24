@@ -15,6 +15,7 @@ import (
 	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/control"
 	"github.com/zendext/scrape-fs/internal/database"
+	"github.com/zendext/scrape-fs/internal/diagnostics"
 	fusefs "github.com/zendext/scrape-fs/internal/fuse"
 	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
@@ -91,6 +92,7 @@ type controlStarter func(
 	control.LibraryService,
 	control.ProjectionService,
 	control.GCService,
+	control.DiagnosticsService,
 ) (controlRuntime, error)
 type runtimeDependencies struct {
 	newIndex     func(*namespace.Repository) runtimeIndex
@@ -101,6 +103,13 @@ type runtimeDependencies struct {
 }
 type filesystemInvalidator interface {
 	Invalidate(namespace.Commit, namespace.ChangeSet) []error
+}
+type runtimeChecker interface {
+	Check() error
+}
+type runtimeDiagnosticIndex interface {
+	Stats() namespace.IndexStats
+	Inspect(context.Context) (namespace.IndexInspection, error)
 }
 
 func serveRuntime(
@@ -126,8 +135,9 @@ func serveRuntime(
 				libraryService control.LibraryService,
 				projectionService control.ProjectionService,
 				gcService control.GCService,
+				diagnosticsService control.DiagnosticsService,
 			) (controlRuntime, error) {
-				return control.Start(
+				return control.StartWithDiagnostics(
 					socketPath,
 					mode,
 					administratorUID,
@@ -135,6 +145,7 @@ func serveRuntime(
 					libraryService,
 					projectionService,
 					gcService,
+					diagnosticsService,
 				)
 			},
 			notifyReady: notifyReady,
@@ -170,6 +181,10 @@ func serveRuntimeWithDependencies(
 	}
 
 	repository := namespace.NewRepository(openedDatabase)
+	runtimeState := diagnostics.NewRuntime(
+		configuration.FUSE.Mountpoint,
+		configuration.Control.SocketPath,
+	)
 	store, err := objectstore.OpenWithOptions(
 		configuration.Storage.OverlayStorePath,
 		openedDatabase,
@@ -255,10 +270,27 @@ func serveRuntimeWithDependencies(
 		invalidator = current
 		invalidatorMu.Unlock()
 	}
+	if checker, ok := mounted.(runtimeChecker); ok {
+		runtimeState.SetMount(checker.Check)
+	} else {
+		runtimeState.SetMount(nil)
+	}
 	if ctx.Err() != nil {
 		return shutdownRuntime(openedDatabase, mounted, nil, store)
 	}
 
+	var diagnosticIndex runtimeDiagnosticIndex
+	if current, ok := index.(runtimeDiagnosticIndex); ok {
+		diagnosticIndex = current
+	}
+	diagnosticsService := diagnostics.NewService(
+		openedDatabase,
+		repository,
+		diagnosticIndex,
+		store,
+		runtimeState,
+		buildinfo.Version,
+	)
 	server, err := dependencies.startControl(
 		configuration.Control.SocketPath,
 		configuration.Control.SocketMode,
@@ -267,6 +299,7 @@ func serveRuntimeWithDependencies(
 		library.NewServiceWithObjectReclaimer(repository, store),
 		projection.NewService(repository),
 		store,
+		diagnosticsService,
 	)
 	if err != nil {
 		return errors.Join(
@@ -279,6 +312,11 @@ func serveRuntimeWithDependencies(
 			errors.New("runtime control starter returned nil"),
 			shutdownRuntime(openedDatabase, mounted, nil, store),
 		)
+	}
+	if checker, ok := server.(runtimeChecker); ok {
+		runtimeState.SetSocket(checker.Check)
+	} else {
+		runtimeState.SetSocket(nil)
 	}
 
 	var runtimeErr error
@@ -294,11 +332,24 @@ func serveRuntimeWithDependencies(
 			}
 			select {
 			case <-ctx.Done():
+				break
+			case <-server.Done():
+				runtimeErr = stoppedControlError(server)
+				break
+			default:
+				runtimeState.SetReady(true)
+			}
+			if runtimeErr != nil || ctx.Err() != nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
 			case <-server.Done():
 				runtimeErr = stoppedControlError(server)
 			}
 		}
 	}
+	runtimeState.SetReady(false)
 	return errors.Join(
 		runtimeErr,
 		shutdownRuntime(openedDatabase, mounted, server, store),

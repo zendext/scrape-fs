@@ -13,6 +13,7 @@ import (
 type Server struct {
 	listener   *net.UnixListener
 	prepared   *preparedSocketPath
+	mode       fs.FileMode
 	service    BatchService
 	options    serverOptions
 	stopping   chan struct{}
@@ -74,6 +75,7 @@ func startWithOptions(
 	server := &Server{
 		listener:   listener,
 		prepared:   prepared,
+		mode:       mode,
 		service:    service,
 		options:    options,
 		stopping:   make(chan struct{}),
@@ -107,6 +109,18 @@ func (server *Server) Err() error {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	return server.acceptErr
+}
+
+func (server *Server) Check() error {
+	if server == nil || server.prepared == nil {
+		return errors.New("control socket runtime is unavailable")
+	}
+	select {
+	case <-server.acceptDone:
+		return errors.New("control socket is not accepting requests")
+	default:
+	}
+	return server.prepared.verifyRuntimeMetadata(server.mode, server.options.security)
 }
 
 func (server *Server) StopAccepting() error {

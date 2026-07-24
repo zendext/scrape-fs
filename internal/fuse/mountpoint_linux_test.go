@@ -77,6 +77,39 @@ func TestPreparedMountpointRejectsPathReplacement(t *testing.T) {
 	}
 }
 
+func TestMountedCheckUsesActiveMountOwnershipWhenBackingDirectoryIsHidden(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "mount")
+	prepared, err := prepareMountpointDirectory(path)
+	if err != nil {
+		t.Fatalf("prepareMountpointDirectory: %v", err)
+	}
+	defer prepared.Close()
+
+	hidden := filepath.Join(root, "hidden")
+	if err := os.Rename(path, hidden); err != nil {
+		t.Fatalf("Rename mountpoint: %v", err)
+	}
+	if err := os.Mkdir(path, mountpointMode); err != nil {
+		t.Fatalf("Mkdir visible mount root: %v", err)
+	}
+	if err := prepared.verifyPath(); err == nil {
+		t.Fatal("verifyPath succeeded after the backing directory was hidden")
+	}
+
+	mounted := &Mounted{mountpoint: prepared}
+	var verifiedPath string
+	if err := mounted.check(func(got string) error {
+		verifiedPath = got
+		return nil
+	}); err != nil {
+		t.Fatalf("check active mount: %v", err)
+	}
+	if verifiedPath != path {
+		t.Errorf("verified path = %q, want %q", verifiedPath, path)
+	}
+}
+
 func TestPreparedMountpointRejectsAncestorSymlinkReplacement(t *testing.T) {
 	root := t.TempDir()
 	parent := filepath.Join(root, "parent")

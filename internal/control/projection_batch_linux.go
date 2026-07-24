@@ -86,13 +86,14 @@ type serverLimits struct {
 }
 
 type serverOptions struct {
-	limits            serverLimits
-	security          serverSecurity
-	readPeerIdentity  peerIdentityReader
-	ready             chan<- struct{}
-	gcService         GCService
-	libraryService    LibraryService
-	projectionService ProjectionService
+	limits             serverLimits
+	security           serverSecurity
+	readPeerIdentity   peerIdentityReader
+	ready              chan<- struct{}
+	diagnosticsService DiagnosticsService
+	gcService          GCService
+	libraryService     LibraryService
+	projectionService  ProjectionService
 }
 
 func NewClient(socketPath string) *Client {
@@ -255,6 +256,53 @@ func Start(
 	projectionService ProjectionService,
 	gcService GCService,
 ) (*Server, error) {
+	return start(
+		socketPath,
+		mode,
+		administratorUID,
+		service,
+		libraryService,
+		projectionService,
+		gcService,
+		nil,
+	)
+}
+
+func StartWithDiagnostics(
+	socketPath string,
+	mode fs.FileMode,
+	administratorUID uint32,
+	service BatchService,
+	libraryService LibraryService,
+	projectionService ProjectionService,
+	gcService GCService,
+	diagnosticsService DiagnosticsService,
+) (*Server, error) {
+	if diagnosticsService == nil {
+		return nil, fmt.Errorf("diagnostics control service must not be nil")
+	}
+	return start(
+		socketPath,
+		mode,
+		administratorUID,
+		service,
+		libraryService,
+		projectionService,
+		gcService,
+		diagnosticsService,
+	)
+}
+
+func start(
+	socketPath string,
+	mode fs.FileMode,
+	administratorUID uint32,
+	service BatchService,
+	libraryService LibraryService,
+	projectionService ProjectionService,
+	gcService GCService,
+	diagnosticsService DiagnosticsService,
+) (*Server, error) {
 	if libraryService == nil {
 		return nil, fmt.Errorf("Library control service must not be nil")
 	}
@@ -275,10 +323,11 @@ func Start(
 			administratorUID: administratorUID,
 			controlGroupID:   controlGroupID,
 		},
-		readPeerIdentity:  readPeerIdentity,
-		gcService:         gcService,
-		libraryService:    libraryService,
-		projectionService: projectionService,
+		readPeerIdentity:   readPeerIdentity,
+		diagnosticsService: diagnosticsService,
+		gcService:          gcService,
+		libraryService:     libraryService,
+		projectionService:  projectionService,
 	})
 }
 
@@ -443,6 +492,18 @@ func handleConnection(
 	}
 	var result any
 	switch request.Command {
+	case "status":
+		if options.diagnosticsService == nil {
+			err = fmt.Errorf("diagnostics control service is unavailable")
+			break
+		}
+		result = options.diagnosticsService.Status(ctx)
+	case "doctor":
+		if options.diagnosticsService == nil {
+			err = fmt.Errorf("diagnostics control service is unavailable")
+			break
+		}
+		result = options.diagnosticsService.Doctor(ctx)
 	case "library.create":
 		if options.libraryService == nil {
 			err = fmt.Errorf("Library control service is unavailable")

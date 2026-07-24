@@ -319,8 +319,17 @@ func (prepared *preparedSocketPath) setMetadata(mode os.FileMode) error {
 		return fmt.Errorf("set ScrapeFS control socket mode: %w", err)
 	}
 
+	return prepared.verifyMetadata(mode)
+}
+
+func (prepared *preparedSocketPath) verifyMetadata(mode os.FileMode) error {
 	var stat unix.Stat_t
-	if err := unix.Fstatat(parentFD, prepared.name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+	if err := unix.Fstatat(
+		int(prepared.parent.Fd()),
+		prepared.name,
+		&stat,
+		unix.AT_SYMLINK_NOFOLLOW,
+	); err != nil {
 		return fmt.Errorf("verify ScrapeFS control socket metadata: %w", err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK ||
@@ -328,6 +337,58 @@ func (prepared *preparedSocketPath) setMetadata(mode os.FileMode) error {
 		stat.Gid != prepared.controlGID ||
 		os.FileMode(stat.Mode).Perm() != mode.Perm() {
 		return fmt.Errorf("ScrapeFS control socket metadata verification failed")
+	}
+	return nil
+}
+
+func (prepared *preparedSocketPath) verifyRuntimeMetadata(
+	mode os.FileMode,
+	security serverSecurity,
+) error {
+	if err := prepared.verifyConfiguredSocket(); err != nil {
+		return err
+	}
+	if err := prepared.verifyMetadata(mode); err != nil {
+		return err
+	}
+
+	var parentStat unix.Stat_t
+	if err := unix.Fstat(int(prepared.parent.Fd()), &parentStat); err != nil {
+		return fmt.Errorf("inspect control socket parent runtime metadata: %w", err)
+	}
+	if parentStat.Uid != prepared.daemonUID ||
+		os.FileMode(parentStat.Mode).Perm()&0o022 != 0 {
+		return fmt.Errorf("control socket parent runtime metadata is unsafe")
+	}
+	if err := verifyRoleAccess(
+		prepared.descriptorPath(),
+		os.FileMode(parentStat.Mode).Perm(),
+		parentStat.Uid,
+		parentStat.Gid,
+		security,
+		aclExecute,
+	); err != nil {
+		return fmt.Errorf("verify control socket parent runtime access: %w", err)
+	}
+
+	var socketStat unix.Stat_t
+	if err := unix.Fstatat(
+		int(prepared.parent.Fd()),
+		prepared.name,
+		&socketStat,
+		unix.AT_SYMLINK_NOFOLLOW,
+	); err != nil {
+		return fmt.Errorf("inspect control socket runtime access: %w", err)
+	}
+	if err := verifyRoleAccess(
+		prepared.socketDescriptorPath(),
+		os.FileMode(socketStat.Mode).Perm(),
+		socketStat.Uid,
+		socketStat.Gid,
+		security,
+		aclRead|aclWrite,
+	); err != nil {
+		return fmt.Errorf("verify control socket runtime access: %w", err)
 	}
 	return nil
 }

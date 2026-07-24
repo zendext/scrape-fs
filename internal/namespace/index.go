@@ -2,6 +2,7 @@ package namespace
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -33,6 +34,22 @@ type IndexStats struct {
 	Libraries int
 	Nodes     int
 	Objects   int
+}
+
+type IndexInspection struct {
+	Index      IndexStats
+	Repository IndexStats
+	Diverged   bool
+}
+
+type RepositoryInspection struct {
+	NamespaceVersion int64
+	ActiveLibraries  int
+	RetiredLibraries int
+	Nodes            int
+	Projections      int
+	OverlayFiles     int
+	Libraries        []Library
 }
 
 type Index struct {
@@ -82,14 +99,197 @@ func (index *Index) Stats() IndexStats {
 	}
 }
 
+func (index *Index) Inspect(ctx context.Context) (IndexInspection, error) {
+	if index == nil || index.repository == nil {
+		return IndexInspection{}, errors.New("namespace index repository is required")
+	}
+	for {
+		inspection, generation, err := index.inspectOnce(ctx)
+		if err != nil || !inspection.Diverged {
+			return inspection, err
+		}
+		currentGeneration, notification := index.repository.commitListenerState()
+		if currentGeneration != generation {
+			continue
+		}
+		if notification == nil {
+			return inspection, nil
+		}
+		select {
+		case <-ctx.Done():
+			return IndexInspection{}, ctx.Err()
+		case <-notification:
+		}
+	}
+}
+
+func (index *Index) inspectOnce(
+	ctx context.Context,
+) (IndexInspection, uint64, error) {
+	snapshot, err := index.repository.snapshot(ctx)
+	if err != nil {
+		return IndexInspection{}, 0, err
+	}
+	libraries, nodes, objects, err := buildIndex(snapshot)
+	if err != nil {
+		return IndexInspection{}, 0, err
+	}
+
+	index.mu.RLock()
+	defer index.mu.RUnlock()
+	return IndexInspection{
+		Index:      indexStats(index.libraries, index.nodes, index.objects),
+		Repository: indexStats(libraries, nodes, objects),
+		Diverged: !equalLibraries(index.libraries, libraries) ||
+			!equalNodes(index.nodes, nodes) ||
+			!equalObjects(index.objects, objects),
+	}, snapshot.listenerGeneration, nil
+}
+
+func (repository *Repository) Inspect(ctx context.Context) (RepositoryInspection, error) {
+	var inspection RepositoryInspection
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		version, err := namespaceVersion(ctx, connection)
+		if err != nil {
+			return err
+		}
+		inspection.NamespaceVersion = version
+
+		var snapshot repositorySnapshot
+		var libraryCursorID int64
+		for {
+			var libraryID int64
+			err := connection.QueryRowContext(ctx, `
+				SELECT id
+				FROM libraries
+				WHERE id > ?
+				ORDER BY id
+				LIMIT 1
+			`, libraryCursorID).Scan(&libraryID)
+			if errors.Is(err, sql.ErrNoRows) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("list diagnostic Libraries: %w", err)
+			}
+			library, err := queryLibrary(
+				ctx,
+				connection,
+				"libraries.id = ?",
+				libraryID,
+			)
+			if err != nil {
+				return fmt.Errorf("inspect Library %d: %w", libraryID, err)
+			}
+			switch library.Status {
+			case LibraryActive:
+				inspection.ActiveLibraries++
+				snapshot.libraries = append(snapshot.libraries, library)
+				inspection.Libraries = append(inspection.Libraries, library)
+			case LibraryRetired:
+				inspection.RetiredLibraries++
+			}
+			libraryCursorID = libraryID
+		}
+
+		var nodeCursorID int64
+		for {
+			node, err := queryNode(ctx, connection, `
+				id > ?
+				ORDER BY id
+				LIMIT 1
+			`, nodeCursorID)
+			if errors.Is(err, ErrNotFound) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("inspect namespace nodes: %w", err)
+			}
+			snapshot.nodes = append(snapshot.nodes, node)
+			inspection.Nodes++
+			switch node.Kind {
+			case ProjectionFile:
+				inspection.Projections++
+			case OverlayFile:
+				inspection.OverlayFiles++
+			}
+			nodeCursorID = node.ID
+		}
+		_, _, _, err = buildIndex(snapshot)
+		return err
+	})
+	if err != nil {
+		return RepositoryInspection{}, err
+	}
+	return inspection, nil
+}
+
 type repositorySnapshot struct {
-	libraries []Library
-	nodes     []Node
+	libraries          []Library
+	nodes              []Node
+	listenerGeneration uint64
+}
+
+func indexStats(
+	libraries map[int64]Library,
+	nodes map[int64]Node,
+	objects map[int64][]int64,
+) IndexStats {
+	return IndexStats{
+		Libraries: len(libraries),
+		Nodes:     len(nodes),
+		Objects:   len(objects),
+	}
+}
+
+func equalLibraries(left, right map[int64]Library) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for id, library := range left {
+		if other, exists := right[id]; !exists || other != library {
+			return false
+		}
+	}
+	return true
+}
+
+func equalNodes(left, right map[int64]Node) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for id, node := range left {
+		other, exists := right[id]
+		if !exists || !equalNode(node, other) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalObjects(left, right map[int64][]int64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for id, nodeIDs := range left {
+		other, exists := right[id]
+		if !exists || len(other) != len(nodeIDs) {
+			return false
+		}
+		for index := range nodeIDs {
+			if nodeIDs[index] != other[index] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (repository *Repository) snapshot(ctx context.Context) (repositorySnapshot, error) {
 	var snapshot repositorySnapshot
 	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		snapshot.listenerGeneration, _ = repository.commitListenerState()
+
 		var libraryCursorName string
 		var libraryCursorID int64
 		for {
@@ -149,6 +349,15 @@ func buildIndex(
 		if _, duplicate := libraries[library.ID]; duplicate {
 			return nil, nil, nil, fmt.Errorf("%w: duplicate Library %d", ErrInvalidLibrary, library.ID)
 		}
+		if existing, duplicate := rootLibraries[library.RootNodeID]; duplicate {
+			return nil, nil, nil, fmt.Errorf(
+				"%w: Libraries %d and %d share root node %d",
+				ErrInvalidLibrary,
+				existing.ID,
+				library.ID,
+				library.RootNodeID,
+			)
+		}
 		libraries[library.ID] = library
 		rootLibraries[library.RootNodeID] = library
 	}
@@ -168,7 +377,7 @@ func buildIndex(
 	if !exists || root.Kind != GlobalRoot || root.ParentID != nil {
 		return nil, nil, nil, fmt.Errorf("%w: missing GlobalRoot", ErrInvalidRoot)
 	}
-	for _, library := range libraries {
+	for _, library := range snapshot.libraries {
 		rootNode, exists := nodes[library.RootNodeID]
 		if !exists ||
 			rootNode.Kind != LibraryRoot ||
@@ -182,19 +391,38 @@ func buildIndex(
 			)
 		}
 	}
-	for id, node := range nodes {
+	for _, node := range snapshot.nodes {
+		id := node.ID
 		if id == root.ID {
 			continue
 		}
 		if node.ParentID == nil {
 			return nil, nil, nil, fmt.Errorf("%w: node %d has no parent", ErrInvalidNode, id)
 		}
-		if _, exists := nodes[*node.ParentID]; !exists {
+		parent, exists := nodes[*node.ParentID]
+		if !exists {
 			return nil, nil, nil, fmt.Errorf(
 				"%w: node %d parent %d is missing",
 				ErrInvalidNode,
 				id,
 				*node.ParentID,
+			)
+		}
+		if node.Kind == LibraryRoot {
+			if _, active := rootLibraries[id]; !active {
+				return nil, nil, nil, fmt.Errorf(
+					"%w: LibraryRoot node %d is not bound to an active Library",
+					ErrInvalidNode,
+					id,
+				)
+			}
+		} else if parent.Kind != LibraryRoot && parent.Kind != Directory {
+			return nil, nil, nil, fmt.Errorf(
+				"%w: node %d parent %d is %s, want LibraryRoot or Directory",
+				ErrInvalidNode,
+				id,
+				parent.ID,
+				parent.Kind,
 			)
 		}
 		if err := validateIndexedAncestry(id, nodes, rootLibraries); err != nil {

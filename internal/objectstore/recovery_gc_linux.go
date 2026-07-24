@@ -17,11 +17,13 @@ import (
 const (
 	RecoveryReportSchema = "scrapefs.object-recovery/v1"
 	GCResultSchema       = "scrapefs.gc-result/v1"
+	InspectionSchema     = "scrapefs.object-inspection/v1"
 
 	IntegrityMissingReferencedObject = "MissingReferencedObject"
 	IntegrityReferencedStagingObject = "ReferencedStagingObject"
 	IntegrityConflictingObjectFiles  = "ConflictingObjectFiles"
 	IntegrityUnexpectedObjectFile    = "UnexpectedObjectFile"
+	IntegrityOrphanObject            = "OrphanObject"
 )
 
 type IntegrityIssue struct {
@@ -60,6 +62,16 @@ type GCResult struct {
 	Errors              []GCError      `json:"errors"`
 }
 
+type Inspection struct {
+	Schema            string           `json:"schema"`
+	Records           int              `json:"records"`
+	StagingFiles      int              `json:"staging_files"`
+	LiveFiles         int              `json:"live_files"`
+	ReferencedObjects int              `json:"referenced_objects"`
+	OrphanObjects     int              `json:"orphan_objects"`
+	Issues            []IntegrityIssue `json:"issues"`
+}
+
 type objectRecord struct {
 	id          int64
 	state       string
@@ -96,6 +108,143 @@ func cloneRecoveryReport(report RecoveryReport) RecoveryReport {
 		report.Issues[index].NodeIDs = append([]int64(nil), report.Issues[index].NodeIDs...)
 	}
 	return report
+}
+
+func (store *Store) Inspect(ctx context.Context) (Inspection, error) {
+	store.coordinator.Lock()
+	defer store.coordinator.Unlock()
+	report := Inspection{
+		Schema: InspectionSchema,
+		Issues: []IntegrityIssue{},
+	}
+	if store.closed {
+		return report, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+
+	staging, err := listObjectEntries(store.staging)
+	if err != nil {
+		return report, err
+	}
+	live, err := listObjectEntries(store.live)
+	if err != nil {
+		return report, err
+	}
+	report.StagingFiles = len(staging)
+	report.LiveFiles = len(live)
+
+	known := make(map[int64]struct{})
+	err = store.database.UseConnection(ctx, func(connection *database.Connection) error {
+		records, err := readObjectRecords(ctx, connection)
+		if err != nil {
+			return err
+		}
+		report.Records = len(records)
+		known = make(map[int64]struct{}, len(records))
+		for _, record := range records {
+			known[record.id] = struct{}{}
+			nodeIDs, err := referencedNodeIDs(ctx, connection, record.id)
+			if err != nil {
+				return err
+			}
+			_, inStaging := staging[record.id]
+			_, inLive := live[record.id]
+			if len(nodeIDs) == 0 {
+				report.OrphanObjects++
+				if inStaging && inLive {
+					report.Issues = append(report.Issues, IntegrityIssue{
+						ObjectID: record.id,
+						Code:     IntegrityConflictingObjectFiles,
+						Message:  fmt.Sprintf("object %d exists in both staging and live", record.id),
+					})
+					continue
+				}
+				report.Issues = append(report.Issues, IntegrityIssue{
+					ObjectID: record.id,
+					Code:     IntegrityOrphanObject,
+					Message: fmt.Sprintf(
+						"%s object %d has no namespace references",
+						record.state,
+						record.id,
+					),
+				})
+				continue
+			}
+			report.ReferencedObjects++
+			switch {
+			case inStaging && inLive:
+				report.Issues = append(report.Issues, IntegrityIssue{
+					ObjectID: record.id,
+					Code:     IntegrityConflictingObjectFiles,
+					NodeIDs:  nodeIDs,
+					Message:  fmt.Sprintf("object %d exists in both staging and live", record.id),
+				})
+			case record.state == stateStaging:
+				report.Issues = append(report.Issues, IntegrityIssue{
+					ObjectID: record.id,
+					Code:     IntegrityReferencedStagingObject,
+					NodeIDs:  nodeIDs,
+					Message:  fmt.Sprintf("STAGING object %d is referenced by namespace nodes", record.id),
+				})
+			case record.state == stateLive && !inLive:
+				report.Issues = append(report.Issues, IntegrityIssue{
+					ObjectID: record.id,
+					Code:     IntegrityMissingReferencedObject,
+					NodeIDs:  nodeIDs,
+					Message:  fmt.Sprintf("referenced LIVE object %d is missing", record.id),
+				})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return report, err
+	}
+
+	untracked := make(map[int64]struct{})
+	for objectID := range staging {
+		if _, exists := known[objectID]; !exists {
+			untracked[objectID] = struct{}{}
+		}
+	}
+	for objectID := range live {
+		if _, exists := known[objectID]; !exists {
+			untracked[objectID] = struct{}{}
+		}
+	}
+	for objectID := range untracked {
+		report.OrphanObjects++
+		_, inStaging := staging[objectID]
+		_, inLive := live[objectID]
+		if inStaging && inLive {
+			report.Issues = append(report.Issues, IntegrityIssue{
+				ObjectID: objectID,
+				Code:     IntegrityConflictingObjectFiles,
+				Message: fmt.Sprintf(
+					"untracked object %d exists in both staging and live",
+					objectID,
+				),
+			})
+			continue
+		}
+		location := liveDirectory
+		if inStaging {
+			location = stagingDirectory
+		}
+		report.Issues = append(report.Issues, IntegrityIssue{
+			ObjectID: objectID,
+			Code:     IntegrityOrphanObject,
+			Message: fmt.Sprintf(
+				"%s object %d has no database record",
+				location,
+				objectID,
+			),
+		})
+	}
+	sortIntegrityIssues(report.Issues)
+	return report, nil
 }
 
 func (store *Store) recover(ctx context.Context) (RecoveryReport, error) {

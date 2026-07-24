@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -13,6 +14,116 @@ import (
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"golang.org/x/sys/unix"
 )
+
+func TestInspectReportsCurrentIntegrityWithoutMutation(t *testing.T) {
+	fixture := newFixture(t)
+	handle, node, err := fixture.store.Create(
+		context.Background(),
+		overlayOperation("library/missing"),
+		overlayRequest(fixture.libraryRootID, "missing"),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Create referenced object: %v", err)
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatalf("Close referenced object: %v", err)
+	}
+	if err := os.Remove(filepath.Join(
+		fixture.storePath,
+		liveDirectory,
+		strconv.FormatInt(*node.ObjectID, 10),
+	)); err != nil {
+		t.Fatalf("remove referenced object file: %v", err)
+	}
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	orphanID := insertObjectRecord(
+		t,
+		fixture.database,
+		stateLive,
+		now,
+		timePointer(now),
+	)
+	writeObjectFile(t, fixture.storePath, liveDirectory, orphanID, "orphan")
+	const untrackedID int64 = 99
+	writeObjectFile(t, fixture.storePath, stagingDirectory, untrackedID, "untracked")
+
+	first, err := fixture.store.Inspect(context.Background())
+	if err != nil {
+		t.Fatalf("first Inspect: %v", err)
+	}
+	second, err := fixture.store.Inspect(context.Background())
+	if err != nil {
+		t.Fatalf("second Inspect: %v", err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("Inspect results differ:\nfirst=%#v\nsecond=%#v", first, second)
+	}
+	if first.Schema != InspectionSchema ||
+		first.Records != 2 ||
+		first.LiveFiles != 1 ||
+		first.StagingFiles != 1 ||
+		first.ReferencedObjects != 1 ||
+		first.OrphanObjects != 2 {
+		t.Errorf("inspection summary = %#v", first)
+	}
+	want := []IntegrityIssue{
+		{
+			ObjectID: *node.ObjectID,
+			Code:     IntegrityMissingReferencedObject,
+			NodeIDs:  []int64{node.ID},
+			Message:  "referenced LIVE object 1 is missing",
+		},
+		{
+			ObjectID: orphanID,
+			Code:     IntegrityOrphanObject,
+			Message:  "LIVE object 2 has no namespace references",
+		},
+		{
+			ObjectID: untrackedID,
+			Code:     IntegrityOrphanObject,
+			Message:  "staging object 99 has no database record",
+		},
+	}
+	if !reflect.DeepEqual(first.Issues, want) {
+		t.Errorf("Inspect issues = %#v, want %#v", first.Issues, want)
+	}
+	if !objectRecordExists(t, fixture.database, orphanID) {
+		t.Fatal("Inspect removed orphan database record")
+	}
+	assertObjectPathExists(t, fixture.storePath, liveDirectory, orphanID, true)
+	assertObjectPathExists(t, fixture.storePath, stagingDirectory, untrackedID, true)
+}
+
+func TestInspectKeepsConflictingUnreferencedRecordBlocking(t *testing.T) {
+	fixture := newFixture(t)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	objectID := insertObjectRecord(
+		t,
+		fixture.database,
+		stateLive,
+		now,
+		timePointer(now),
+	)
+	writeObjectFile(t, fixture.storePath, stagingDirectory, objectID, "staging")
+	writeObjectFile(t, fixture.storePath, liveDirectory, objectID, "live")
+
+	inspection, err := fixture.store.Inspect(context.Background())
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if inspection.OrphanObjects != 1 || len(inspection.Issues) != 1 {
+		t.Fatalf("inspection = %#v", inspection)
+	}
+	if inspection.Issues[0].Code != IntegrityConflictingObjectFiles {
+		t.Errorf(
+			"issue code = %q, want %q",
+			inspection.Issues[0].Code,
+			IntegrityConflictingObjectFiles,
+		)
+	}
+}
 
 func TestOpenRecoversCrashStateMatrixWithoutReplacingMissingObjects(t *testing.T) {
 	root := t.TempDir()
