@@ -205,6 +205,7 @@ unlink
 | fallocate | EOPNOTSUPP |
 | chmod/chown/utimens | EROFS |
 | link/symlink | EOPNOTSUPP |
+| rename/unlink Batch-owned Projection | EROFS |
 
 rename 只修改虚拟路径。unlink 只删除命名空间节点。已打开的源文件 fd 继续可读。
 

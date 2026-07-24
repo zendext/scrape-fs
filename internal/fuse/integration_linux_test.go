@@ -14,8 +14,124 @@ import (
 	"github.com/zendext/scrape-fs/internal/database"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/objectstore"
+	"github.com/zendext/scrape-fs/internal/projection"
 	"golang.org/x/sys/unix"
 )
+
+func TestMountProjectionFileIntegration(t *testing.T) {
+	requireFUSEIntegration(t)
+
+	fixture := newWritableFuseFixture(t)
+	service := projection.NewService(fixture.repository)
+	sourcePath := filepath.Join(t.TempDir(), "source.mkv")
+	sourceContent := []byte("0123456789")
+	if err := os.WriteFile(sourcePath, sourceContent, 0o600); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	if _, err := service.Create(context.Background(), projection.CreateRequest{
+		SourcePath: sourcePath,
+		Target:     "jellyfin:/Movies/source.mkv",
+		Actor:      namespace.Actor{Kind: namespace.ActorSystem},
+	}); err != nil {
+		t.Fatalf("Create source Projection: %v", err)
+	}
+	conflictSource := filepath.Join(t.TempDir(), "conflict.mkv")
+	if err := os.WriteFile(conflictSource, []byte("conflict"), 0o600); err != nil {
+		t.Fatalf("WriteFile conflict source: %v", err)
+	}
+	if _, err := service.Create(context.Background(), projection.CreateRequest{
+		SourcePath: conflictSource,
+		Target:     "jellyfin:/Movies/existing.mkv",
+		Actor:      namespace.Actor{Kind: namespace.ActorSystem},
+	}); err != nil {
+		t.Fatalf("Create conflict Projection: %v", err)
+	}
+	createFuseTestLibrary(t, fixture.repository, "plex", "plex")
+	otherSource := filepath.Join(t.TempDir(), "other.mkv")
+	if err := os.WriteFile(otherSource, []byte("other"), 0o600); err != nil {
+		t.Fatalf("WriteFile other source: %v", err)
+	}
+	if _, err := service.Create(context.Background(), projection.CreateRequest{
+		SourcePath: otherSource,
+		Target:     "plex:/Movies/other.mkv",
+		Actor:      namespace.Actor{Kind: namespace.ActorSystem},
+	}); err != nil {
+		t.Fatalf("Create other Projection: %v", err)
+	}
+
+	mountpoint := filepath.Join(t.TempDir(), "mount")
+	mounted, err := Mount(
+		context.Background(),
+		config.FUSE{
+			Mountpoint:      mountpoint,
+			EntryTimeout:    50 * time.Millisecond,
+			AttrTimeout:     50 * time.Millisecond,
+			NegativeTimeout: 0,
+		},
+		fixture.repository,
+		fixture.store,
+	)
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := mounted.Unmount(); err != nil {
+			t.Errorf("cleanup Unmount: %v", err)
+		}
+	})
+
+	sourceTarget := filepath.Join(mountpoint, "jellyfin", "Movies", "source.mkv")
+	opened, err := os.Open(sourceTarget)
+	if err != nil {
+		t.Fatalf("Open Projection: %v", err)
+	}
+	t.Cleanup(func() {
+		opened.Close()
+	})
+	if offset, err := opened.Seek(4, io.SeekStart); err != nil || offset != 4 {
+		t.Fatalf("Seek = %d/%v, want 4/nil", offset, err)
+	}
+	if got, err := io.ReadAll(opened); err != nil || string(got) != "456789" {
+		t.Errorf("read after Seek = %q/%v, want %q/nil", got, err, "456789")
+	}
+
+	movies := filepath.Dir(sourceTarget)
+	if err := os.Rename(
+		sourceTarget,
+		filepath.Join(movies, "existing.mkv"),
+	); !errors.Is(err, syscall.EEXIST) {
+		t.Errorf("Rename over existing Projection error = %v, want EEXIST", err)
+	}
+	if err := os.Rename(
+		sourceTarget,
+		filepath.Join(mountpoint, "plex", "Movies", "moved.mkv"),
+	); !errors.Is(err, syscall.EXDEV) {
+		t.Errorf("cross-Library Rename error = %v, want EXDEV", err)
+	}
+
+	renamed := filepath.Join(movies, "renamed.mkv")
+	if err := os.Rename(sourceTarget, renamed); err != nil {
+		t.Fatalf("Rename Projection: %v", err)
+	}
+	if _, err := opened.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek after Rename: %v", err)
+	}
+	if got, err := io.ReadAll(opened); err != nil || string(got) != string(sourceContent) {
+		t.Errorf("read after Rename = %q/%v", got, err)
+	}
+	if err := os.Remove(renamed); err != nil {
+		t.Fatalf("Unlink Projection: %v", err)
+	}
+	if _, err := opened.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek after Unlink: %v", err)
+	}
+	if got, err := io.ReadAll(opened); err != nil || string(got) != string(sourceContent) {
+		t.Errorf("read after Unlink = %q/%v", got, err)
+	}
+	if got, err := os.ReadFile(sourcePath); err != nil || string(got) != string(sourceContent) {
+		t.Errorf("source after FUSE mutations = %q/%v", got, err)
+	}
+}
 
 func TestMountWritableOverlayIntegration(t *testing.T) {
 	requireFUSEIntegration(t)
