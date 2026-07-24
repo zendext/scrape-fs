@@ -52,12 +52,33 @@ type SetProfileRequest struct {
 	Actor   namespace.Actor
 }
 
+type RemoveRequest struct {
+	Name      string
+	Recursive bool
+	Actor     namespace.Actor
+}
+
+type ObjectReclaimer interface {
+	DeleteObject(int64) error
+}
+
 type Service struct {
-	repository *namespace.Repository
+	repository      *namespace.Repository
+	objectReclaimer ObjectReclaimer
 }
 
 func NewService(repository *namespace.Repository) *Service {
 	return &Service{repository: repository}
+}
+
+func NewServiceWithObjectReclaimer(
+	repository *namespace.Repository,
+	objectReclaimer ObjectReclaimer,
+) *Service {
+	return &Service{
+		repository:      repository,
+		objectReclaimer: objectReclaimer,
+	}
 }
 
 func (service *Service) Create(
@@ -173,6 +194,50 @@ func (service *Service) SetProfile(
 		return namespace.Library{}, err
 	}
 	return updated, nil
+}
+
+func (service *Service) Remove(
+	ctx context.Context,
+	request RemoveRequest,
+) (namespace.Library, error) {
+	if err := validateName(request.Name); err != nil {
+		return namespace.Library{}, err
+	}
+
+	var retired namespace.Library
+	var objectIDs []int64
+	operation := namespace.Operation{
+		Name:  "library.remove",
+		Actor: request.Actor,
+		Details: namespace.OperationDetails{
+			Paths:     []string{request.Name},
+			NodeKinds: []namespace.NodeKind{namespace.LibraryRoot},
+		},
+	}
+	change := func(transaction *namespace.Transaction) error {
+		var err error
+		retired, objectIDs, err = transaction.RetireLibrary(
+			ctx,
+			request.Name,
+			request.Recursive,
+		)
+		return err
+	}
+	var err error
+	if request.Recursive {
+		_, err = service.repository.TryUpdate(ctx, operation, change)
+	} else {
+		_, err = service.repository.Update(ctx, operation, change)
+	}
+	if err != nil {
+		return namespace.Library{}, err
+	}
+	if service.objectReclaimer != nil {
+		for _, objectID := range objectIDs {
+			_ = service.objectReclaimer.DeleteObject(objectID)
+		}
+	}
+	return retired, nil
 }
 
 func validateName(name string) error {

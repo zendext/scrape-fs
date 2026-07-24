@@ -546,6 +546,7 @@ scrapefs projection rebind \
 
 ```bash
 scrapefs library remove jellyfin
+scrapefs library remove jellyfin --recursive
 ```
 
 ### 主流程
@@ -565,12 +566,12 @@ scrapefs library remove jellyfin
 
 ### 备选流程
 
-- 普通删除非空 Library：返回 `ENOTEMPTY`。
-- 存在在途命名空间写事务：recursive remove 失败。
+- 普通删除非空 Library 返回 `NotEmpty`（在 namespace/FUSE 语义中为 `ENOTEMPTY`）。
+- 存在在途命名空间写事务时，recursive remove 返回 `NamespaceWriteInProgress`。
 
 ### 结果
 
-Library 从 FUSE 根目录消失，源文件保持不变。
+Library 从 FUSE 根目录消失，命令返回其 RETIRED 快照。源文件与 Projection Batch 历史保持不变；已经打开的 Overlay handle 在关闭前仍可使用。
 
 ### 相关规格
 

@@ -210,6 +210,19 @@ func TestErrorCodeReturnsPermissionDenied(t *testing.T) {
 	}
 }
 
+func TestErrorCodeReturnsLibraryRemovalErrors(t *testing.T) {
+	t.Parallel()
+
+	for err, want := range map[error]string{
+		namespace.ErrNotEmpty:        "NotEmpty",
+		namespace.ErrWriteInProgress: "NamespaceWriteInProgress",
+	} {
+		if got := errorCode(err); got != want {
+			t.Errorf("errorCode(%v) = %q, want %q", err, got, want)
+		}
+	}
+}
+
 func TestRunGarbageCollectWritesDeterministicJSON(t *testing.T) {
 	service := &fakeBatchService{
 		gcResult: objectstore.GCResult{
@@ -517,7 +530,7 @@ func TestRunHelpListsLibraryCommands(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
 	}
-	for _, command := range []string{"add", "list", "rename", "set-profile"} {
+	for _, command := range []string{"add", "list", "remove", "rename", "set-profile"} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Errorf("help output %q does not contain %q", stdout.String(), command)
 		}
@@ -647,6 +660,49 @@ func TestRunLibraryRenamePassesNamesAndWritesJSON(t *testing.T) {
 	}
 }
 
+func TestRunLibraryRemovePassesRecursiveAndWritesJSON(t *testing.T) {
+	service := &fakeBatchService{
+		libraryRemoved: control.LibraryResult{
+			Schema: control.LibraryResultSchema,
+			Library: control.LibrarySnapshot{
+				ID:         42,
+				Name:       "media",
+				Status:     namespace.LibraryRetired,
+				RootNodeID: 0,
+			},
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithBatchService(
+		[]string{"library", "remove", "media", "--recursive"},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+		service,
+		projectionbatch.Caller{UID: 1000, GID: 1001},
+	)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if service.libraryName != "media" || !service.libraryRecursive {
+		t.Errorf(
+			"RemoveLibrary arguments = name %q recursive %v",
+			service.libraryName,
+			service.libraryRecursive,
+		)
+	}
+	var result control.LibraryResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("Unmarshal stdout: %v", err)
+	}
+	if !reflect.DeepEqual(result, service.libraryRemoved) {
+		t.Errorf("stdout result = %#v, want %#v", result, service.libraryRemoved)
+	}
+}
+
 func TestRunLibrarySetProfilePassesProfileAndWritesJSON(t *testing.T) {
 	service := &fakeBatchService{
 		libraryProfileSet: control.LibraryResult{
@@ -733,11 +789,13 @@ type fakeBatchService struct {
 	applyRequest            projectionbatch.ApplyRequest
 	undoRequest             projectionbatch.UndoRequest
 	libraryCreated          control.LibraryResult
+	libraryRemoved          control.LibraryResult
 	libraryRenamed          control.LibraryResult
 	libraryProfileSet       control.LibraryResult
 	librariesListed         control.LibraryListResult
 	libraryName             string
 	libraryNewName          string
+	libraryRecursive        bool
 	libraryProfile          library.ProfileIdentifier
 	libraryCreateCalls      int
 	libraryRenameCalls      int
@@ -782,6 +840,16 @@ func (service *fakeBatchService) RenameLibrary(
 	service.libraryName = name
 	service.libraryNewName = newName
 	return service.libraryRenamed, service.err
+}
+
+func (service *fakeBatchService) RemoveLibrary(
+	_ context.Context,
+	name string,
+	recursive bool,
+) (control.LibraryResult, error) {
+	service.libraryName = name
+	service.libraryRecursive = recursive
+	return service.libraryRemoved, service.err
 }
 
 func (service *fakeBatchService) SetLibraryProfile(

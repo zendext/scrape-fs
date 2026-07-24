@@ -125,7 +125,7 @@ func serveRuntime(
 		configuration.Control.SocketMode,
 		configuration.Control.AdministratorUID,
 		projectionbatch.NewService(repository),
-		library.NewService(repository),
+		library.NewServiceWithObjectReclaimer(repository, store),
 		projection.NewService(repository),
 		store,
 	)
