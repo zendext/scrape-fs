@@ -11,6 +11,7 @@ import (
 	"github.com/zendext/scrape-fs/internal/control"
 	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"github.com/zendext/scrape-fs/internal/projection"
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
 )
 
@@ -224,6 +225,98 @@ func TestRunHelpListsProjectionBatchCommands(t *testing.T) {
 	}
 }
 
+func TestRunHelpListsProjectionCommands(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := run([]string{"projection", "--help"}, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	for _, command := range []string{"add", "list", "batch"} {
+		if !strings.Contains(stdout.String(), command) {
+			t.Errorf("help output %q does not contain %q", stdout.String(), command)
+		}
+	}
+}
+
+func TestRunProjectionAddPassesSourceTargetAndCaller(t *testing.T) {
+	service := &fakeBatchService{
+		projectionCreated: control.ProjectionResult{
+			Schema: control.ProjectionResultSchema,
+			Projection: control.ProjectionSnapshot{
+				ID:      42,
+				Library: "media",
+				Target:  "media:/Movies/Dune.mkv",
+			},
+		},
+	}
+	caller := projectionbatch.Caller{UID: 1000, GID: 1001}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithBatchService(
+		[]string{
+			"projection", "add",
+			"/srv/Dune.mkv",
+			"media:/Movies/Dune.mkv",
+		},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+		service,
+		caller,
+	)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if service.projectionCreateRequest.SourcePath != "/srv/Dune.mkv" ||
+		service.projectionCreateRequest.Target != "media:/Movies/Dune.mkv" ||
+		service.projectionCreateRequest.Actor.Kind != namespace.ActorControl ||
+		service.projectionCreateRequest.Actor.ID == nil ||
+		*service.projectionCreateRequest.Actor.ID != int64(caller.UID) {
+		t.Errorf("CreateProjection request = %#v", service.projectionCreateRequest)
+	}
+}
+
+func TestRunProjectionListPassesOptionalLibraryScope(t *testing.T) {
+	service := &fakeBatchService{
+		projectionsListed: control.ProjectionListResult{
+			Schema: control.ProjectionListSchema,
+			Projections: []control.ProjectionSnapshot{
+				{ID: 42, Library: "media", Target: "media:/Movies/Dune.mkv"},
+			},
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := runWithBatchService(
+		[]string{"projection", "list", "--library", "media"},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+		service,
+		projectionbatch.Caller{UID: 1000, GID: 1001},
+	)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if service.projectionLibrary != "media" {
+		t.Errorf("ListProjections Library = %q, want media", service.projectionLibrary)
+	}
+	var result control.ProjectionListResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("Unmarshal stdout: %v", err)
+	}
+	if !reflect.DeepEqual(result, service.projectionsListed) {
+		t.Errorf("stdout result = %#v, want %#v", result, service.projectionsListed)
+	}
+}
+
 func TestRunHelpListsLibraryCommands(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -350,20 +443,24 @@ func TestRunLibraryAddRejectsInvalidProfileWithoutCallingService(t *testing.T) {
 }
 
 type fakeBatchService struct {
-	validation         projectionbatch.ValidationResult
-	applied            projectionbatch.ApplyResult
-	listed             projectionbatch.ListResult
-	shown              projectionbatch.DetailResult
-	undone             projectionbatch.UndoResult
-	err                error
-	validated          []byte
-	applyRequest       projectionbatch.ApplyRequest
-	undoRequest        projectionbatch.UndoRequest
-	libraryCreated     control.LibraryResult
-	librariesListed    control.LibraryListResult
-	libraryName        string
-	libraryProfile     library.ProfileIdentifier
-	libraryCreateCalls int
+	validation              projectionbatch.ValidationResult
+	applied                 projectionbatch.ApplyResult
+	listed                  projectionbatch.ListResult
+	shown                   projectionbatch.DetailResult
+	undone                  projectionbatch.UndoResult
+	err                     error
+	validated               []byte
+	applyRequest            projectionbatch.ApplyRequest
+	undoRequest             projectionbatch.UndoRequest
+	libraryCreated          control.LibraryResult
+	librariesListed         control.LibraryListResult
+	libraryName             string
+	libraryProfile          library.ProfileIdentifier
+	libraryCreateCalls      int
+	projectionCreated       control.ProjectionResult
+	projectionsListed       control.ProjectionListResult
+	projectionCreateRequest projection.CreateRequest
+	projectionLibrary       string
 }
 
 func (service *fakeBatchService) CreateLibrary(
@@ -381,6 +478,22 @@ func (service *fakeBatchService) ListLibraries(
 	context.Context,
 ) (control.LibraryListResult, error) {
 	return service.librariesListed, service.err
+}
+
+func (service *fakeBatchService) CreateProjection(
+	_ context.Context,
+	request projection.CreateRequest,
+) (control.ProjectionResult, error) {
+	service.projectionCreateRequest = request
+	return service.projectionCreated, service.err
+}
+
+func (service *fakeBatchService) ListProjections(
+	_ context.Context,
+	libraryName string,
+) (control.ProjectionListResult, error) {
+	service.projectionLibrary = libraryName
+	return service.projectionsListed, service.err
 }
 
 func (service *fakeBatchService) Validate(

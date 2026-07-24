@@ -39,7 +39,18 @@ type libraryAddCLI struct {
 type libraryListCLI struct{}
 
 type projectionCLI struct {
+	Add   projectionAddCLI   `cmd:"" help:"Create a direct Projection."`
+	List  projectionListCLI  `cmd:"" help:"List Projections."`
 	Batch projectionBatchCLI `cmd:"" help:"Validate, apply, inspect, and undo Projection Batches."`
+}
+
+type projectionAddCLI struct {
+	Source string `arg:"" name:"source" help:"Absolute source file path."`
+	Target string `arg:"" name:"target" help:"Virtual target in <library>:/<relative-path> form."`
+}
+
+type projectionListCLI struct {
+	Library string `help:"Limit results to this Library."`
 }
 
 type projectionBatchCLI struct {
@@ -77,6 +88,11 @@ type controlService interface {
 		library.ProfileIdentifier,
 	) (control.LibraryResult, error)
 	ListLibraries(context.Context) (control.LibraryListResult, error)
+	CreateProjection(
+		context.Context,
+		projection.CreateRequest,
+	) (control.ProjectionResult, error)
+	ListProjections(context.Context, string) (control.ProjectionListResult, error)
 	Validate(context.Context, []byte) (projectionbatch.ValidationResult, error)
 	Apply(context.Context, projectionbatch.ApplyRequest) (projectionbatch.ApplyResult, error)
 	List(context.Context) (projectionbatch.ListResult, error)
@@ -180,6 +196,20 @@ func runWithBatchService(
 		}
 	case strings.HasPrefix(command, "library list"):
 		result, err = service.ListLibraries(ctx)
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case strings.HasPrefix(command, "projection add"):
+		result, err = service.CreateProjection(ctx, projection.CreateRequest{
+			SourcePath: commandLine.Projection.Add.Source,
+			Target:     commandLine.Projection.Add.Target,
+			Actor:      actor,
+		})
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case strings.HasPrefix(command, "projection list"):
+		result, err = service.ListProjections(ctx, commandLine.Projection.List.Library)
 		if err != nil {
 			return writeCommandError(stderr, err)
 		}
@@ -315,6 +345,10 @@ func errorCode(err error) string {
 		return "InvalidPath"
 	case errors.Is(err, projection.ErrUnsafeSource):
 		return "UnsafeSource"
+	case errors.Is(err, projection.ErrSourceNotFound):
+		return "SourceNotFound"
+	case errors.Is(err, projection.ErrSourcePermissionDenied):
+		return "SourcePermissionDenied"
 	case errors.Is(err, projection.ErrSourceNotRegular):
 		return "SourceNotRegular"
 	case errors.Is(err, namespace.ErrConflict):

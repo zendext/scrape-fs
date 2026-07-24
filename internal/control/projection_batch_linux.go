@@ -64,6 +64,8 @@ type request struct {
 	LibraryName    string `json:"library_name,omitempty"`
 	ProfileName    string `json:"profile_name,omitempty"`
 	ProfileVersion int64  `json:"profile_version,omitempty"`
+	SourcePath     string `json:"source_path,omitempty"`
+	Target         string `json:"target,omitempty"`
 }
 
 type response struct {
@@ -81,11 +83,12 @@ type serverLimits struct {
 }
 
 type serverOptions struct {
-	limits           serverLimits
-	security         serverSecurity
-	readPeerIdentity peerIdentityReader
-	ready            chan<- struct{}
-	libraryService   LibraryService
+	limits            serverLimits
+	security          serverSecurity
+	readPeerIdentity  peerIdentityReader
+	ready             chan<- struct{}
+	libraryService    LibraryService
+	projectionService ProjectionService
 }
 
 func NewClient(socketPath string) *Client {
@@ -221,9 +224,13 @@ func Serve(
 	administratorUID uint32,
 	service BatchService,
 	libraryService LibraryService,
+	projectionService ProjectionService,
 ) error {
 	if libraryService == nil {
 		return fmt.Errorf("Library control service must not be nil")
+	}
+	if projectionService == nil {
+		return fmt.Errorf("Projection control service must not be nil")
 	}
 	controlGroupID, err := resolveGroupID(ControlGroupName, systemGroupLookup)
 	if err != nil {
@@ -236,8 +243,9 @@ func Serve(
 			administratorUID: administratorUID,
 			controlGroupID:   controlGroupID,
 		},
-		readPeerIdentity: readPeerIdentity,
-		libraryService:   libraryService,
+		readPeerIdentity:  readPeerIdentity,
+		libraryService:    libraryService,
+		projectionService: projectionService,
 	})
 }
 
@@ -506,6 +514,32 @@ func handleConnection(
 		if err == nil {
 			result = libraryListResult(libraries)
 		}
+	case "projection.create":
+		if options.projectionService == nil {
+			err = fmt.Errorf("Projection control service is unavailable")
+			break
+		}
+		var created namespace.Node
+		created, err = options.projectionService.Create(ctx, projection.CreateRequest{
+			SourcePath: request.SourcePath,
+			Target:     request.Target,
+			Actor:      actor,
+		})
+		if err == nil {
+			result = projectionResult(created, request.Target)
+		}
+	case "projection.list":
+		if options.projectionService == nil {
+			err = fmt.Errorf("Projection control service is unavailable")
+			break
+		}
+		var projections []namespace.Projection
+		projections, err = options.projectionService.List(ctx, projection.ListRequest{
+			LibraryName: request.LibraryName,
+		})
+		if err == nil {
+			result = projectionListResult(projections)
+		}
 	case "projection.batch.validate":
 		result, err = service.Validate(ctx, request.Batch)
 	case "projection.batch.apply":
@@ -576,6 +610,10 @@ func classifyError(err error) string {
 		return "InvalidPath"
 	case errors.Is(err, projection.ErrUnsafeSource):
 		return "UnsafeSource"
+	case errors.Is(err, projection.ErrSourceNotFound):
+		return "SourceNotFound"
+	case errors.Is(err, projection.ErrSourcePermissionDenied):
+		return "SourcePermissionDenied"
 	case errors.Is(err, projection.ErrSourceNotRegular):
 		return "SourceNotRegular"
 	case errors.Is(err, namespace.ErrConflict):
