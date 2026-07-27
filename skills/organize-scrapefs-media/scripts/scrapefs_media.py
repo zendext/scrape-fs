@@ -1401,6 +1401,9 @@ def validate_title(title, path):
 
 
 def sanitize_name(value, profile):
+    value = value.strip()
+    if value.startswith("【") and value.endswith("】"):
+        value = value[1:-1].strip()
     value = "".join(" " if ord(character) < 32 else character for character in value)
     value = value.replace("/", " - ").replace("\\", " - ")
     if profile == "jellyfin":

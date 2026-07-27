@@ -568,6 +568,56 @@ class ScrapeFSMediaTests(unittest.TestCase):
             all(target.startswith("media/Anime/") for target in artifact_targets)
         )
 
+    def test_strips_decorative_corner_brackets_from_show_title(self):
+        source = self.copy_fixture("episodes")
+        metadata = self.root / "episodes-decorative-title.json"
+        batch = self.root / "episodes-decorative-title.batch.json"
+        artifacts = self.root / "episodes-decorative-title.artifacts.json"
+        metadata.write_text(
+            json.dumps(
+                {
+                    "kind": "episodes",
+                    "show_title": "【The Expanse】",
+                    "provider_ids": {"tmdb": "63639"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--series-root",
+            "anime",
+            "--metadata",
+            metadata,
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+        )
+
+        targets = [
+            entry["target"]
+            for entry in json.loads(batch.read_text(encoding="utf-8"))["entries"]
+        ]
+        self.assertTrue(
+            all(
+                target.startswith(
+                    "Anime/The Expanse (2015) [tmdbid-63639]/Season 01/"
+                    "The Expanse (2015) S01E"
+                )
+                for target in targets
+            )
+        )
+
     def test_returns_manual_for_mixed_series_episode_directory(self):
         source = self.root / "mixed-series"
         source.mkdir()
