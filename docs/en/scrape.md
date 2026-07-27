@@ -222,7 +222,7 @@ Undo uses one SQLite transaction to:
 4. mark the batch undone and save caller UID/GID;
 5. increment namespace version once.
 
-Undo removes each remaining Batch-owned Projection by provenance, including a Projection moved from its original target. It does not remove OverlayFiles created through FUSE. The CLI lists retained OverlayFiles below both original and current target directories.
+Undo removes each remaining Batch-owned Projection by provenance, including a Projection moved from its original target. It prunes empty managed directories left at original, intermediate, and current targets, and its operation log records the paths actually removed. Undo does not remove OverlayFiles created through FUSE. The CLI lists retained OverlayFiles below every target directory traversed by the Batch-owned Projections.
 
 Repeated undo of an undone batch returns `AlreadyUndone`.
 

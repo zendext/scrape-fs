@@ -780,6 +780,9 @@ func (repository *Repository) update(
 	if err := change(namespaceTransaction); err != nil {
 		return 0, rollback(err)
 	}
+	if namespaceTransaction.operationDetailsJSON != nil {
+		detailsJSON = namespaceTransaction.operationDetailsJSON
+	}
 
 	if !namespaceTransaction.changed && !namespaceTransaction.audited {
 		var version int64
@@ -852,11 +855,12 @@ func (repository *Repository) update(
 }
 
 type Transaction struct {
-	transaction       *database.Transaction
-	now               func() time.Time
-	changed           bool
-	audited           bool
-	operationScrapeID *int64
+	transaction          *database.Transaction
+	now                  func() time.Time
+	changed              bool
+	audited              bool
+	operationScrapeID    *int64
+	operationDetailsJSON []byte
 }
 
 func (transaction *Transaction) GlobalRoot(ctx context.Context) (Node, error) {
@@ -937,6 +941,25 @@ func (transaction *Transaction) ProjectionBatch(
 		"scrapes.id = ? AND scrapes.status IN ('applied', 'undone')",
 		id,
 	)
+}
+
+func (transaction *Transaction) ProjectionBatchOperations(
+	ctx context.Context,
+	batchID int64,
+) ([]ProjectionBatchOperation, error) {
+	return projectionBatchOperations(ctx, transaction.transaction, batchID)
+}
+
+func (transaction *Transaction) SetOperationDetails(details OperationDetails) error {
+	if err := validateOperationDetails(details); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		return fmt.Errorf("%w: encode details: %v", ErrInvalidOperation, err)
+	}
+	transaction.operationDetailsJSON = encoded
+	return nil
 }
 
 func (transaction *Transaction) CreateLibrary(
@@ -2598,16 +2621,26 @@ func validateOperation(operation Operation, change func(*Transaction) error) err
 	if operation.ScrapeID != nil && *operation.ScrapeID <= 0 {
 		return fmt.Errorf("%w: invalid Scrape ID", ErrInvalidOperation)
 	}
-	if len(operation.Details.Paths) == 0 {
+	if err := validateOperationDetails(operation.Details); err != nil {
+		return err
+	}
+	if change == nil {
+		return fmt.Errorf("%w: change callback must not be nil", ErrInvalidOperation)
+	}
+	return nil
+}
+
+func validateOperationDetails(details OperationDetails) error {
+	if len(details.Paths) == 0 {
 		return fmt.Errorf("%w: details paths must not be empty", ErrInvalidOperation)
 	}
-	if len(operation.Details.Paths) != len(operation.Details.NodeKinds) {
+	if len(details.Paths) != len(details.NodeKinds) {
 		return fmt.Errorf(
 			"%w: details paths and node kinds must have equal lengths",
 			ErrInvalidOperation,
 		)
 	}
-	for index, path := range operation.Details.Paths {
+	for index, path := range details.Paths {
 		if path == "" {
 			return fmt.Errorf(
 				"%w: details path %d must not be empty",
@@ -2615,16 +2648,13 @@ func validateOperation(operation Operation, change func(*Transaction) error) err
 				index,
 			)
 		}
-		if !operation.Details.NodeKinds[index].valid() {
+		if !details.NodeKinds[index].valid() {
 			return fmt.Errorf(
 				"%w: invalid details node kind %q",
 				ErrInvalidOperation,
-				operation.Details.NodeKinds[index],
+				details.NodeKinds[index],
 			)
 		}
-	}
-	if change == nil {
-		return fmt.Errorf("%w: change callback must not be nil", ErrInvalidOperation)
 	}
 	return nil
 }

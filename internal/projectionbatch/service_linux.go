@@ -410,6 +410,23 @@ func (service *Service) Undo(
 		if err := transaction.AssociateOperationWithProjectionBatch(ctx, id); err != nil {
 			return err
 		}
+		operations, err := transaction.ProjectionBatchOperations(ctx, id)
+		if err != nil {
+			return err
+		}
+		historicalTargets, err := projectionBatchHistoricalTargets(targets, operations)
+		if err != nil {
+			return err
+		}
+		historicalParentIDs, err := projectionTargetParentIDs(
+			ctx,
+			transaction,
+			current.LibraryRootID,
+			historicalTargets,
+		)
+		if err != nil {
+			return err
+		}
 
 		parentIDs, currentTargets, err := transaction.RemoveProjectionBatchProjections(
 			ctx,
@@ -418,12 +435,18 @@ func (service *Service) Undo(
 		if err != nil {
 			return err
 		}
+		parentIDs = append(parentIDs, historicalParentIDs...)
 		seenParents := make(map[int64]struct{}, len(parentIDs))
 		for _, parentID := range parentIDs {
 			if _, duplicate := seenParents[parentID]; duplicate {
 				continue
 			}
 			seenParents[parentID] = struct{}{}
+			if _, err := transaction.Node(ctx, parentID); errors.Is(err, namespace.ErrNotFound) {
+				continue
+			} else if err != nil {
+				return err
+			}
 			if err := transaction.PruneManagedDirectories(
 				ctx,
 				current.LibraryRootID,
@@ -435,10 +458,24 @@ func (service *Service) Undo(
 		retained, err = transaction.RetainedOverlayPaths(
 			ctx,
 			current.LibraryRootID,
-			append(targets, currentTargets...),
+			append(historicalTargets, currentTargets...),
 		)
 		if err != nil {
 			return err
+		}
+		if len(currentTargets) > 0 {
+			currentPaths := make([]string, len(currentTargets))
+			currentKinds := make([]namespace.NodeKind, len(currentTargets))
+			for index, target := range currentTargets {
+				currentPaths[index] = current.LibraryName + ":/" + target
+				currentKinds[index] = namespace.ProjectionFile
+			}
+			if err := transaction.SetOperationDetails(namespace.OperationDetails{
+				Paths:     currentPaths,
+				NodeKinds: currentKinds,
+			}); err != nil {
+				return err
+			}
 		}
 		return transaction.MarkProjectionBatchUndone(
 			ctx,
@@ -461,6 +498,80 @@ func (service *Service) Undo(
 		NamespaceVersion:     version,
 		RetainedOverlayFiles: retained,
 	}, nil
+}
+
+func projectionBatchHistoricalTargets(
+	entryTargets []string,
+	operations []namespace.ProjectionBatchOperation,
+) ([]string, error) {
+	targets := append([]string(nil), entryTargets...)
+	for _, operation := range operations {
+		if operation.Name != "projection.move" {
+			continue
+		}
+		if len(operation.Details.Paths) != 2 {
+			return nil, fmt.Errorf(
+				"%w: Projection move operation %d has %d paths",
+				namespace.ErrInvalidOperation,
+				operation.ID,
+				len(operation.Details.Paths),
+			)
+		}
+		for _, path := range operation.Details.Paths {
+			_, relativePath, found := strings.Cut(path, ":/")
+			if !found || relativePath == "" {
+				return nil, fmt.Errorf(
+					"%w: Projection move operation %d has invalid path %q",
+					namespace.ErrInvalidOperation,
+					operation.ID,
+					path,
+				)
+			}
+			components, err := namespace.ValidateRelativePath(relativePath)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"%w: Projection move operation %d path %q: %v",
+					namespace.ErrInvalidOperation,
+					operation.ID,
+					path,
+					err,
+				)
+			}
+			targets = append(targets, strings.Join(components, "/"))
+		}
+	}
+	return targets, nil
+}
+
+func projectionTargetParentIDs(
+	ctx context.Context,
+	transaction *namespace.Transaction,
+	libraryRootID int64,
+	targets []string,
+) ([]int64, error) {
+	parentIDs := make([]int64, 0, len(targets))
+	for _, target := range targets {
+		components, err := namespace.ValidateRelativePath(target)
+		if err != nil {
+			return nil, err
+		}
+		if len(components) == 1 {
+			continue
+		}
+		parent, err := transaction.Lookup(
+			ctx,
+			libraryRootID,
+			strings.Join(components[:len(components)-1], "/"),
+		)
+		if errors.Is(err, namespace.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		parentIDs = append(parentIDs, parent.ID)
+	}
+	return parentIDs, nil
 }
 
 func (service *Service) prepare(

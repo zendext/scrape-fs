@@ -222,7 +222,7 @@ undo 在单个 SQLite 事务中：
 4. 将 Batch 状态改为 undone，并保存调用者 UID/GID；
 5. namespace version 增加 1。
 
-undo 按 provenance 删除每个仍存在的 Batch-owned Projection，包括已经离开原始 target 的 Projection。undo 不删除通过 FUSE 创建的 OverlayFile。CLI 必须列出原始 target 与当前 target 目录下保留的 OverlayFile。
+undo 按 provenance 删除每个仍存在的 Batch-owned Projection，包括已经离开原始 target 的 Projection。它清理原始、中间和当前 target 留下的空 managed Directory，并在 operation log 中记录实际删除路径。undo 不删除通过 FUSE 创建的 OverlayFile。CLI 必须列出 Batch-owned Projection 经过的全部 target 目录下保留的 OverlayFile。
 
 重复 undo 已 undone Batch 返回 `AlreadyUndone`。
 

@@ -553,7 +553,8 @@ func TestServiceUndoPreservesOverlayReportsItAndRejectsRepeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if _, err := projection.NewService(repository).Move(
+	projectionService := projection.NewService(repository)
+	if _, err := projectionService.Move(
 		context.Background(),
 		projection.MoveRequest{
 			Target:    "media:/Movies/Dune/Dune.mkv",
@@ -579,28 +580,14 @@ func TestServiceUndoPreservesOverlayReportsItAndRejectsRepeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lookup moved parent: %v", err)
 	}
-	for _, overlay := range []struct {
-		parent namespace.Node
-		name   string
-		path   string
-	}{
-		{
-			parent: originalParent,
-			name:   "poster.jpg",
-			path:   "media:/Movies/Dune/poster.jpg",
-		},
-		{
-			parent: movedParent,
-			name:   "current.nfo",
-			path:   "media:/Archive/Dune/current.nfo",
-		},
-	} {
+	createOverlay := func(parent namespace.Node, name string, path string) {
+		t.Helper()
 		objectID := createObject(t, opened)
 		if _, err := repository.Update(context.Background(), namespace.Operation{
 			Name:  "overlay.create",
 			Actor: namespace.Actor{Kind: namespace.ActorSystem},
 			Details: namespace.OperationDetails{
-				Paths:     []string{overlay.path},
+				Paths:     []string{path},
 				NodeKinds: []namespace.NodeKind{namespace.OverlayFile},
 			},
 		}, func(transaction *namespace.Transaction) error {
@@ -608,8 +595,8 @@ func TestServiceUndoPreservesOverlayReportsItAndRejectsRepeat(t *testing.T) {
 				context.Background(),
 				objectID,
 				namespace.CreateOverlay{
-					ParentID: overlay.parent.ID,
-					Name:     overlay.name,
+					ParentID: parent.ID,
+					Name:     name,
 					Creator:  namespace.Actor{Kind: namespace.ActorSystem},
 					Attributes: namespace.Attributes{
 						Mode: libraryRecord.OverlayMode,
@@ -620,9 +607,31 @@ func TestServiceUndoPreservesOverlayReportsItAndRejectsRepeat(t *testing.T) {
 			)
 			return err
 		}); err != nil {
-			t.Fatalf("create OverlayFile %q: %v", overlay.path, err)
+			t.Fatalf("create OverlayFile %q: %v", path, err)
 		}
 	}
+	createOverlay(originalParent, "poster.jpg", "media:/Movies/Dune/poster.jpg")
+	createOverlay(movedParent, "intermediate.jpg", "media:/Archive/Dune/intermediate.jpg")
+
+	if _, err := projectionService.Move(
+		context.Background(),
+		projection.MoveRequest{
+			Target:    "media:/Archive/Dune/Dune.mkv",
+			NewTarget: "media:/Final/Dune/Dune.mkv",
+			Actor:     namespace.Actor{Kind: namespace.ActorSystem},
+		},
+	); err != nil {
+		t.Fatalf("Move Batch Projection again: %v", err)
+	}
+	currentParent, err := repository.Lookup(
+		context.Background(),
+		libraryRecord.RootNodeID,
+		"Final/Dune",
+	)
+	if err != nil {
+		t.Fatalf("Lookup current parent: %v", err)
+	}
+	createOverlay(currentParent, "current.nfo", "media:/Final/Dune/current.nfo")
 	alreadyRemoved, err := repository.Lookup(
 		context.Background(),
 		libraryRecord.RootNodeID,
@@ -663,7 +672,8 @@ func TestServiceUndoPreservesOverlayReportsItAndRejectsRepeat(t *testing.T) {
 			result.RetainedOverlayFiles,
 			[]string{
 				"media:/Movies/Dune/poster.jpg",
-				"media:/Archive/Dune/current.nfo",
+				"media:/Archive/Dune/intermediate.jpg",
+				"media:/Final/Dune/current.nfo",
 			},
 		) {
 		t.Errorf("undo result = %#v", result)
@@ -671,13 +681,14 @@ func TestServiceUndoPreservesOverlayReportsItAndRejectsRepeat(t *testing.T) {
 	if _, err := repository.Lookup(
 		context.Background(),
 		libraryRecord.RootNodeID,
-		"Archive/Dune/Dune.mkv",
+		"Final/Dune/Dune.mkv",
 	); !errors.Is(err, namespace.ErrNotFound) {
 		t.Fatalf("Lookup removed Projection error = %v, want ErrNotFound", err)
 	}
 	for _, path := range []string{
 		"Movies/Dune/poster.jpg",
-		"Archive/Dune/current.nfo",
+		"Archive/Dune/intermediate.jpg",
+		"Final/Dune/current.nfo",
 	} {
 		if _, err := repository.Lookup(
 			context.Background(),
@@ -696,9 +707,17 @@ func TestServiceUndoPreservesOverlayReportsItAndRejectsRepeat(t *testing.T) {
 		detail.Entries[0].Source.Path != firstSource {
 		t.Errorf("undone detail = %#v", detail)
 	}
-	if len(detail.Operations) != 3 ||
+	if len(detail.Operations) != 4 ||
 		detail.Operations[1].Name != "projection.move" ||
-		detail.Operations[2].Name != "projection.batch.undo" {
+		detail.Operations[2].Name != "projection.move" ||
+		detail.Operations[3].Name != "projection.batch.undo" ||
+		!reflect.DeepEqual(
+			detail.Operations[3].Details,
+			namespace.OperationDetails{
+				Paths:     []string{"media:/Final/Dune/Dune.mkv"},
+				NodeKinds: []namespace.NodeKind{namespace.ProjectionFile},
+			},
+		) {
 		t.Errorf("undone operations = %#v", detail.Operations)
 	}
 

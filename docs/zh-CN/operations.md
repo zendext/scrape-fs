@@ -230,7 +230,7 @@ object 错误使用确定性顺序；计数区分 LIVE、STAGING、无数据库�
 
 不带 `--confirm` 的 `projection rebind` 会安全打开候选源文件，并返回 `scrapefs.projection-rebind-result/v1`：status 为 `confirmation_required`，同时包含稳定 Projection 快照、完整的新旧缓存 source metadata，以及绑定 node ID、target、source path 和严格 identity 的 confirmation digest。使用 `--confirm <digest>` 重复执行时，daemon 会重新打开并重新校验 source，只应用与 preview 完全一致的变更，并返回 `applied`。Projection 或 source 已变化时返回 `ConfirmationMismatch`，不产生 mutation。成功 rebind 保留 node ID 和虚拟 target，更新 source metadata 与虚拟 ctime，写一条 audit 记录，但不增加 namespace version。
 
-Remove 和 rebind 只适用于 `origin_scrape_id` 为空的 direct Projection。Batch-owned Projection 对这两个命令返回 `BatchOwnedProjection`，但可以在同一 Library 内 move。Batch show 保留原始 apply-time entry 并展示关联的 move operation；Batch undo 按 Projection 的当前路径删除节点。
+Remove 和 rebind 只适用于 `origin_scrape_id` 为空的 direct Projection。Batch-owned Projection 对这两个命令返回 `BatchOwnedProjection`，但可以在同一 Library 内 move。Batch show 保留原始 apply-time entry 并展示关联的 move operation；Batch undo 按 Projection 的当前路径删除节点、记录该实际删除路径，并清理 move history 沿途留下的空 managed Directory。
 
 所有 Projection 命令均要求管理员或控制用户授权。目标不存在返回 `ProjectionNotFound`；rebind 的不安全、缺失、无权限或非普通源文件沿用 `projection add` 的稳定 source error code。
 

@@ -71,7 +71,7 @@ func TestMoveBatchOwnedProjectionPreservesProvenanceAndUndo(t *testing.T) {
 	}
 	moved, err := projectionService.Move(ctx, projection.MoveRequest{
 		Target:    "media:/Moved/New/Dune.mkv",
-		NewTarget: "media:/Moved/New/Renamed.mkv",
+		NewTarget: "media:/Final/New/Renamed.mkv",
 		Actor:     namespace.Actor{Kind: namespace.ActorSystem},
 	})
 	if err != nil {
@@ -97,7 +97,7 @@ func TestMoveBatchOwnedProjectionPreservesProvenanceAndUndo(t *testing.T) {
 	if current, err := repository.Lookup(
 		ctx,
 		libraryRecord.RootNodeID,
-		"Moved/New/Renamed.mkv",
+		"Final/New/Renamed.mkv",
 	); err != nil || current.ID != before.ID {
 		t.Errorf("moved target = %#v/%v, want node %d", current, err, before.ID)
 	}
@@ -129,7 +129,7 @@ func TestMoveBatchOwnedProjectionPreservesProvenanceAndUndo(t *testing.T) {
 			afterDetail.Operations[2].Details.Paths,
 			[]string{
 				"media:/Moved/New/Dune.mkv",
-				"media:/Moved/New/Renamed.mkv",
+				"media:/Final/New/Renamed.mkv",
 			},
 		) {
 		t.Errorf("Batch detail after move = %#v", afterDetail)
@@ -152,16 +152,22 @@ func TestMoveBatchOwnedProjectionPreservesProvenanceAndUndo(t *testing.T) {
 	if _, err := repository.Lookup(
 		ctx,
 		libraryRecord.RootNodeID,
-		"Moved/New/Renamed.mkv",
+		"Final/New/Renamed.mkv",
 	); !errors.Is(err, namespace.ErrNotFound) {
 		t.Errorf("moved Projection after Undo error = %v, want ErrNotFound", err)
 	}
-	if _, err := repository.Lookup(
-		ctx,
-		libraryRecord.RootNodeID,
-		"Moved",
-	); !errors.Is(err, namespace.ErrNotFound) {
-		t.Errorf("moved managed directory after Undo error = %v, want ErrNotFound", err)
+	for _, path := range []string{"Managed", "Moved", "Final"} {
+		if _, err := repository.Lookup(
+			ctx,
+			libraryRecord.RootNodeID,
+			path,
+		); !errors.Is(err, namespace.ErrNotFound) {
+			t.Errorf(
+				"managed directory %q after Undo error = %v, want ErrNotFound",
+				path,
+				err,
+			)
+		}
 	}
 	undoneDetail, err := batchService.Show(ctx, applied.BatchID)
 	if err != nil {
