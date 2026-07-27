@@ -1,6 +1,6 @@
 ---
 name: organize-scrapefs-media
-description: Inspect local movie and standard SxxEyy episode sources, exclude samples, read NFO metadata, probe media with ffprobe, generate deterministic Plex or Jellyfin ScrapeFS Projection Batches, obtain exact digest confirmation, apply or undo batches, and create NFO or artwork OverlayFiles through FUSE. Use when organizing local media into an existing ScrapeFS Library or diagnosing a media source that the v1 workflow may require manual handling.
+description: Inspect local movie and standard SxxEyy episode sources, exclude samples, read NFO metadata, probe media with ffprobe, generate deterministic Plex or Jellyfin ScrapeFS Projection Batches, obtain explicit approval of reviewed batches, apply or undo batches with digest consistency checks, and create NFO or artwork OverlayFiles through FUSE. Use when organizing local media into an existing ScrapeFS Library or diagnosing a media source that the v1 workflow may require manual handling.
 ---
 
 # Organize ScrapeFS Media
@@ -84,38 +84,42 @@ python3 "$TOOL" validate --batch /tmp/media.batch.json
 Present the complete validation JSON, including every entry, warning,
 `namespace_version`, and `digest`.
 
-Stop and ask the user to confirm the exact digest string. Require the user's
-response to contain the complete `sha256:<64 lowercase hex>` value returned by
-validate. Do not treat `yes`, `looks good`, an inferred intent, or a digest
-copied by the Agent into its own message as confirmation.
+Stop and ask the user to explicitly approve or reject the reviewed batch in
+natural language. Require an unambiguous apply instruction after presenting the
+validation; do not infer approval from the initial request, planning decisions,
+silence, or unrelated replies. The user does not need to transcribe the digest.
+Retain the exact digest returned by validation as an internal consistency token.
 
 `plan` and `validate` never apply, including in non-TTY use. The tool contains no
 combined plan/validate/apply command and never prompts.
 
 ## Apply
 
-Only after the user returns the exact digest, pass that value unchanged:
+Only after the user explicitly approves the reviewed validation, pass the
+retained digest unchanged:
 
 ```bash
+VALIDATED_DIGEST=sha256:<digest-from-approved-validation>
 python3 "$TOOL" apply \
   --batch /tmp/media.batch.json \
-  --confirm-digest sha256:<exact-user-confirmed-digest>
+  --confirm-digest "$VALIDATED_DIGEST"
 ```
 
 The apply command:
 
 1. runs a fresh `projection batch validate`;
-2. compares its digest byte-for-byte with `--confirm-digest`;
+2. compares its digest byte-for-byte with the retained approved digest;
 3. stops before apply if they differ;
 4. calls `projection batch apply` with that exact expected digest;
 5. returns both fresh validation and apply result JSON.
 
 Never retry a mismatch or CLI failure automatically. Present the new validation
-or stable daemon error and return to the validation step.
+or stable daemon error and return to the validation step. Replace the retained
+digest only after the user reviews and explicitly approves the new validation.
 
 ## Create Artifacts
 
-The digest confirms only the Projection Batch. Present the artifact manifest
+Batch approval covers only the Projection Batch. Present the artifact manifest
 separately before writing it.
 
 After a successful apply, create NFO and selected poster files through the
