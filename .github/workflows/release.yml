@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish linux/amd64 release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify repository
+        run: |
+          go test ./...
+          go test -race ./...
+          go vet ./...
+          test -z "$(gofmt -l .)"
+          sh -n \
+            scripts/install.sh \
+            scripts/package-release.sh \
+            scripts/release-version.sh
+          systemd-analyze verify packaging/systemd/scrapefsd.service
+          python3 -m unittest discover \
+            -s scripts/tests \
+            -p 'test_*.py'
+          python3 -m unittest discover \
+            -s skills/organize-scrapefs-media/tests \
+            -p 'test_*.py'
+
+      - name: Package release
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: ./scripts/package-release.sh "$VERSION" dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_kind=$(
+            ./scripts/release-version.sh "$GITHUB_REF_NAME"
+          )
+          case "$release_kind" in
+            prerelease)
+              set -- --prerelease --latest=false
+              ;;
+            stable)
+              set --
+              ;;
+            *)
+              printf 'unexpected release kind: %s\n' "$release_kind" >&2
+              exit 1
+              ;;
+          esac
+
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tar.gz \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME" \
+            "$@"

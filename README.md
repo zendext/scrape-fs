@@ -104,21 +104,21 @@ It does not target an embedded model provider, daemon-side Agent sessions, torre
 
 ## Installation
 
-ScrapeFS can currently be built from source and installed with the repository
-script, which initializes the standard paths, permissions, configuration, and
-systemd unit:
+The preferred path is to download the `linux/amd64` archive and `SHA256SUMS`
+from [GitHub Releases](https://github.com/zendext/scrape-fs/releases):
 
 ```bash
-mkdir -p build
-go build -trimpath -o build/scrapefs ./cmd/scrapefs
-go build -trimpath -o build/scrapefsd ./cmd/scrapefsd
+version=vX.Y.Z
+archive="scrape-fs_${version}_linux_amd64.tar.gz"
 
-sudo ./scripts/install.sh \
-  --administrator "$USER" \
-  --binary-dir ./build
+sha256sum -c SHA256SUMS
+tar -xzf "$archive"
+cd "${archive%.tar.gz}"
+sudo ./install.sh --administrator "$USER"
 ```
 
-The script preserves an existing configuration and does not start the service
+Manual source builds remain supported. Both paths use the same installer,
+which preserves an existing configuration and does not start the service
 automatically. See the [deployment guide](docs/en/deployment.md) for the full
 procedure.
 
@@ -146,7 +146,10 @@ go test ./...
 go test -race ./...
 go vet ./...
 test -z "$(gofmt -l .)"
-sh -n scripts/install.sh
+sh -n \
+  scripts/install.sh \
+  scripts/package-release.sh \
+  scripts/release-version.sh
 systemd-analyze verify packaging/systemd/scrapefsd.service
 python3 -m unittest discover \
   -s scripts/tests \

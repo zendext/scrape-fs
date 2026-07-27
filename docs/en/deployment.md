@@ -2,19 +2,20 @@
 
 **English** | [简体中文](../zh-CN/deployment.md)
 
-This guide explains how to build ScrapeFS from source, initialize the standard
-host paths and permissions, and run the daemon through systemd. See
-[Operations and CLI](operations.md) for the complete configuration and runtime
-contract.
+This guide explains how to install ScrapeFS from a GitHub Release or source,
+initialize the standard host paths and permissions, and run the daemon through
+systemd. See [Operations and CLI](operations.md) for the complete
+configuration and runtime contract.
 
 ## 1. Prerequisites
 
 - Linux and systemd;
 - `/dev/fuse`;
 - `findmnt` from util-linux;
-- Go 1.25 or newer;
 - root access for installing files, creating groups, and mounting FUSE;
 - an existing ordinary user who will administer ScrapeFS.
+
+Building manually from source also requires Go 1.25 or newer.
 
 The installer uses the fixed first-version paths:
 
@@ -27,7 +28,31 @@ mountpoint:   /mnt/scrapefs
 service:      /etc/systemd/system/scrapefsd.service
 ```
 
-## 2. Build From Source
+## 2. Install From GitHub Releases
+
+Each versioned tag publishes a `linux/amd64` archive and `SHA256SUMS`. Download
+both files for the same version from
+[GitHub Releases](https://github.com/zendext/scrape-fs/releases), then verify,
+extract, and run the bundled installer:
+
+```bash
+version=vX.Y.Z
+archive="scrape-fs_${version}_linux_amd64.tar.gz"
+
+sha256sum -c SHA256SUMS
+tar -xzf "$archive"
+cd "${archive%.tar.gz}"
+
+sudo ./install.sh --administrator "$USER"
+```
+
+The bundled `scrapefs` and `scrapefsd` report the corresponding tag version.
+The installer, both binaries, and the generic systemd unit are colocated, so
+this path does not require a repository checkout or Go toolchain.
+Versions whose tags contain `-` are published as GitHub prereleases and are
+explicitly excluded from Latest.
+
+## 3. Build From Source
 
 Build both commands from the repository root:
 
@@ -40,15 +65,16 @@ go build -trimpath -o build/scrapefsd ./cmd/scrapefsd
 
 Manually built binaries report the default `dev` version.
 
-## 3. Initialize The Host
-
-Specify an existing administrator and the binary directory:
+Specify an existing administrator and pass the build directory to the
+repository installer:
 
 ```bash
 sudo ./scripts/install.sh \
   --administrator "$USER" \
   --binary-dir ./build
 ```
+
+## 4. Installer Behavior
 
 The script:
 
@@ -75,7 +101,7 @@ The installer supports standard `DESTDIR` staging. Staging creates only the
 file layout and does not modify users, groups, or systemd state; it is intended
 primarily for packaging and automated verification.
 
-## 4. Review The Configuration
+## 5. Review The Configuration
 
 Before the first start, inspect:
 
@@ -88,7 +114,7 @@ The default configuration uses `/mnt/scrapefs`, `/var/lib/scrapefs`, and
 store, mountpoint, and socket remain pairwise disjoint lexically normalized
 absolute paths.
 
-## 5. Start The Service
+## 6. Start The Service
 
 After reviewing the configuration, enable and start the service:
 
@@ -106,7 +132,7 @@ host-visible FUSE mount requires root or effective `CAP_SYS_ADMIN`. Only
 trusted users belong in `scrapefs-control`; those users can select source paths
 that the daemon opens.
 
-## 6. Verify
+## 7. Verify
 
 Check systemd, FUSE, and the ScrapeFS diagnostics:
 
@@ -131,15 +157,19 @@ scrapefs library add jellyfin --profile jellyfin@1
 scrapefs library list
 ```
 
-## 7. Update
+## 8. Update
 
-After rebuilding or obtaining new binaries, run the installer again. Existing
-configuration is preserved while project-managed binaries and the generic
-unit are updated:
+Download and extract a new Release or rebuild from source. Stop the service and
+run the corresponding installer again; existing configuration is preserved
+while project-managed binaries and the generic unit are updated:
 
 ```bash
 sudo systemctl stop scrapefsd.service
 
+# From an extracted Release:
+sudo ./install.sh --administrator "$USER"
+
+# Or from the source repository:
 sudo ./scripts/install.sh \
   --administrator "$USER" \
   --binary-dir ./build
