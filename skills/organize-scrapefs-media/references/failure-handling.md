@@ -47,3 +47,16 @@ Artifact creation is intentionally separate from Projection Batch apply:
 A partial artifact failure does not roll back or invalidate the applied batch.
 Batch undo retains all OverlayFiles, so report retained paths from the undo
 result and let the user remove them through ordinary FUSE operations if needed.
+
+## Replacement Cleanup
+
+For an approved replacement or migration, remove only artifact paths listed in
+the reviewed superseded manifest, then undo the explicitly identified old batch
+after the replacement artifacts and downstream smoke test succeed. This cleanup
+does not need another prompt.
+
+Run `scrapefs gc` after unlinking old OverlayFiles. Unreferenced objects retained
+inside the configured orphan grace period are expected deferred reclamation, not
+a cleanup failure. Do not shorten or bypass the grace period. Any unexpected
+path, missing reviewed artifact, undo failure, GC error, or still-referenced old
+namespace entry stops automatic cleanup and must be reported.

@@ -73,6 +73,16 @@ class ScrapeFSMediaTests(unittest.TestCase):
         self.assertIn("retained from the user-approved validation", help_text)
         self.assertNotIn("explicitly confirmed by the user", help_text)
 
+    def test_verified_replacement_cleanup_needs_no_second_confirmation(self):
+        skill = SKILL_DOCUMENT.read_text(encoding="utf-8")
+        failure_handling = (
+            SKILL_DOCUMENT.parent / "references" / "failure-handling.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("without a second confirmation", skill)
+        self.assertIn("Standalone undo still requires", skill)
+        self.assertIn("orphan grace period", failure_handling)
+
     def copy_fixture(self, name):
         destination = self.root / name
         shutil.copytree(FIXTURES / name, destination)

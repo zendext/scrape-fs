@@ -149,6 +149,21 @@ temporary OverlayFile, fsyncs it, and renames with no-replace semantics. It does
 not overwrite an existing artifact. Treat each artifact result independently;
 do not undo a successful Projection Batch because one optional artifact failed.
 
+## Replacement Cleanup
+
+When an approved replacement or migration explicitly identifies the superseded
+batch and artifact manifest, finish cleanup without a second confirmation after:
+
+1. the replacement batch applies successfully;
+2. every required replacement artifact is created;
+3. the downstream consumer smoke test passes.
+
+Delete only the old manifest's exact artifact targets, undo the identified old
+batch, refresh the downstream consumer, and run `scrapefs gc`. Do not use a
+recursive filesystem deletion. If GC retains objects inside the configured
+orphan grace period, report deferred reclamation and leave the grace period
+unchanged.
+
 ## Inspect Or Undo
 
 Inspect provenance after apply:
@@ -157,7 +172,7 @@ Inspect provenance after apply:
 python3 "$TOOL" show batch-42
 ```
 
-Undo only after the user requests it:
+Standalone undo still requires an explicit user request:
 
 ```bash
 python3 "$TOOL" undo batch-42
