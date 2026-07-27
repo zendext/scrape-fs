@@ -16,8 +16,170 @@ import (
 	"github.com/zendext/scrape-fs/internal/projectionbatch"
 )
 
-func TestDirectLifecycleRejectsBatchOwnedProjection(t *testing.T) {
-	for _, operation := range []string{"move", "remove", "rebind"} {
+func TestMoveBatchOwnedProjectionPreservesProvenanceAndUndo(t *testing.T) {
+	ctx := context.Background()
+	opened := openBatchOwnershipDatabase(t)
+	repository := namespace.NewRepository(opened)
+	libraryRecord := createBatchOwnershipLibrary(t, repository)
+	sourcePath := filepath.Join(t.TempDir(), "Dune.mkv")
+	sourceContent := []byte("batch source")
+	if err := os.WriteFile(sourcePath, sourceContent, 0o600); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	batchService := projectionbatch.NewService(repository)
+	data := batchOwnershipJSON(t, sourcePath, "Managed/Leaf/Dune.mkv")
+	validation, err := batchService.Validate(ctx, data)
+	if err != nil {
+		t.Fatalf("Validate Batch: %v", err)
+	}
+	applied, err := batchService.Apply(ctx, projectionbatch.ApplyRequest{
+		Data:           data,
+		ExpectedDigest: validation.Digest,
+		Actor:          namespace.Actor{Kind: namespace.ActorSystem},
+		Caller:         projectionbatch.Caller{UID: 1000, GID: 1001},
+	})
+	if err != nil {
+		t.Fatalf("Apply Batch: %v", err)
+	}
+	before, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Managed/Leaf/Dune.mkv",
+	)
+	if err != nil {
+		t.Fatalf("Lookup Batch Projection: %v", err)
+	}
+	if before.OriginScrapeID == nil {
+		t.Fatal("Batch Projection OriginScrapeID = nil")
+	}
+	beforeDetail, err := batchService.Show(ctx, applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch before move: %v", err)
+	}
+	beforeEntries, err := repository.ProjectionBatchEntries(ctx, *before.OriginScrapeID)
+	if err != nil {
+		t.Fatalf("ProjectionBatchEntries before move: %v", err)
+	}
+
+	projectionService := projection.NewService(repository)
+	if _, err := projectionService.Move(ctx, projection.MoveRequest{
+		Target:    "media:/Managed/Leaf/Dune.mkv",
+		NewTarget: "media:/Moved/New/Dune.mkv",
+		Actor:     namespace.Actor{Kind: namespace.ActorSystem},
+	}); err != nil {
+		t.Fatalf("Move Batch-owned Projection: %v", err)
+	}
+	moved, err := projectionService.Move(ctx, projection.MoveRequest{
+		Target:    "media:/Moved/New/Dune.mkv",
+		NewTarget: "media:/Moved/New/Renamed.mkv",
+		Actor:     namespace.Actor{Kind: namespace.ActorSystem},
+	})
+	if err != nil {
+		t.Fatalf("Move Batch-owned Projection again: %v", err)
+	}
+	if moved.Node.ID != before.ID ||
+		moved.Node.OriginScrapeID == nil ||
+		*moved.Node.OriginScrapeID != *before.OriginScrapeID ||
+		moved.Node.Creator != before.Creator ||
+		moved.Node.Attributes != before.Attributes ||
+		moved.Node.Source == nil ||
+		before.Source == nil ||
+		*moved.Node.Source != *before.Source {
+		t.Errorf("moved Batch Projection = %#v, want provenance from %#v", moved.Node, before)
+	}
+	if _, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Managed/Leaf/Dune.mkv",
+	); !errors.Is(err, namespace.ErrNotFound) {
+		t.Errorf("old target error = %v, want ErrNotFound", err)
+	}
+	if current, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Moved/New/Renamed.mkv",
+	); err != nil || current.ID != before.ID {
+		t.Errorf("moved target = %#v/%v, want node %d", current, err, before.ID)
+	}
+	afterEntries, err := repository.ProjectionBatchEntries(ctx, *before.OriginScrapeID)
+	if err != nil {
+		t.Fatalf("ProjectionBatchEntries after move: %v", err)
+	}
+	if !reflect.DeepEqual(afterEntries, beforeEntries) {
+		t.Errorf("Batch entries changed: before=%#v after=%#v", beforeEntries, afterEntries)
+	}
+	afterDetail, err := batchService.Show(ctx, applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch after move: %v", err)
+	}
+	if afterDetail.Batch != beforeDetail.Batch ||
+		len(afterDetail.Entries) != 1 ||
+		afterDetail.Entries[0].Target != "media:/Managed/Leaf/Dune.mkv" ||
+		len(afterDetail.Operations) != 3 ||
+		afterDetail.Operations[1].Name != "projection.move" ||
+		!reflect.DeepEqual(
+			afterDetail.Operations[1].Details.Paths,
+			[]string{
+				"media:/Managed/Leaf/Dune.mkv",
+				"media:/Moved/New/Dune.mkv",
+			},
+		) ||
+		afterDetail.Operations[2].Name != "projection.move" ||
+		!reflect.DeepEqual(
+			afterDetail.Operations[2].Details.Paths,
+			[]string{
+				"media:/Moved/New/Dune.mkv",
+				"media:/Moved/New/Renamed.mkv",
+			},
+		) {
+		t.Errorf("Batch detail after move = %#v", afterDetail)
+	}
+	if got, err := os.ReadFile(sourcePath); err != nil || string(got) != string(sourceContent) {
+		t.Errorf("source after move = %q/%v", got, err)
+	}
+
+	undone, err := batchService.Undo(ctx, projectionbatch.UndoRequest{
+		BatchID: applied.BatchID,
+		Actor:   namespace.Actor{Kind: namespace.ActorSystem},
+		Caller:  projectionbatch.Caller{UID: 1000, GID: 1001},
+	})
+	if err != nil {
+		t.Fatalf("Undo Batch after move: %v", err)
+	}
+	if undone.Status != string(namespace.ProjectionBatchUndone) {
+		t.Errorf("Undo status = %q, want undone", undone.Status)
+	}
+	if _, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Moved/New/Renamed.mkv",
+	); !errors.Is(err, namespace.ErrNotFound) {
+		t.Errorf("moved Projection after Undo error = %v, want ErrNotFound", err)
+	}
+	if _, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Moved",
+	); !errors.Is(err, namespace.ErrNotFound) {
+		t.Errorf("moved managed directory after Undo error = %v, want ErrNotFound", err)
+	}
+	undoneDetail, err := batchService.Show(ctx, applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch after Undo: %v", err)
+	}
+	if undoneDetail.Batch.Status != string(namespace.ProjectionBatchUndone) ||
+		len(undoneDetail.Entries) != 1 ||
+		undoneDetail.Entries[0].ProjectionNodeID != nil ||
+		len(undoneDetail.Operations) != 4 ||
+		undoneDetail.Operations[1].Name != "projection.move" ||
+		undoneDetail.Operations[2].Name != "projection.move" ||
+		undoneDetail.Operations[3].Name != "projection.batch.undo" {
+		t.Errorf("Batch detail after Undo = %#v", undoneDetail)
+	}
+}
+
+func TestDirectRemoveAndRebindRejectBatchOwnedProjection(t *testing.T) {
+	for _, operation := range []string{"remove", "rebind"} {
 		t.Run(operation, func(t *testing.T) {
 			ctx := context.Background()
 			opened := openBatchOwnershipDatabase(t)
@@ -74,12 +236,6 @@ func TestDirectLifecycleRejectsBatchOwnedProjection(t *testing.T) {
 			}
 			service := projection.NewService(repository)
 			switch operation {
-			case "move":
-				_, err = service.Move(ctx, projection.MoveRequest{
-					Target:    "media:/Managed/Leaf/Dune.mkv",
-					NewTarget: "media:/Moved/New/Dune.mkv",
-					Actor:     namespace.Actor{Kind: namespace.ActorSystem},
-				})
 			case "remove":
 				_, err = service.Remove(ctx, projection.RemoveRequest{
 					Target: "media:/Managed/Leaf/Dune.mkv",
@@ -109,15 +265,6 @@ func TestDirectLifecycleRejectsBatchOwnedProjection(t *testing.T) {
 				},
 			}, func(transaction *namespace.Transaction) error {
 				switch operation {
-				case "move":
-					_, err := transaction.MoveProjection(ctx, namespace.MoveProjectionNode{
-						OldParentID: *node.ParentID,
-						OldName:     node.Name,
-						NewParentID: libraryRecord.RootNodeID,
-						NewName:     "direct-moved.mkv",
-						ExpectedID:  node.ID,
-					})
-					return err
 				case "remove":
 					_, err := transaction.RemoveProjection(ctx, namespace.RemoveProjectionNode{
 						ParentID:   *node.ParentID,
@@ -171,15 +318,6 @@ func TestDirectLifecycleRejectsBatchOwnedProjection(t *testing.T) {
 			for _, path := range []string{"Managed", "Managed/Leaf"} {
 				if _, err := repository.Lookup(ctx, libraryRecord.RootNodeID, path); err != nil {
 					t.Errorf("managed directory %q after rejected lifecycle: %v", path, err)
-				}
-			}
-			for _, path := range []string{"Moved", "direct-moved.mkv"} {
-				if _, err := repository.Lookup(
-					ctx,
-					libraryRecord.RootNodeID,
-					path,
-				); !errors.Is(err, namespace.ErrNotFound) {
-					t.Errorf("unexpected target %q error = %v, want ErrNotFound", path, err)
 				}
 			}
 			afterEntries, err := repository.ProjectionBatchEntries(ctx, *node.OriginScrapeID)

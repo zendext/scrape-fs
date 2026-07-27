@@ -1592,9 +1592,6 @@ func (transaction *Transaction) MoveProjection(
 	if source.Kind != ProjectionFile {
 		return Node{}, ErrReadOnly
 	}
-	if source.OriginScrapeID != nil {
-		return Node{}, ErrBatchOwnedProjection
-	}
 	if request.OldParentID == request.NewParentID && request.OldName == request.NewName {
 		return source, nil
 	}
@@ -1640,6 +1637,14 @@ func (transaction *Transaction) MoveProjection(
 	}
 	if updated != 1 {
 		return Node{}, ErrNotFound
+	}
+	if source.OriginScrapeID != nil {
+		if err := transaction.AssociateOperationWithProjectionBatch(
+			ctx,
+			*source.OriginScrapeID,
+		); err != nil {
+			return Node{}, err
+		}
 	}
 	if err := transaction.touchDirectory(ctx, oldParent.ID, now); err != nil {
 		return Node{}, err
@@ -2082,8 +2087,9 @@ func (transaction *Transaction) AssociateOperationWithProjectionBatch(
 func (transaction *Transaction) RemoveProjectionBatchProjections(
 	ctx context.Context,
 	batchID int64,
-) ([]int64, error) {
+) ([]int64, []string, error) {
 	var parentIDs []int64
+	var targets []string
 	var cursorID int64
 	for {
 		node, err := queryNode(ctx, transaction.transaction, `
@@ -2094,14 +2100,22 @@ func (transaction *Transaction) RemoveProjectionBatchProjections(
 			LIMIT 1
 		`, batchID, cursorID)
 		if errors.Is(err, ErrNotFound) {
-			return parentIDs, nil
+			return parentIDs, targets, nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("list Projection Batch nodes: %w", err)
+			return nil, nil, fmt.Errorf("list Projection Batch nodes: %w", err)
 		}
 		cursorID = node.ID
 		if node.ParentID == nil {
-			return nil, fmt.Errorf("%w: ProjectionFile has no parent", ErrInvalidNode)
+			return nil, nil, fmt.Errorf("%w: ProjectionFile has no parent", ErrInvalidNode)
+		}
+		_, target, err := nodePathToLibraryRoot(
+			ctx,
+			transaction.transaction,
+			node.ID,
+		)
+		if err != nil {
+			return nil, nil, err
 		}
 
 		result, err := transaction.transaction.ExecContext(ctx, `
@@ -2111,14 +2125,14 @@ func (transaction *Transaction) RemoveProjectionBatchProjections(
 			  AND origin_scrape_id = ?
 		`, node.ID, batchID)
 		if err != nil {
-			return nil, classifyMutationError("remove Projection Batch node", err)
+			return nil, nil, classifyMutationError("remove Projection Batch node", err)
 		}
 		deleted, err := result.RowsAffected()
 		if err != nil {
-			return nil, fmt.Errorf("read removed Projection count: %w", err)
+			return nil, nil, fmt.Errorf("read removed Projection count: %w", err)
 		}
 		if deleted != 1 {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"%w: Projection Batch node %d disappeared during transaction",
 				ErrInvalidNode,
 				node.ID,
@@ -2126,10 +2140,11 @@ func (transaction *Transaction) RemoveProjectionBatchProjections(
 		}
 		now := transaction.now().UTC().UnixNano()
 		if err := transaction.touchDirectory(ctx, *node.ParentID, now); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		transaction.changed = true
 		parentIDs = append(parentIDs, *node.ParentID)
+		targets = append(targets, target)
 	}
 }
 

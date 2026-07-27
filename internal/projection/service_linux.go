@@ -214,6 +214,14 @@ func (service *Service) Remove(
 	if err != nil {
 		return namespace.Projection{}, err
 	}
+	if source.OriginScrapeID != nil {
+		return namespace.Projection{}, fmt.Errorf(
+			"%w: %s:/%s",
+			ErrBatchOwnedProjection,
+			libraryName,
+			relativePath,
+		)
+	}
 
 	var removed namespace.Node
 	_, err = service.repository.Update(ctx, namespace.Operation{
@@ -279,6 +287,14 @@ func (service *Service) Rebind(
 	library, current, err := service.projectionAt(ctx, libraryName, relativePath)
 	if err != nil {
 		return RebindResult{}, err
+	}
+	if current.OriginScrapeID != nil {
+		return RebindResult{}, fmt.Errorf(
+			"%w: %s:/%s",
+			ErrBatchOwnedProjection,
+			libraryName,
+			relativePath,
+		)
 	}
 	proposed, err := service.projectionSource(request.SourcePath)
 	if err != nil {
@@ -544,14 +560,6 @@ func (service *Service) projectionAt(
 		return namespace.Library{}, namespace.Node{}, fmt.Errorf(
 			"%w: %s:/%s",
 			ErrProjectionNotFound,
-			libraryName,
-			relativePath,
-		)
-	}
-	if node.OriginScrapeID != nil {
-		return namespace.Library{}, namespace.Node{}, fmt.Errorf(
-			"%w: %s:/%s",
-			ErrBatchOwnedProjection,
 			libraryName,
 			relativePath,
 		)

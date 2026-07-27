@@ -411,7 +411,10 @@ func (service *Service) Undo(
 			return err
 		}
 
-		parentIDs, err := transaction.RemoveProjectionBatchProjections(ctx, id)
+		parentIDs, currentTargets, err := transaction.RemoveProjectionBatchProjections(
+			ctx,
+			id,
+		)
 		if err != nil {
 			return err
 		}
@@ -432,7 +435,7 @@ func (service *Service) Undo(
 		retained, err = transaction.RetainedOverlayPaths(
 			ctx,
 			current.LibraryRootID,
-			targets,
+			append(targets, currentTargets...),
 		)
 		if err != nil {
 			return err
