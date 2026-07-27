@@ -63,11 +63,13 @@ The script:
 
 The script does not start or enable the service and does not overwrite an
 existing configuration. If the mountpoint is mounted, the script fails before
-modifying any installation target; stop a running service before updating it.
-A new supplementary-group membership normally requires the administrator to
-log in again before new processes inherit it. The user named by
-`control.administrator_uid` still receives administrator access through the
-control-socket ACL.
+modifying any installation target. Existing configuration, state, and
+mountpoint paths must be real directories; symbolic links and other file types
+are also rejected before any modification. Stop a running service before
+updating it. A new supplementary-group membership normally requires the
+administrator to log in again before new processes inherit it. The user named
+by `control.administrator_uid` still receives administrator access through
+the control-socket ACL.
 
 The installer supports standard `DESTDIR` staging. Staging creates only the
 file layout and does not modify users, groups, or systemd state; it is intended

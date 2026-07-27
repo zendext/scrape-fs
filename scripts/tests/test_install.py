@@ -29,10 +29,13 @@ class InstallScriptTests(unittest.TestCase):
         self,
         *arguments,
         check=True,
+        destination_root=None,
         environment_overrides=None,
     ):
         environment = os.environ.copy()
-        environment["DESTDIR"] = str(self.root / "staged")
+        environment["DESTDIR"] = str(
+            destination_root or self.root / "staged"
+        )
         if environment_overrides:
             environment.update(environment_overrides)
         result = subprocess.run(
@@ -198,6 +201,68 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("mountpoint is currently mounted", result.stderr)
         self.assertFalse((self.root / "staged").exists())
+
+    def test_rejects_managed_directory_symlinks_without_touching_targets(self):
+        for managed_path in (
+            "etc/scrapefs",
+            "var/lib/scrapefs",
+            "mnt/scrapefs",
+        ):
+            with self.subTest(path=managed_path):
+                case = self.root / managed_path.replace("/", "-")
+                staged = case / "staged"
+                target = case / "target"
+                target.mkdir(parents=True)
+                target.chmod(0o750)
+                managed = staged / managed_path
+                managed.parent.mkdir(parents=True)
+                managed.symlink_to(target, target_is_directory=True)
+
+                result = self.run_installer(
+                    check=False,
+                    destination_root=staged,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "managed directory is a symbolic link",
+                    result.stderr,
+                )
+                self.assert_mode(target, 0o750)
+                self.assertEqual(list(target.iterdir()), [])
+                self.assertFalse(
+                    (staged / "usr/local/bin/scrapefs").exists()
+                )
+
+    def test_rejects_managed_paths_that_are_not_directories(self):
+        for managed_path in (
+            "etc/scrapefs",
+            "var/lib/scrapefs",
+            "mnt/scrapefs",
+        ):
+            with self.subTest(path=managed_path):
+                case = self.root / ("file-" + managed_path.replace("/", "-"))
+                staged = case / "staged"
+                managed = staged / managed_path
+                managed.parent.mkdir(parents=True)
+                managed.write_text("preserve this file\n", encoding="utf-8")
+                managed.chmod(0o640)
+
+                result = self.run_installer(
+                    check=False,
+                    destination_root=staged,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("managed path is not a directory", result.stderr)
+                self.assertEqual(
+                    managed.read_text(encoding="utf-8"),
+                    "preserve this file\n",
+                )
+                self.assert_mode(managed, 0o640)
+                self.assertFalse(
+                    (staged / "usr/local/bin/scrapefs").exists()
+                )
 
     def test_rejects_missing_binary_before_creating_installation(self):
         (self.binary_directory / "scrapefsd").unlink()

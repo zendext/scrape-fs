@@ -61,9 +61,10 @@ sudo ./scripts/install.sh \
 - 执行 `systemctl daemon-reload`。
 
 脚本不启动或启用服务，也不覆盖已有配置。mountpoint 已挂载时，脚本会在修改任何
-安装目标前失败；更新运行中的实例时必须先停止服务。新增 supplementary group
-成员关系通常需要管理员重新登录才能出现在新进程中；`control.administrator_uid`
-指定的用户仍通过控制 socket ACL 获得管理员访问。
+安装目标前失败；配置目录、状态目录和 mountpoint 已存在时必须是真实目录，符号
+链接和其他文件类型也会在任何修改前被拒绝。更新运行中的实例时必须先停止服务。
+新增 supplementary group 成员关系通常需要管理员重新登录才能出现在新进程中；
+`control.administrator_uid` 指定的用户仍通过控制 socket ACL 获得管理员访问。
 
 安装脚本支持标准 `DESTDIR` 暂存模式。该模式只创建文件布局，不修改用户、组或
 systemd 状态，主要用于打包和自动化验证。

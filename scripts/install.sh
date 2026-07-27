@@ -105,6 +105,26 @@ mountpoint=$(install_path /mnt/scrapefs)
 unit_directory=$(install_path /etc/systemd/system)
 unit_path=$unit_directory/scrapefsd.service
 
+validate_managed_directory() {
+    managed_directory=$1
+    if [ -L "$managed_directory" ]; then
+        fail "managed directory is a symbolic link: $managed_directory"
+    fi
+    if [ -e "$managed_directory" ] &&
+        [ ! -d "$managed_directory" ]
+    then
+        fail "managed path is not a directory: $managed_directory"
+    fi
+}
+
+for managed_directory in \
+    "$configuration_directory" \
+    "$state_directory" \
+    "$mountpoint"
+do
+    validate_managed_directory "$managed_directory"
+done
+
 if findmnt -rn -M "$mountpoint" >/dev/null 2>&1; then
     fail "mountpoint is currently mounted: $mountpoint; stop scrapefsd.service before installing"
 fi
