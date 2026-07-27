@@ -103,21 +103,21 @@ python3 "$SKILL_DIR/scripts/scrapefs_media.py" validate \
 
 ## 安装
 
-当前可以从源码构建，并通过仓库安装脚本初始化标准目录、权限、配置和 systemd
-unit：
+推荐从 [GitHub Releases](https://github.com/zendext/scrape-fs/releases) 下载
+`linux/amd64` 归档和 `SHA256SUMS`：
 
 ```bash
-mkdir -p build
-go build -trimpath -o build/scrapefs ./cmd/scrapefs
-go build -trimpath -o build/scrapefsd ./cmd/scrapefsd
+version=vX.Y.Z
+archive="scrape-fs_${version}_linux_amd64.tar.gz"
 
-sudo ./scripts/install.sh \
-  --administrator "$USER" \
-  --binary-dir ./build
+sha256sum -c SHA256SUMS
+tar -xzf "$archive"
+cd "${archive%.tar.gz}"
+sudo ./install.sh --administrator "$USER"
 ```
 
-脚本不会覆盖已有配置，也不会自动启动服务。完整步骤见
-[部署指南](docs/zh-CN/deployment.md)。
+也可以从源码手动构建。两条路径使用同一个安装脚本；脚本不会覆盖已有配置，也
+不会自动启动服务。完整步骤见[部署指南](docs/zh-CN/deployment.md)。
 
 ## 开发
 
@@ -143,7 +143,7 @@ go test ./...
 go test -race ./...
 go vet ./...
 test -z "$(gofmt -l .)"
-sh -n scripts/install.sh
+sh -n scripts/install.sh scripts/package-release.sh
 systemd-analyze verify packaging/systemd/scrapefsd.service
 python3 -m unittest discover \
   -s scripts/tests \
