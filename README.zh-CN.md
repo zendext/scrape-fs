@@ -101,6 +101,24 @@ python3 "$SKILL_DIR/scripts/scrapefs_media.py" validate \
 
 第一版不包含内置模型 provider、daemon-side Agent session、torrent 管理、下载器集成、GUI、可写 Projection、完整 POSIX 文件系统、动态 Profile 插件或跨主机路径转换。
 
+## 安装
+
+当前可以从源码构建，并通过仓库安装脚本初始化标准目录、权限、配置和 systemd
+unit：
+
+```bash
+mkdir -p build
+go build -trimpath -o build/scrapefs ./cmd/scrapefs
+go build -trimpath -o build/scrapefsd ./cmd/scrapefsd
+
+sudo ./scripts/install.sh \
+  --administrator "$USER" \
+  --binary-dir ./build
+```
+
+脚本不会覆盖已有配置，也不会自动启动服务。完整步骤见
+[部署指南](docs/zh-CN/deployment.md)。
+
 ## 开发
 
 ScrapeFS 当前要求 Linux 和 Go 1.25 或更高版本。
@@ -125,6 +143,11 @@ go test ./...
 go test -race ./...
 go vet ./...
 test -z "$(gofmt -l .)"
+sh -n scripts/install.sh
+systemd-analyze verify packaging/systemd/scrapefsd.service
+python3 -m unittest discover \
+  -s scripts/tests \
+  -p 'test_*.py'
 python3 -m unittest discover \
   -s skills/organize-scrapefs-media/tests \
   -p 'test_*.py'
@@ -141,6 +164,7 @@ python3 -m unittest discover \
 - [Projection 模型](docs/zh-CN/projection.md)
 - [Projection Batch 与外部 Agent 工作流](docs/zh-CN/scrape.md)
 - [文件系统与对象存储](docs/zh-CN/filesystem.md)
+- [部署指南](docs/zh-CN/deployment.md)
 - [运行与 CLI](docs/zh-CN/operations.md)
 - [第一版验收标准](docs/zh-CN/acceptance.md)
 - [English documentation](docs/en/README.md)

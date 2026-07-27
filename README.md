@@ -102,6 +102,26 @@ The first version targets:
 
 It does not target an embedded model provider, daemon-side Agent sessions, torrent management, downloader integration, a GUI, writable Projections, a complete POSIX filesystem, dynamic Profile plugins, or cross-host path translation.
 
+## Installation
+
+ScrapeFS can currently be built from source and installed with the repository
+script, which initializes the standard paths, permissions, configuration, and
+systemd unit:
+
+```bash
+mkdir -p build
+go build -trimpath -o build/scrapefs ./cmd/scrapefs
+go build -trimpath -o build/scrapefsd ./cmd/scrapefsd
+
+sudo ./scripts/install.sh \
+  --administrator "$USER" \
+  --binary-dir ./build
+```
+
+The script preserves an existing configuration and does not start the service
+automatically. See the [deployment guide](docs/en/deployment.md) for the full
+procedure.
+
 ## Development
 
 ScrapeFS currently requires Linux and Go 1.25 or newer.
@@ -126,6 +146,11 @@ go test ./...
 go test -race ./...
 go vet ./...
 test -z "$(gofmt -l .)"
+sh -n scripts/install.sh
+systemd-analyze verify packaging/systemd/scrapefsd.service
+python3 -m unittest discover \
+  -s scripts/tests \
+  -p 'test_*.py'
 python3 -m unittest discover \
   -s skills/organize-scrapefs-media/tests \
   -p 'test_*.py'
@@ -144,6 +169,7 @@ requirements are unavailable.
 - [Projection model](docs/en/projection.md)
 - [Projection batches and the external Agent workflow](docs/en/scrape.md)
 - [Filesystem and object storage](docs/en/filesystem.md)
+- [Deployment guide](docs/en/deployment.md)
 - [Operations and CLI](docs/en/operations.md)
 - [First-version acceptance criteria](docs/en/acceptance.md)
 - [简体中文文档](docs/zh-CN/README.md)

@@ -9,7 +9,8 @@
 3. [Projection model](projection.md)
 4. [Projection batches and the external Agent workflow](scrape.md)
 5. [Filesystem and object storage](filesystem.md)
-6. [Operations and CLI](operations.md)
-7. [First-version acceptance criteria](acceptance.md)
+6. [Deployment guide](deployment.md)
+7. [Operations and CLI](operations.md)
+8. [First-version acceptance criteria](acceptance.md)
 
 See the [root README](../../README.md) for the project overview and quick examples.
