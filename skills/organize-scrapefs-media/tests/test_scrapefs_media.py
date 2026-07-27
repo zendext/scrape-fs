@@ -12,6 +12,7 @@ import unittest
 SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPT = SKILL_DIR / "scripts" / "scrapefs_media.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+SKILL_DOCUMENT = SKILL_DIR / "SKILL.md"
 
 
 class ScrapeFSMediaTests(unittest.TestCase):
@@ -60,6 +61,17 @@ class ScrapeFSMediaTests(unittest.TestCase):
                 f"stderr:\n{result.stderr}"
             )
         return result
+
+    def test_skill_uses_semantic_approval_and_retains_validated_digest(self):
+        skill = SKILL_DOCUMENT.read_text(encoding="utf-8")
+        help_text = " ".join(self.run_tool("apply", "--help").stdout.split())
+
+        self.assertIn("explicitly approve or reject the reviewed batch", skill)
+        self.assertIn("does not need to transcribe the digest", skill)
+        self.assertIn('--confirm-digest "$VALIDATED_DIGEST"', skill)
+        self.assertNotIn("confirm the exact digest string", skill)
+        self.assertIn("retained from the user-approved validation", help_text)
+        self.assertNotIn("explicitly confirmed by the user", help_text)
 
     def copy_fixture(self, name):
         destination = self.root / name

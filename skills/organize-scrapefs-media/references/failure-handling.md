@@ -23,8 +23,9 @@ Validation and apply errors are daemon authority:
   target or undo/remove the conflicting item, then validate again;
 - inactive Library or unavailable Profile: repair Library configuration before
   planning again;
-- digest mismatch: present the fresh validation and request confirmation of its
-  exact digest;
+- digest mismatch: present the fresh validation and request renewed explicit
+  approval of that reviewed batch; retain its digest internally only after
+  approval;
 - permission denied: use the invoking user's configured control permissions;
   never escalate inside the skill.
 

@@ -151,7 +151,7 @@ def build_parser():
     apply.add_argument(
         "--confirm-digest",
         required=True,
-        help="Exact digest explicitly confirmed by the user after validate review.",
+        help="Exact digest retained from the user-approved validation.",
     )
     apply.set_defaults(handler=handle_apply)
 
@@ -246,8 +246,8 @@ def handle_apply(arguments):
                 "schema": "scrapefs.agent-confirmation-error/v1",
                 "code": "confirmation_digest_mismatch",
                 "message": (
-                    "fresh validation digest does not match the explicitly "
-                    "confirmed digest; review and confirm the new digest"
+                    "fresh validation digest does not match the retained "
+                    "approved digest; review and approve the fresh validation"
                 ),
                 "confirmed_digest": arguments.confirm_digest,
                 "validation": validation,
