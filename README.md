@@ -146,7 +146,10 @@ go test ./...
 go test -race ./...
 go vet ./...
 test -z "$(gofmt -l .)"
-sh -n scripts/install.sh scripts/package-release.sh
+sh -n \
+  scripts/install.sh \
+  scripts/package-release.sh \
+  scripts/release-version.sh
 systemd-analyze verify packaging/systemd/scrapefsd.service
 python3 -m unittest discover \
   -s scripts/tests \

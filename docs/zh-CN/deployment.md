@@ -46,6 +46,7 @@ sudo ./install.sh --administrator "$USER"
 
 归档中的 `scrapefs` 和 `scrapefsd` 会报告对应 tag 版本。安装脚本、两个二进制和
 通用 systemd unit 位于同一目录，不需要仓库 checkout 或 Go toolchain。
+tag 中含有 `-` 的版本会发布为 GitHub prerelease，并明确排除在 Latest 之外。
 
 ## 3. 从源码构建
 

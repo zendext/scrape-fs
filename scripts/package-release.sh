@@ -28,19 +28,6 @@ fi
 version=$1
 output_directory=${2:-dist}
 
-case "$version" in
-    v[0-9]*)
-        case "$version" in
-            *[!0-9A-Za-z.+-]*)
-                fail "invalid release version: $version"
-                ;;
-        esac
-        ;;
-    *)
-        fail "invalid release version: $version"
-        ;;
-esac
-
 script_directory=$(
     CDPATH= cd -- "$(dirname -- "$0")" &&
         pwd
@@ -52,11 +39,15 @@ repository=$(
 
 for path in \
     "$repository/scripts/install.sh" \
+    "$repository/scripts/release-version.sh" \
     "$repository/packaging/systemd/scrapefsd.service"
 do
     [ -f "$path" ] ||
         fail "required release file is missing: $path"
 done
+
+"$repository/scripts/release-version.sh" "$version" >/dev/null ||
+    fail "invalid release version: $version"
 
 for command in find go install mkdir mktemp sha256sum tar; do
     require_command "$command"

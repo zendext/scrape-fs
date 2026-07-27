@@ -49,6 +49,8 @@ sudo ./install.sh --administrator "$USER"
 The bundled `scrapefs` and `scrapefsd` report the corresponding tag version.
 The installer, both binaries, and the generic systemd unit are colocated, so
 this path does not require a repository checkout or Go toolchain.
+Versions whose tags contain `-` are published as GitHub prereleases and are
+explicitly excluded from Latest.
 
 ## 3. Build From Source
 

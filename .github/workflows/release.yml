@@ -33,7 +33,10 @@ jobs:
           go test -race ./...
           go vet ./...
           test -z "$(gofmt -l .)"
-          sh -n scripts/install.sh scripts/package-release.sh
+          sh -n \
+            scripts/install.sh \
+            scripts/package-release.sh \
+            scripts/release-version.sh
           systemd-analyze verify packaging/systemd/scrapefsd.service
           python3 -m unittest discover \
             -s scripts/tests \
@@ -51,9 +54,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          release_kind=$(
+            ./scripts/release-version.sh "$GITHUB_REF_NAME"
+          )
+          case "$release_kind" in
+            prerelease)
+              set -- --prerelease --latest=false
+              ;;
+            stable)
+              set --
+              ;;
+            *)
+              printf 'unexpected release kind: %s\n' "$release_kind" >&2
+              exit 1
+              ;;
+          esac
+
           gh release create "$GITHUB_REF_NAME" \
             dist/*.tar.gz \
             dist/SHA256SUMS \
             --verify-tag \
             --generate-notes \
-            --title "$GITHUB_REF_NAME"
+            --title "$GITHUB_REF_NAME" \
+            "$@"

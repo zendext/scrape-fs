@@ -10,6 +10,8 @@ import unittest
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 PACKAGER = REPOSITORY / "scripts" / "package-release.sh"
+VERSION_CLASSIFIER = REPOSITORY / "scripts" / "release-version.sh"
+WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
 
 
 class ReleasePackageTests(unittest.TestCase):
@@ -161,6 +163,34 @@ class ReleasePackageTests(unittest.TestCase):
             sentinel.read_text(encoding="utf-8"),
             "preserve\n",
         )
+
+    def test_classifies_stable_and_prerelease_versions(self):
+        for version, expected in (
+            ("v1.0.0", "stable"),
+            ("v1.0.0+build.1", "stable"),
+            ("v1.0.0-rc.1", "prerelease"),
+            ("v0.1.0-test.1", "prerelease"),
+        ):
+            with self.subTest(version=version):
+                result = subprocess.run(
+                    [str(VERSION_CLASSIFIER), version],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+
+    def test_workflow_marks_prereleases_and_excludes_them_from_latest(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn(
+            './scripts/release-version.sh "$GITHUB_REF_NAME"',
+            workflow,
+        )
+        self.assertIn("--prerelease", workflow)
+        self.assertIn("--latest=false", workflow)
 
 
 if __name__ == "__main__":
