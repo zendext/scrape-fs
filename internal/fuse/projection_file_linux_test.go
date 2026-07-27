@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/zendext/scrape-fs/internal/database"
 	"github.com/zendext/scrape-fs/internal/namespace"
 	"github.com/zendext/scrape-fs/internal/projection"
+	"github.com/zendext/scrape-fs/internal/projectionbatch"
 	"github.com/zendext/scrape-fs/internal/sourcefile"
 	"golang.org/x/sys/unix"
 )
@@ -406,6 +408,69 @@ func TestProjectionFuseLifecycleRefreshesRenamedParentPath(t *testing.T) {
 	}
 	if _, err := os.Stat(sourcePath); err != nil {
 		t.Errorf("source after lifecycle mutations: %v", err)
+	}
+}
+
+func TestProjectionFuseRenamesBatchOwnedProjection(t *testing.T) {
+	fixture := newWritableFuseFixture(t)
+	ctx := fuseCallerContext(1234, 5678)
+	sourcePath := filepath.Join(t.TempDir(), "source.mkv")
+	if err := os.WriteFile(sourcePath, []byte("batch source"), 0o600); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	data, err := json.Marshal(projectionbatch.Document{
+		Schema:  projectionbatch.BatchSchema,
+		Library: "jellyfin",
+		Entries: []projectionbatch.Entry{
+			{Source: sourcePath, Target: "Movies/source.mkv"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal Batch: %v", err)
+	}
+	batches := projectionbatch.NewService(fixture.repository)
+	validation, err := batches.Validate(context.Background(), data)
+	if err != nil {
+		t.Fatalf("Validate Batch: %v", err)
+	}
+	applied, err := batches.Apply(context.Background(), projectionbatch.ApplyRequest{
+		Data:           data,
+		ExpectedDigest: validation.Digest,
+		Actor:          namespace.Actor{Kind: namespace.ActorSystem},
+		Caller:         projectionbatch.Caller{UID: 1234, GID: 5678},
+	})
+	if err != nil {
+		t.Fatalf("Apply Batch: %v", err)
+	}
+
+	movies := lookupFuseDirectory(t, fixture.libraryRoot, "Movies")
+	if errno := movies.Rename(
+		ctx,
+		"source.mkv",
+		movies,
+		"renamed.mkv",
+		0,
+	); errno != 0 {
+		t.Fatalf("Rename Batch Projection errno = %v", errno)
+	}
+	moved, err := fixture.repository.Lookup(
+		context.Background(),
+		fixture.library.RootNodeID,
+		"Movies/renamed.mkv",
+	)
+	if err != nil {
+		t.Fatalf("Lookup moved Batch Projection: %v", err)
+	}
+	if moved.OriginScrapeID == nil {
+		t.Fatal("moved Batch Projection OriginScrapeID = nil")
+	}
+	detail, err := batches.Show(context.Background(), applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch after FUSE rename: %v", err)
+	}
+	if len(detail.Operations) != 2 ||
+		detail.Operations[1].Name != "projection.move" {
+		t.Errorf("Batch operations after FUSE rename = %#v", detail.Operations)
 	}
 }
 

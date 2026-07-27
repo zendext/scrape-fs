@@ -210,7 +210,7 @@ scrapefs projection batch show batch-42
 scrapefs projection batch undo batch-42
 ```
 
-`show` displays provenance, created Projections, and operation-log snapshots for an applied or undone batch only. It exposes no pending plan.
+`show` displays provenance, original apply-time Projection entries, and associated operation-log snapshots for an applied or undone batch only. A later same-Library Projection move is appended to that history without changing the entries or the approved Batch digest. It exposes no pending plan.
 
 Batch history remains available to `list` and `show` after its Library is retired. Undo requires an available LibraryRoot and rejects a retired Library without changing batch state.
 
@@ -222,7 +222,7 @@ Undo uses one SQLite transaction to:
 4. mark the batch undone and save caller UID/GID;
 5. increment namespace version once.
 
-Undo does not remove OverlayFiles created through FUSE. The CLI lists OverlayFiles that prevent directory pruning or remain below former target directories.
+Undo removes each remaining Batch-owned Projection by provenance, including a Projection moved from its original target. It prunes empty managed directories left at original, intermediate, and current targets, and its operation log records the paths actually removed. Undo does not remove OverlayFiles created through FUSE. The CLI lists retained OverlayFiles below every target directory traversed by the Batch-owned Projections.
 
 Repeated undo of an undone batch returns `AlreadyUndone`.
 

@@ -780,6 +780,9 @@ func (repository *Repository) update(
 	if err := change(namespaceTransaction); err != nil {
 		return 0, rollback(err)
 	}
+	if namespaceTransaction.operationDetailsJSON != nil {
+		detailsJSON = namespaceTransaction.operationDetailsJSON
+	}
 
 	if !namespaceTransaction.changed && !namespaceTransaction.audited {
 		var version int64
@@ -852,11 +855,12 @@ func (repository *Repository) update(
 }
 
 type Transaction struct {
-	transaction       *database.Transaction
-	now               func() time.Time
-	changed           bool
-	audited           bool
-	operationScrapeID *int64
+	transaction          *database.Transaction
+	now                  func() time.Time
+	changed              bool
+	audited              bool
+	operationScrapeID    *int64
+	operationDetailsJSON []byte
 }
 
 func (transaction *Transaction) GlobalRoot(ctx context.Context) (Node, error) {
@@ -937,6 +941,25 @@ func (transaction *Transaction) ProjectionBatch(
 		"scrapes.id = ? AND scrapes.status IN ('applied', 'undone')",
 		id,
 	)
+}
+
+func (transaction *Transaction) ProjectionBatchOperations(
+	ctx context.Context,
+	batchID int64,
+) ([]ProjectionBatchOperation, error) {
+	return projectionBatchOperations(ctx, transaction.transaction, batchID)
+}
+
+func (transaction *Transaction) SetOperationDetails(details OperationDetails) error {
+	if err := validateOperationDetails(details); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(details)
+	if err != nil {
+		return fmt.Errorf("%w: encode details: %v", ErrInvalidOperation, err)
+	}
+	transaction.operationDetailsJSON = encoded
+	return nil
 }
 
 func (transaction *Transaction) CreateLibrary(
@@ -1592,9 +1615,6 @@ func (transaction *Transaction) MoveProjection(
 	if source.Kind != ProjectionFile {
 		return Node{}, ErrReadOnly
 	}
-	if source.OriginScrapeID != nil {
-		return Node{}, ErrBatchOwnedProjection
-	}
 	if request.OldParentID == request.NewParentID && request.OldName == request.NewName {
 		return source, nil
 	}
@@ -1640,6 +1660,14 @@ func (transaction *Transaction) MoveProjection(
 	}
 	if updated != 1 {
 		return Node{}, ErrNotFound
+	}
+	if source.OriginScrapeID != nil {
+		if err := transaction.AssociateOperationWithProjectionBatch(
+			ctx,
+			*source.OriginScrapeID,
+		); err != nil {
+			return Node{}, err
+		}
 	}
 	if err := transaction.touchDirectory(ctx, oldParent.ID, now); err != nil {
 		return Node{}, err
@@ -2082,8 +2110,9 @@ func (transaction *Transaction) AssociateOperationWithProjectionBatch(
 func (transaction *Transaction) RemoveProjectionBatchProjections(
 	ctx context.Context,
 	batchID int64,
-) ([]int64, error) {
+) ([]int64, []string, error) {
 	var parentIDs []int64
+	var targets []string
 	var cursorID int64
 	for {
 		node, err := queryNode(ctx, transaction.transaction, `
@@ -2094,14 +2123,22 @@ func (transaction *Transaction) RemoveProjectionBatchProjections(
 			LIMIT 1
 		`, batchID, cursorID)
 		if errors.Is(err, ErrNotFound) {
-			return parentIDs, nil
+			return parentIDs, targets, nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("list Projection Batch nodes: %w", err)
+			return nil, nil, fmt.Errorf("list Projection Batch nodes: %w", err)
 		}
 		cursorID = node.ID
 		if node.ParentID == nil {
-			return nil, fmt.Errorf("%w: ProjectionFile has no parent", ErrInvalidNode)
+			return nil, nil, fmt.Errorf("%w: ProjectionFile has no parent", ErrInvalidNode)
+		}
+		_, target, err := nodePathToLibraryRoot(
+			ctx,
+			transaction.transaction,
+			node.ID,
+		)
+		if err != nil {
+			return nil, nil, err
 		}
 
 		result, err := transaction.transaction.ExecContext(ctx, `
@@ -2111,14 +2148,14 @@ func (transaction *Transaction) RemoveProjectionBatchProjections(
 			  AND origin_scrape_id = ?
 		`, node.ID, batchID)
 		if err != nil {
-			return nil, classifyMutationError("remove Projection Batch node", err)
+			return nil, nil, classifyMutationError("remove Projection Batch node", err)
 		}
 		deleted, err := result.RowsAffected()
 		if err != nil {
-			return nil, fmt.Errorf("read removed Projection count: %w", err)
+			return nil, nil, fmt.Errorf("read removed Projection count: %w", err)
 		}
 		if deleted != 1 {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"%w: Projection Batch node %d disappeared during transaction",
 				ErrInvalidNode,
 				node.ID,
@@ -2126,10 +2163,11 @@ func (transaction *Transaction) RemoveProjectionBatchProjections(
 		}
 		now := transaction.now().UTC().UnixNano()
 		if err := transaction.touchDirectory(ctx, *node.ParentID, now); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		transaction.changed = true
 		parentIDs = append(parentIDs, *node.ParentID)
+		targets = append(targets, target)
 	}
 }
 
@@ -2583,16 +2621,26 @@ func validateOperation(operation Operation, change func(*Transaction) error) err
 	if operation.ScrapeID != nil && *operation.ScrapeID <= 0 {
 		return fmt.Errorf("%w: invalid Scrape ID", ErrInvalidOperation)
 	}
-	if len(operation.Details.Paths) == 0 {
+	if err := validateOperationDetails(operation.Details); err != nil {
+		return err
+	}
+	if change == nil {
+		return fmt.Errorf("%w: change callback must not be nil", ErrInvalidOperation)
+	}
+	return nil
+}
+
+func validateOperationDetails(details OperationDetails) error {
+	if len(details.Paths) == 0 {
 		return fmt.Errorf("%w: details paths must not be empty", ErrInvalidOperation)
 	}
-	if len(operation.Details.Paths) != len(operation.Details.NodeKinds) {
+	if len(details.Paths) != len(details.NodeKinds) {
 		return fmt.Errorf(
 			"%w: details paths and node kinds must have equal lengths",
 			ErrInvalidOperation,
 		)
 	}
-	for index, path := range operation.Details.Paths {
+	for index, path := range details.Paths {
 		if path == "" {
 			return fmt.Errorf(
 				"%w: details path %d must not be empty",
@@ -2600,16 +2648,13 @@ func validateOperation(operation Operation, change func(*Transaction) error) err
 				index,
 			)
 		}
-		if !operation.Details.NodeKinds[index].valid() {
+		if !details.NodeKinds[index].valid() {
 			return fmt.Errorf(
 				"%w: invalid details node kind %q",
 				ErrInvalidOperation,
-				operation.Details.NodeKinds[index],
+				details.NodeKinds[index],
 			)
 		}
-	}
-	if change == nil {
-		return fmt.Errorf("%w: change callback must not be nil", ErrInvalidOperation)
 	}
 	return nil
 }
