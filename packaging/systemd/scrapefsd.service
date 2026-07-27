@@ -1,0 +1,23 @@
+[Unit]
+Description=ScrapeFS daemon
+After=local-fs.target
+Wants=local-fs.target
+ConditionPathExists=/dev/fuse
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStartPre=/usr/bin/test -c /dev/fuse
+ExecStart=/usr/local/bin/scrapefsd --config /etc/scrapefs/config.toml
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=60s
+TimeoutStopSec=60s
+KillSignal=SIGTERM
+RuntimeDirectory=scrapefs
+RuntimeDirectoryMode=0755
+StateDirectory=scrapefs
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
