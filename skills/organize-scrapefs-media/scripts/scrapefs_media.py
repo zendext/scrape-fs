@@ -115,6 +115,12 @@ def build_parser():
         choices=("jellyfin", "plex"),
         help="Built-in Library Profile naming rules.",
     )
+    plan.add_argument(
+        "--series-root",
+        choices=("shows", "anime"),
+        default="shows",
+        help="Projection root for episode sources.",
+    )
     plan.add_argument("--batch", required=True, help="Output Projection Batch JSON path.")
     plan.add_argument(
         "--artifacts",
@@ -191,6 +197,7 @@ def handle_plan(arguments):
             arguments.profile,
             arguments.ffprobe,
             arguments.metadata,
+            arguments.series_root,
         )
     except ManualHandling as error:
         report = manual_report(arguments.source, [error.item])
@@ -357,7 +364,14 @@ def handle_artifacts(arguments):
     return 5 if failed else 0
 
 
-def create_plan(source_value, library_name, profile, ffprobe, metadata_path):
+def create_plan(
+    source_value,
+    library_name,
+    profile,
+    ffprobe,
+    metadata_path,
+    series_root,
+):
     validate_library_name(library_name)
     if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", os.fspath(source_value)):
         return (
@@ -507,6 +521,7 @@ def create_plan(source_value, library_name, profile, ffprobe, metadata_path):
                 library_name,
                 profile,
                 metadata,
+                series_root,
             )
     except ManualHandling as error:
         return manual_report(source, [error.item], ignored, probes), None, None
@@ -945,6 +960,7 @@ def plan_episodes(
     library,
     profile,
     metadata,
+    series_root,
 ):
     warnings = []
     tvshow_path = first_named(nfos, "tvshow.nfo")
@@ -967,7 +983,11 @@ def plan_episodes(
     validate_title(show_title, videos[0])
     show_display = title_with_year(sanitize_name(show_title, profile), show_year)
     show_name = show_display + provider_hint(profile, provider_ids, movie=False)
-    root_name = "Shows" if profile == "jellyfin" else "TV Shows"
+    root_name = (
+        "Anime"
+        if series_root == "anime"
+        else ("Shows" if profile == "jellyfin" else "TV Shows")
+    )
     show_directory = PurePosixPath(root_name) / show_name
     matched_subtitles, unmatched = associate_subtitles(videos, subtitles)
     warnings.extend(unmatched_subtitle_warnings(unmatched))
@@ -1405,7 +1425,7 @@ def title_with_year(title, year):
 
 
 def provider_hint(profile, provider_ids, movie):
-    order = ("tmdb", "imdb") if movie else ("tvdb", "tmdb", "imdb")
+    order = ("tmdb", "imdb") if movie else ("tmdb", "tvdb", "imdb")
     for provider in order:
         value = provider_ids.get(provider)
         if not value:

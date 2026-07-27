@@ -53,6 +53,19 @@ python3 "$TOOL" plan \
   --artifacts /tmp/dune.artifacts.json
 ```
 
+For an episode source that belongs in a separate anime media library, select
+the anime series root explicitly:
+
+```bash
+python3 "$TOOL" plan \
+  --source /srv/downloads/anime/Oshi.no.Ko.2023 \
+  --library jellyfin \
+  --profile jellyfin \
+  --series-root anime \
+  --batch /tmp/oshi-no-ko.batch.json \
+  --artifacts /tmp/oshi-no-ko.artifacts.json
+```
+
 The command only reads local sources and writes local JSON files. It never calls
 the control CLI, mounts filesystems, queries a metadata provider, or applies a
 batch.

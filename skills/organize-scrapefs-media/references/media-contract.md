@@ -75,6 +75,7 @@ For episodes:
   "show_title": "The Expanse",
   "show_year": 2015,
   "provider_ids": {
+    "tmdb": "63639",
     "tvdb": "280619"
   },
   "episodes": {
@@ -93,8 +94,8 @@ resolved values in this file.
 For existing NFO files, valid supported IDs remain strict. Unknown,
 lower-priority provider IDs such as Wikidata are reported as warnings and
 ignored for deterministic naming instead of invalidating a higher-priority
-TMDB, TVDB, or IMDb identity. Movie target hints prefer TMDB and then IMDb;
-show target hints prefer TVDB, TMDB, and then IMDb.
+TMDB, TVDB, or IMDb identity. Movie target hints prefer TMDB and then IMDb.
+Show target hints prefer TMDB, TVDB, and then IMDb.
 
 ## Deterministic Naming
 
@@ -115,17 +116,20 @@ Movies/Title (Year) {tmdb-ID}/Title (Year) {tmdb-ID}.mkv
 Jellyfin episode:
 
 ```text
-Shows/Show (Year) [tvdbid-ID]/Season 01/Show (Year) S01E01 Episode Title.mkv
+Shows/Show (Year) [tmdbid-ID]/Season 01/Show (Year) S01E01 Episode Title.mkv
 ```
 
 Plex episode:
 
 ```text
-TV Shows/Show (Year) {tvdb-ID}/Season 01/Show (Year) - S01E01 - Episode Title.mkv
+TV Shows/Show (Year) {tmdb-ID}/Season 01/Show (Year) - S01E01 - Episode Title.mkv
 ```
 
+For an anime media library, pass `--series-root anime`. The episode layout is
+the same except that `Anime/` replaces `Shows/` or `TV Shows/`.
+
 Provider hints and years are omitted when unavailable. For movies prefer TMDB,
-then IMDb. For shows prefer TVDB, then TMDB, then IMDb. Preserve the source
+then IMDb. For shows prefer TMDB, then TVDB, then IMDb. Preserve the source
 extension in lowercase. Use the corresponding media basename for external
 subtitles.
 

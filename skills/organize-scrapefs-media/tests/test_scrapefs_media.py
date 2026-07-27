@@ -481,6 +481,93 @@ class ScrapeFSMediaTests(unittest.TestCase):
             ],
         )
 
+    def test_episode_provider_hint_prefers_tmdb_to_tvdb(self):
+        source = self.copy_fixture("episodes")
+        metadata = self.root / "episodes-provider-priority.json"
+        batch = self.root / "episodes-provider-priority.batch.json"
+        artifacts = self.root / "episodes-provider-priority.artifacts.json"
+        metadata.write_text(
+            json.dumps(
+                {
+                    "kind": "episodes",
+                    "provider_ids": {
+                        "tmdb": "63639",
+                        "tvdb": "280619",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--metadata",
+            metadata,
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+        )
+
+        targets = [
+            entry["target"]
+            for entry in json.loads(batch.read_text(encoding="utf-8"))["entries"]
+        ]
+        self.assertTrue(
+            all(
+                target.startswith(
+                    "Shows/The Expanse (2015) [tmdbid-63639]/Season 01/"
+                )
+                for target in targets
+            )
+        )
+
+    def test_plans_episodes_under_explicit_anime_root(self):
+        source = self.copy_fixture("episodes")
+        batch = self.root / "episodes-anime.batch.json"
+        artifacts = self.root / "episodes-anime.artifacts.json"
+
+        self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--series-root",
+            "anime",
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+        )
+
+        targets = [
+            entry["target"]
+            for entry in json.loads(batch.read_text(encoding="utf-8"))["entries"]
+        ]
+        artifact_targets = [
+            artifact["target"]
+            for artifact in json.loads(
+                artifacts.read_text(encoding="utf-8")
+            )["artifacts"]
+        ]
+        self.assertTrue(all(target.startswith("Anime/") for target in targets))
+        self.assertTrue(
+            all(target.startswith("media/Anime/") for target in artifact_targets)
+        )
+
     def test_returns_manual_for_mixed_series_episode_directory(self):
         source = self.root / "mixed-series"
         source.mkdir()
