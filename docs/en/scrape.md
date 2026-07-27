@@ -323,7 +323,31 @@ detection, complex extras, music/image-only sources, remote URLs, symlinks,
 non-regular sources, and ambiguous multi-video layouts return an explicit
 `manual` result. The Skill never silently drops a non-sample video.
 
-### 10.3 Plan And Metadata Boundary
+### 10.3 Environment Preflight
+
+Before planning, verify the exact control, source, and FUSE paths visible to the
+invoking user:
+
+```bash
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" preflight \
+  --source /srv/downloads/Dune.2021 \
+  --source-root /srv/downloads \
+  --library media \
+  --mountpoint /mnt/scrapefs
+```
+
+Repeat `--source-root` for every explicitly allowed media root and
+`--fallback-source` for every fallback that will be passed to `plan`.
+Containerized Agents must mount each source at the same absolute path used by
+the host daemon because the first version provides no path translation.
+
+Preflight reads daemon status and Library metadata, recursively verifies source
+access without following symlinks, and checks ordinary access to the reported
+FUSE Library path. It returns `scrapefs.agent-preflight/v1` with `ready` or
+`manual` status. It never changes permissions, mounts a filesystem, or writes a
+probe artifact. A `manual` result stops the workflow.
+
+### 10.4 Plan And Metadata Boundary
 
 Read the actual Profile through `library list`, then generate a local batch and
 artifact manifest:
@@ -358,7 +382,7 @@ For `status: manual`, stop and present every code, message, and path. After
 resolving ambiguity, regenerate with `--metadata <file>`; do not modify or
 relax the batch schema.
 
-### 10.4 Validate, Digest Confirmation, And Apply
+### 10.5 Validate, Digest Confirmation, And Apply
 
 ```bash
 python3 "$SKILL_DIR/scripts/scrapefs_media.py" validate \
@@ -388,7 +412,7 @@ permission failure, or any other validate/apply error stops the workflow. Show
 the new result and request confirmation again; never retry or apply
 automatically.
 
-### 10.5 Artifacts, Show, And Undo
+### 10.6 Artifacts, Show, And Undo
 
 The batch digest confirms only the Projection Batch; it does not bind the
 artifact manifest. After successful apply and artifact-list review, create

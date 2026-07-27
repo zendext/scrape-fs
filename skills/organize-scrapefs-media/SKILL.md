@@ -34,6 +34,32 @@ layout is supported or when supplying Agent-resolved metadata. Read
 [failure-handling.md](references/failure-handling.md) before recovering from a
 manual result, CLI error, source change, conflict, or partial artifact failure.
 
+## Preflight
+
+Before planning, verify the exact source roots and FUSE mount visible to the
+invoking user:
+
+```bash
+python3 "$TOOL" preflight \
+  --source /srv/downloads/Dune.2021 \
+  --source-root /srv/downloads \
+  --library media \
+  --mountpoint /mnt/scrapefs
+```
+
+Repeat `--source-root` for every explicitly allowed local media root and repeat
+`--fallback-source` for each source that will be passed to `plan`. In a
+container, every source path must be mounted at the same absolute path used by
+the host daemon.
+
+Preflight verifies daemon readiness, the ACTIVE Library and Profile, source
+containment and invoking-user readability, the daemon mountpoint path, and
+ordinary FUSE Library write access. It returns
+`scrapefs.agent-preflight/v1` with `status: ready` or `status: manual`. It never
+changes permissions, mounts filesystems, or creates a probe artifact.
+
+If preflight returns `manual`, stop and present every item before planning.
+
 ## Plan
 
 First inspect the Library and use its actual Profile:

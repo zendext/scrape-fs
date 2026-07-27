@@ -23,6 +23,9 @@ VALIDATION_SCHEMA = "scrapefs.projection-batch-validation/v1"
 RESULT_SCHEMA = "scrapefs.projection-batch-result/v1"
 ARTIFACT_SCHEMA = "scrapefs.agent-artifacts/v1"
 PLAN_SCHEMA = "scrapefs.agent-plan/v1"
+PREFLIGHT_SCHEMA = "scrapefs.agent-preflight/v1"
+STATUS_SCHEMA = "scrapefs.status/v1"
+LIBRARY_LIST_SCHEMA = "scrapefs.library-list/v1"
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 VIDEO_EXTENSIONS = {
     ".avi",
@@ -102,6 +105,32 @@ def build_parser():
         )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    preflight = subparsers.add_parser(
+        "preflight",
+        help="Verify ScrapeFS control, source, and FUSE access without mutations.",
+    )
+    add_control_arguments(preflight)
+    preflight.add_argument("--source", required=True, help="Primary media source.")
+    preflight.add_argument(
+        "--fallback-source",
+        action="append",
+        default=[],
+        help="Additional lower-priority media source. May be repeated.",
+    )
+    preflight.add_argument(
+        "--source-root",
+        action="append",
+        required=True,
+        help="Allowed local source root. May be repeated.",
+    )
+    preflight.add_argument("--library", required=True, help="ACTIVE Library name.")
+    preflight.add_argument(
+        "--mountpoint",
+        required=True,
+        help="ScrapeFS FUSE mountpoint visible to the invoking user.",
+    )
+    preflight.set_defaults(handler=handle_preflight)
 
     plan = subparsers.add_parser(
         "plan",
@@ -194,6 +223,204 @@ def build_parser():
 def add_control_arguments(parser):
     parser.add_argument("--scrapefs", default="scrapefs", help="scrapefs CLI path.")
     parser.add_argument("--socket", help="Optional ScrapeFS control socket path.")
+
+
+def handle_preflight(arguments):
+    validate_library_name(arguments.library)
+    report = {
+        "schema": PREFLIGHT_SCHEMA,
+        "status": "manual",
+        "sources": [],
+        "source_roots": [],
+        "mountpoint": os.fspath(normalized_absolute_path(arguments.mountpoint)),
+        "library": {"name": arguments.library},
+        "manual": [],
+    }
+
+    try:
+        status_result = run_json_command(
+            control_command(arguments) + ["status"],
+            "status",
+        )
+        require_schema(status_result, STATUS_SCHEMA, "status")
+        daemon_status = status_result.get("daemon")
+        mount_status = status_result.get("mount")
+        if not isinstance(daemon_status, dict) or not isinstance(
+            mount_status,
+            dict,
+        ):
+            raise RuntimeError("status returned invalid daemon or mount metadata")
+    except (CommandFailure, RuntimeError) as error:
+        report["manual"].append(
+            manual_item(
+                "control_unavailable",
+                f"cannot inspect ScrapeFS control status: {error}",
+            )
+        )
+        write_json(sys.stdout, report)
+        return 3
+
+    if (
+        status_result.get("state") != "ready"
+        or daemon_status.get("ready") is not True
+    ):
+        report["manual"].append(
+            manual_item(
+                "daemon_not_ready",
+                "ScrapeFS daemon status is not ready",
+            )
+        )
+
+    configured_mountpoint = mount_status.get("path")
+    if (
+        mount_status.get("state") != "ready"
+        or not isinstance(configured_mountpoint, str)
+    ):
+        report["manual"].append(
+            manual_item(
+                "mountpoint_unavailable",
+                "ScrapeFS daemon does not report a ready FUSE mountpoint",
+                report["mountpoint"],
+            )
+        )
+    elif configured_mountpoint != report["mountpoint"]:
+        report["manual"].append(
+            manual_item(
+                "mountpoint_mismatch",
+                (
+                    f"visible mountpoint {report['mountpoint']} does not match "
+                    f"daemon mountpoint {configured_mountpoint}"
+                ),
+                report["mountpoint"],
+            )
+        )
+
+    try:
+        library_result = run_json_command(
+            control_command(arguments) + ["library", "list"],
+            "library list",
+        )
+        require_schema(library_result, LIBRARY_LIST_SCHEMA, "library list")
+        libraries = library_result.get("libraries")
+        if not isinstance(libraries, list):
+            raise RuntimeError("library list returned invalid libraries")
+    except (CommandFailure, RuntimeError) as error:
+        report["manual"].append(
+            manual_item(
+                "control_unavailable",
+                f"cannot inspect ScrapeFS Libraries: {error}",
+            )
+        )
+        write_json(sys.stdout, report)
+        return 3
+
+    library = next(
+        (
+            item
+            for item in libraries
+            if isinstance(item, dict) and item.get("name") == arguments.library
+        ),
+        None,
+    )
+    if library is None or library.get("status") != "ACTIVE":
+        report["manual"].append(
+            manual_item(
+                "library_unavailable",
+                f"ScrapeFS Library {arguments.library!r} is not ACTIVE",
+            )
+        )
+    else:
+        profile = f"{library.get('profile_name')}@{library.get('profile_version')}"
+        report["library"] = {
+            "name": arguments.library,
+            "profile": profile,
+        }
+        if profile not in {"jellyfin@1", "plex@1"}:
+            report["manual"].append(
+                manual_item(
+                    "unsupported_library_profile",
+                    f"ScrapeFS Library uses unsupported Profile {profile}",
+                )
+            )
+
+    source_roots = []
+    for value in arguments.source_root:
+        try:
+            root = normalized_local_source(value)
+            root_status = root.lstat()
+            if not stat.S_ISDIR(root_status.st_mode):
+                raise ValueError("source root must identify a directory")
+        except (ManualHandling, OSError, ValueError) as error:
+            item = (
+                error.item
+                if isinstance(error, ManualHandling)
+                else manual_item(
+                    "source_root_unavailable",
+                    f"cannot access source root: {error}",
+                    value,
+                )
+            )
+            report["manual"].append(item)
+            continue
+        source_roots.append(root)
+        report["source_roots"].append(os.fspath(root))
+
+    for value in [arguments.source, *arguments.fallback_source]:
+        try:
+            source = normalized_local_source(value)
+        except ManualHandling as error:
+            report["manual"].append(error.item)
+            continue
+        report["sources"].append(os.fspath(source))
+        if not any(path_is_beneath(source, root) for root in source_roots):
+            report["manual"].append(
+                manual_item(
+                    "source_outside_allowed_roots",
+                    "source is outside every explicitly allowed source root",
+                    source,
+                )
+            )
+            continue
+        _, access_issues = enumerate_source(source)
+        report["manual"].extend(access_issues)
+
+    library_path = normalized_absolute_path(arguments.mountpoint) / arguments.library
+    try:
+        linked_component = first_symlink_component(library_path)
+        if linked_component is not None:
+            raise ValueError(
+                f"Library path contains symbolic-link component {linked_component}"
+            )
+        library_status = library_path.lstat()
+        if stat.S_ISLNK(library_status.st_mode) or not stat.S_ISDIR(
+            library_status.st_mode
+        ):
+            raise ValueError("Library path must identify a real directory")
+        if not os.access(
+            library_path,
+            os.W_OK | os.X_OK,
+            effective_ids=True,
+        ):
+            raise PermissionError(
+                errno.EACCES,
+                "Library path is not writable and traversable",
+                library_path,
+            )
+    except (OSError, ValueError) as error:
+        report["manual"].append(
+            manual_item(
+                "library_path_unavailable",
+                f"cannot access FUSE Library path for artifact writes: {error}",
+                library_path,
+            )
+        )
+
+    if report["manual"]:
+        write_json(sys.stdout, report)
+        return 3
+    report["status"] = "ready"
+    write_json(sys.stdout, report)
+    return 0
 
 
 def handle_plan(arguments):
@@ -596,6 +823,14 @@ def normalized_local_source(source_value):
             linked_component,
         )
     return source
+
+
+def path_is_beneath(path, root):
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def inspect_media_source(source):

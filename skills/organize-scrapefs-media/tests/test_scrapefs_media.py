@@ -1495,6 +1495,168 @@ class ScrapeFSMediaTests(unittest.TestCase):
             [item["code"] for item in json.loads(result.stdout)["manual"]],
         )
 
+    def test_preflight_verifies_control_source_roots_and_fuse_access(self):
+        source_root = self.root / "sources"
+        source = source_root / "show"
+        source.mkdir(parents=True)
+        (source / "Show.S01E01.mkv").write_text(
+            "fixture episode",
+            encoding="utf-8",
+        )
+        mountpoint = self.root / "mount"
+        library_path = mountpoint / "media"
+        library_path.mkdir(parents=True)
+        log = self.root / "scrapefs.log"
+        scrapefs = self.make_fake_scrapefs(log)
+        environment = os.environ.copy()
+        environment["SCRAPEFS_MOUNTPOINT"] = str(mountpoint)
+
+        result = self.run_tool(
+            "preflight",
+            "--source",
+            source,
+            "--source-root",
+            source_root,
+            "--library",
+            "media",
+            "--mountpoint",
+            mountpoint,
+            "--scrapefs",
+            scrapefs,
+            env=environment,
+        )
+
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["schema"], "scrapefs.agent-preflight/v1")
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["sources"], [str(source)])
+        self.assertEqual(payload["source_roots"], [str(source_root)])
+        self.assertEqual(payload["mountpoint"], str(mountpoint))
+        self.assertEqual(payload["library"]["name"], "media")
+        self.assertEqual(payload["library"]["profile"], "jellyfin@1")
+        self.assertEqual(payload["manual"], [])
+        self.assertEqual(list(library_path.iterdir()), [])
+        calls = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(calls, ["status", "library list"])
+
+    def test_preflight_reports_source_root_and_runtime_failures(self):
+        allowed_root = self.root / "allowed"
+        allowed_root.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "Movie.mkv").write_text("fixture movie", encoding="utf-8")
+        mountpoint = self.root / "mount"
+        (mountpoint / "media").mkdir(parents=True)
+        log = self.root / "scrapefs.log"
+        scrapefs = self.make_fake_scrapefs(log)
+        environment = os.environ.copy()
+        environment["SCRAPEFS_MOUNTPOINT"] = str(mountpoint)
+
+        outside_result = self.run_tool(
+            "preflight",
+            "--source",
+            outside,
+            "--source-root",
+            allowed_root,
+            "--library",
+            "media",
+            "--mountpoint",
+            mountpoint,
+            "--scrapefs",
+            scrapefs,
+            check=False,
+            env=environment,
+        )
+
+        self.assertEqual(outside_result.returncode, 3)
+        outside_payload = json.loads(outside_result.stdout)
+        self.assertEqual(outside_payload["status"], "manual")
+        self.assertIn(
+            "source_outside_allowed_roots",
+            [item["code"] for item in outside_payload["manual"]],
+        )
+
+        environment["SCRAPEFS_MOUNTPOINT"] = str(self.root / "other-mount")
+        mismatch = self.run_tool(
+            "preflight",
+            "--source",
+            outside,
+            "--source-root",
+            self.root,
+            "--library",
+            "media",
+            "--mountpoint",
+            mountpoint,
+            "--scrapefs",
+            scrapefs,
+            check=False,
+            env=environment,
+        )
+        self.assertEqual(mismatch.returncode, 3)
+        mismatch_payload = json.loads(mismatch.stdout)
+        self.assertIn(
+            "mountpoint_mismatch",
+            [item["code"] for item in mismatch_payload["manual"]],
+        )
+
+    def test_preflight_reports_control_and_library_access_failures(self):
+        source_root = self.root / "sources"
+        source_root.mkdir()
+        (source_root / "Movie.mkv").write_text("fixture movie", encoding="utf-8")
+        mountpoint = self.root / "mount"
+        mountpoint.mkdir()
+        log = self.root / "scrapefs.log"
+        scrapefs = self.make_fake_scrapefs(log)
+        environment = os.environ.copy()
+        environment["SCRAPEFS_MOUNTPOINT"] = str(mountpoint)
+        environment["STATUS_FAIL"] = "1"
+
+        unavailable = self.run_tool(
+            "preflight",
+            "--source",
+            source_root,
+            "--source-root",
+            source_root,
+            "--library",
+            "media",
+            "--mountpoint",
+            mountpoint,
+            "--scrapefs",
+            scrapefs,
+            check=False,
+            env=environment,
+        )
+
+        self.assertEqual(unavailable.returncode, 3)
+        unavailable_payload = json.loads(unavailable.stdout)
+        self.assertEqual(
+            [item["code"] for item in unavailable_payload["manual"]],
+            ["control_unavailable"],
+        )
+
+        environment.pop("STATUS_FAIL")
+        inaccessible = self.run_tool(
+            "preflight",
+            "--source",
+            source_root,
+            "--source-root",
+            source_root,
+            "--library",
+            "media",
+            "--mountpoint",
+            mountpoint,
+            "--scrapefs",
+            scrapefs,
+            check=False,
+            env=environment,
+        )
+        self.assertEqual(inaccessible.returncode, 3)
+        inaccessible_payload = json.loads(inaccessible.stdout)
+        self.assertIn(
+            "library_path_unavailable",
+            [item["code"] for item in inaccessible_payload["manual"]],
+        )
+
     def test_validate_and_apply_require_exact_fresh_digest(self):
         batch = self.root / "batch.json"
         batch.write_text(
@@ -1769,7 +1931,46 @@ class ScrapeFSMediaTests(unittest.TestCase):
                 )
                 command = " ".join(sys.argv[1:])
                 digest = os.environ.get("VALIDATION_DIGEST", "sha256:" + "a" * 64)
-                if "projection batch validate" in command:
+                if command.endswith("status"):
+                    if os.environ.get("STATUS_FAIL"):
+                        print(json.dumps({{
+                            "schema": "scrapefs.error/v1",
+                            "code": "Internal",
+                            "message": "control unavailable"
+                        }}), file=sys.stderr)
+                        raise SystemExit(1)
+                    mountpoint = os.environ.get("SCRAPEFS_MOUNTPOINT", "/mnt/scrapefs")
+                    print(json.dumps({{
+                        "schema": "scrapefs.status/v1",
+                        "state": "ready",
+                        "daemon": {{"version": "test", "ready": True}},
+                        "mount": {{"state": "ready", "path": mountpoint}},
+                        "socket": {{
+                            "state": "ready",
+                            "path": "/run/scrapefs/scrapefs.sock"
+                        }}
+                    }}))
+                elif command.endswith("library list"):
+                    print(json.dumps({{
+                        "schema": "scrapefs.library-list/v1",
+                        "libraries": [{{
+                            "id": 1,
+                            "name": "media",
+                            "status": "ACTIVE",
+                            "root_node_id": 2,
+                            "profile_name": "jellyfin",
+                            "profile_version": 1,
+                            "uid": 1000,
+                            "gid": 1000,
+                            "root_mode": 509,
+                            "directory_mode": 509,
+                            "projection_mode": 292,
+                            "overlay_mode": 436,
+                            "created_at_ns": 1,
+                            "updated_at_ns": 1
+                        }}]
+                    }}))
+                elif "projection batch validate" in command:
                     if os.environ.get("VALIDATE_FAIL"):
                         print(json.dumps({{
                             "schema": "scrapefs.error/v1",

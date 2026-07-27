@@ -318,7 +318,28 @@ BDMV/DVD、动画绝对集数、多集单文件、edition 自动判断、复杂 
 music/image-only、remote URL、symlink、非 regular source 和有歧义的多视频
 布局必须返回显式 `manual` 结果，不得静默忽略非 sample 视频。
 
-### 10.3 Plan 与 Metadata 边界
+### 10.3 环境 Preflight
+
+Plan 前必须校验调用用户实际可见的 control、source 和 FUSE 路径：
+
+```bash
+python3 "$SKILL_DIR/scripts/scrapefs_media.py" preflight \
+  --source /srv/downloads/Dune.2021 \
+  --source-root /srv/downloads \
+  --library media \
+  --mountpoint /mnt/scrapefs
+```
+
+每个显式允许的媒体根目录重复传入 `--source-root`，每个将传给 `plan` 的 fallback
+重复传入 `--fallback-source`。容器化 Agent 必须把每个 source 挂载到宿主 daemon
+使用的相同绝对路径，因为第一版不提供路径转换。
+
+Preflight 读取 daemon status 和 Library metadata，在不跟随 symlink 的情况下递归
+检查 source 访问，并检查报告的 FUSE Library 路径是否具备普通访问权限。它返回
+`scrapefs.agent-preflight/v1`，status 为 `ready` 或 `manual`。它不得修改权限、
+挂载文件系统或写入 probe artifact。`manual` 结果必须停止工作流。
+
+### 10.4 Plan 与 Metadata 边界
 
 先通过 `library list` 读取实际 Profile，再生成本地 Batch 和 artifact manifest：
 
@@ -350,7 +371,7 @@ python3 "$SKILL_DIR/scripts/scrapefs_media.py" plan \
 `status: manual` 时必须停止并展示全部 code、message 和 path。解决歧义后，
 使用 `--metadata <file>` 重新生成，不得修改或放宽 Batch Schema。
 
-### 10.4 Validate、Digest 确认与 Apply
+### 10.5 Validate、Digest 确认与 Apply
 
 ```bash
 python3 "$SKILL_DIR/scripts/scrapefs_media.py" validate \
@@ -376,7 +397,7 @@ python3 "$SKILL_DIR/scripts/scrapefs_media.py" apply \
 target conflict、权限或其他 validate/apply 错误必须停止流程，展示新结果并重新
 请求确认；不得自动重试或自动 apply。
 
-### 10.5 Artifact、Show 与 Undo
+### 10.6 Artifact、Show 与 Undo
 
 Batch digest 只确认 Projection Batch，不绑定 artifact manifest。apply 成功且
 artifact 列表已展示后，通过挂载点创建 OverlayFile：

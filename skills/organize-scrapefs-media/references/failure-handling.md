@@ -1,5 +1,25 @@
 # Failure Handling
 
+## Preflight
+
+- `control_unavailable`: verify the mounted control directory, `scrapefs`
+  executable, socket permissions, and daemon availability without escalating
+  inside the Skill.
+- `daemon_not_ready` or `mountpoint_unavailable`: repair the host daemon or
+  FUSE mount before continuing.
+- `mountpoint_mismatch`: mount the host ScrapeFS FUSE path at the same absolute
+  container path and rerun preflight.
+- `source_root_unavailable`: correct the read-only source-root mount or select
+  an existing real directory.
+- `source_outside_allowed_roots`: use an explicitly mounted source beneath one
+  of the reviewed roots; do not broaden roots automatically.
+- `library_unavailable` or `unsupported_library_profile`: repair or select the
+  intended ACTIVE Library.
+- `library_path_unavailable`: correct ordinary FUSE traversal/write access;
+  never create a probe artifact or change permissions from the Skill.
+
+Any preflight `status: manual` stops planning.
+
 ## Planning
 
 - `status: manual`: stop and present each code, message, and path.
