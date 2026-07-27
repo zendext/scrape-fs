@@ -1053,11 +1053,14 @@ def plan_movie(
         nfos,
     )
     nfo = parse_nfo(nfo_path, "movie", warnings) if nfo_path else {}
-    title = metadata_text(metadata, "title") or nfo.get("title")
+    explicit_title = metadata_text(metadata, "title")
+    explicit_year = metadata_year(metadata, "year")
+    explicit_provider_ids = metadata.get("provider_ids")
+    title = explicit_title or nfo.get("title")
     inferred_title, inferred_year = infer_movie_name(video.stem)
     title = title or inferred_title
-    year = metadata_year(metadata, "year") or nfo.get("year") or inferred_year
-    provider_ids = merge_provider_ids(nfo.get("provider_ids"), metadata.get("provider_ids"))
+    year = explicit_year or nfo.get("year") or inferred_year
+    provider_ids = merge_provider_ids(nfo.get("provider_ids"), explicit_provider_ids)
     validate_title(title, video)
     display = title_with_year(sanitize_name(title, profile), year)
     hint = provider_hint(profile, provider_ids, movie=True)
@@ -1083,7 +1086,15 @@ def plan_movie(
     warnings.extend(unmatched_subtitle_warnings(unmatched))
 
     artifacts = []
-    if nfo_path:
+    nfo_overridden = nfo_path and (
+        (explicit_title is not None and explicit_title != nfo.get("title"))
+        or (explicit_year is not None and explicit_year != nfo.get("year"))
+        or (
+            explicit_provider_ids is not None
+            and provider_ids != (nfo.get("provider_ids") or {})
+        )
+    )
+    if nfo_path and not nfo_overridden:
         artifacts.append(
             artifact_from_source(
                 "nfo",
@@ -1131,19 +1142,22 @@ def plan_episodes(
     tvshow_path = first_named(nfos, "tvshow.nfo")
     tvshow = parse_nfo(tvshow_path, "tvshow", warnings) if tvshow_path else {}
     inferred_show_title, inferred_show_year = infer_episode_series(videos)
+    explicit_show_title = metadata_text(metadata, "show_title")
+    explicit_show_year = metadata_year(metadata, "show_year")
+    explicit_provider_ids = metadata.get("provider_ids")
     show_title = (
-        metadata_text(metadata, "show_title")
+        explicit_show_title
         or tvshow.get("title")
         or inferred_show_title
     )
     show_year = (
-        metadata_year(metadata, "show_year")
+        explicit_show_year
         or tvshow.get("year")
         or inferred_show_year
     )
     provider_ids = merge_provider_ids(
         tvshow.get("provider_ids"),
-        metadata.get("provider_ids"),
+        explicit_provider_ids,
     )
     validate_title(show_title, videos[0])
     show_display = title_with_year(sanitize_name(show_title, profile), show_year)
@@ -1161,7 +1175,21 @@ def plan_episodes(
     artifacts = []
     seen_episodes = set()
 
-    if tvshow_path:
+    tvshow_overridden = tvshow_path and (
+        (
+            explicit_show_title is not None
+            and explicit_show_title != tvshow.get("title")
+        )
+        or (
+            explicit_show_year is not None
+            and explicit_show_year != tvshow.get("year")
+        )
+        or (
+            explicit_provider_ids is not None
+            and provider_ids != (tvshow.get("provider_ids") or {})
+        )
+    )
+    if tvshow_path and not tvshow_overridden:
         artifacts.append(
             artifact_from_source(
                 "nfo",
@@ -1202,8 +1230,9 @@ def plan_episodes(
             if episode_nfo_path
             else {}
         )
+        explicit_episode_title = metadata_episode_title(metadata, episode_key)
         title = (
-            metadata_episode_title(metadata, episode_key)
+            explicit_episode_title
             or episode_nfo_data.get("title")
             or infer_episode_title(video.stem, match.end())
         )
@@ -1234,7 +1263,12 @@ def plan_episodes(
                 }
             )
         nfo_target = season_directory / (episode_base + ".nfo")
-        if episode_nfo_path:
+        episode_nfo_overridden = (
+            episode_nfo_path
+            and explicit_episode_title is not None
+            and explicit_episode_title != episode_nfo_data.get("title")
+        )
+        if episode_nfo_path and not episode_nfo_overridden:
             artifacts.append(
                 artifact_from_source(
                     "nfo",

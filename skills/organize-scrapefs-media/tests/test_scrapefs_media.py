@@ -298,6 +298,51 @@ class ScrapeFSMediaTests(unittest.TestCase):
         self.assertNotIn("source", artifact)
         self.assertIn("<title>Dune: Part One</title>", artifact["content"])
 
+    def test_explicit_movie_metadata_replaces_conflicting_local_nfo_artifact(self):
+        source = self.copy_fixture("movie-directory")
+        metadata = self.root / "movie-override.json"
+        batch = self.root / "movie-override.batch.json"
+        artifacts = self.root / "movie-override.artifacts.json"
+        metadata.write_text(
+            json.dumps(
+                {
+                    "kind": "movie",
+                    "title": "Dune: Part One",
+                    "year": 2022,
+                    "provider_ids": {
+                        "imdb": "tt1160419",
+                        "tmdb": "438631",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--metadata",
+            metadata,
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+        )
+
+        nfo = json.loads(artifacts.read_text(encoding="utf-8"))["artifacts"][0]
+        self.assertNotIn("source", nfo)
+        self.assertIn("<title>Dune: Part One</title>", nfo["content"])
+        self.assertIn("<year>2022</year>", nfo["content"])
+        self.assertIn('<uniqueid type="imdb">tt1160419</uniqueid>', nfo["content"])
+        self.assertIn('<uniqueid type="tmdb">438631</uniqueid>', nfo["content"])
+
     def test_plans_supported_sidecars_for_single_file_movie(self):
         source = self.root / "Dune.2021.mkv"
         source.write_text("fixture movie", encoding="utf-8")
@@ -538,6 +583,83 @@ class ScrapeFSMediaTests(unittest.TestCase):
                 )
                 for target in targets
             )
+        )
+
+    def test_explicit_episode_metadata_replaces_only_conflicting_nfo_artifacts(self):
+        source = self.copy_fixture("episodes")
+        metadata = self.root / "episodes-nfo-overrides.json"
+        batch = self.root / "episodes-nfo-overrides.batch.json"
+        artifacts = self.root / "episodes-nfo-overrides.artifacts.json"
+        metadata.write_text(
+            json.dumps(
+                {
+                    "kind": "episodes",
+                    "show_title": "The Expanse Revised",
+                    "show_year": 2016,
+                    "provider_ids": {
+                        "tmdb": "63639",
+                        "tvdb": "280619",
+                    },
+                    "episodes": {
+                        "S01E01": {
+                            "title": "Dulcinea Revised",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--metadata",
+            metadata,
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+        )
+
+        nfos = {
+            Path(artifact["target"]).name: artifact
+            for artifact in json.loads(
+                artifacts.read_text(encoding="utf-8")
+            )["artifacts"]
+            if artifact["kind"] == "nfo"
+        }
+        show_nfo = nfos["tvshow.nfo"]
+        self.assertNotIn("source", show_nfo)
+        self.assertIn("<title>The Expanse Revised</title>", show_nfo["content"])
+        self.assertIn("<year>2016</year>", show_nfo["content"])
+        self.assertIn('<uniqueid type="tmdb">63639</uniqueid>', show_nfo["content"])
+        self.assertIn('<uniqueid type="tvdb">280619</uniqueid>', show_nfo["content"])
+
+        first_episode = next(
+            artifact
+            for name, artifact in nfos.items()
+            if "S01E01" in name
+        )
+        self.assertNotIn("source", first_episode)
+        self.assertIn("<title>Dulcinea Revised</title>", first_episode["content"])
+        self.assertIn("<season>1</season>", first_episode["content"])
+        self.assertIn("<episode>1</episode>", first_episode["content"])
+
+        second_episode = next(
+            artifact
+            for name, artifact in nfos.items()
+            if "S01E02" in name
+        )
+        self.assertEqual(
+            second_episode["source"],
+            str(source / "The.Expanse.S01E02.The.Big.Empty.nfo"),
         )
 
     def test_plans_episodes_under_explicit_anime_root(self):

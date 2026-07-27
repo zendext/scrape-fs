@@ -46,7 +46,10 @@ unmatched subtitle as a warning instead of guessing.
 
 Do not place source NFO or artwork in the Projection Batch. Add them to the
 post-apply artifact manifest so they are created as OverlayFiles through FUSE.
-When no NFO exists, generate a minimal NFO from resolved metadata.
+When no NFO exists, generate a minimal NFO from resolved metadata. When
+explicit metadata changes a title, year, or provider ID represented by a local
+NFO, generate deterministic NFO content with the resolved values instead of
+copying the conflicting source NFO.
 
 ## Episode Source Priority
 
