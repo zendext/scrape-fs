@@ -154,7 +154,7 @@ Replace path separators and control characters in titles. For Jellyfin also
 replace `<`, `>`, `:`, `"`, `|`, `?`, and `*`. Return manual handling instead
 of truncating an overlong generated component. Strip one balanced outer
 `【...】` wrapper because it is display decoration rather than part of the
-filesystem title.
+filesystem title. Normalize full-width `（` and `）` to ASCII `(` and `)`.
 
 ## Manual Handling
 

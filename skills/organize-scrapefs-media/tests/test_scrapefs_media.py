@@ -732,6 +732,51 @@ class ScrapeFSMediaTests(unittest.TestCase):
             )
         )
 
+    def test_normalizes_fullwidth_parentheses_in_episode_titles(self):
+        source = self.copy_fixture("episodes")
+        metadata = self.root / "episodes-fullwidth-parentheses.json"
+        batch = self.root / "episodes-fullwidth-parentheses.batch.json"
+        artifacts = self.root / "episodes-fullwidth-parentheses.artifacts.json"
+        metadata.write_text(
+            json.dumps(
+                {
+                    "kind": "episodes",
+                    "episodes": {"S01E01": {"title": "白门楼（上）"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--metadata",
+            metadata,
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+        )
+
+        targets = [
+            entry["target"]
+            for entry in json.loads(batch.read_text(encoding="utf-8"))["entries"]
+        ]
+        self.assertIn(
+            (
+                "Shows/The Expanse (2015) [tvdbid-280619]/Season 01/"
+                "The Expanse (2015) S01E01 白门楼(上).mkv"
+            ),
+            targets,
+        )
+
     def test_returns_manual_for_mixed_series_episode_directory(self):
         source = self.root / "mixed-series"
         source.mkdir()
