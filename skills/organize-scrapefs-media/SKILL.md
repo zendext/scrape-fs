@@ -1,6 +1,6 @@
 ---
 name: organize-scrapefs-media
-description: Inspect local movie and standard SxxEyy episode sources, exclude samples, read NFO metadata, probe media with ffprobe, generate deterministic Plex or Jellyfin ScrapeFS Projection Batches, obtain explicit approval of reviewed batches, apply or undo batches with digest consistency checks, and create NFO or artwork OverlayFiles through FUSE. Use when organizing local media into an existing ScrapeFS Library or diagnosing a media source that the v1 workflow may require manual handling.
+description: Inspect local movie and standard SxxEyy episode sources, select missing episodes from ordered fallback sources, exclude samples, read NFO metadata, probe media with ffprobe, generate deterministic Plex or Jellyfin ScrapeFS Projection Batches for shows, anime, or variety roots, obtain explicit approval of reviewed batches, apply or undo batches with digest consistency checks, and create NFO or artwork OverlayFiles through FUSE. Use when organizing local media into an existing ScrapeFS Library or diagnosing a media source that the v1 workflow may require manual handling.
 ---
 
 # Organize ScrapeFS Media
@@ -65,6 +65,24 @@ python3 "$TOOL" plan \
   --batch /tmp/oshi-no-ko.batch.json \
   --artifacts /tmp/oshi-no-ko.artifacts.json
 ```
+
+For complementary episode sources, inspect their actual resolution first, pass
+the preferred source first, and add lower-priority sources in fallback order.
+For example, a 4K variety source with 1080p gap filling:
+
+```bash
+python3 "$TOOL" plan \
+  --source /srv/downloads/variety/show.2160p \
+  --fallback-source /srv/downloads/variety/show.1080p \
+  --library jellyfin \
+  --profile jellyfin \
+  --series-root variety \
+  --batch /tmp/variety.batch.json \
+  --artifacts /tmp/variety.artifacts.json
+```
+
+The first source claiming an `SxxEyy` wins. A fallback contributes only episode
+keys missing from all earlier sources.
 
 The command only reads local sources and writes local JSON files. It never calls
 the control CLI, mounts filesystems, queries a metadata provider, or applies a

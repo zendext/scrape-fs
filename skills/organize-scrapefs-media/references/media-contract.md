@@ -7,6 +7,8 @@ The v1 planner accepts local regular files and directories containing:
 - one movie file;
 - one movie directory with one non-sample movie file;
 - one or more separately stored episodes using one `SxxEyy` token per file;
+- ordered fallback episode directories supplied with repeated
+  `--fallback-source` arguments;
 - ordinary external subtitles next to their video;
 - Kodi-compatible `movie.nfo`, `tvshow.nfo`, and episode-stem NFO files;
 - one local `poster`, `folder`, `cover`, or `movie` artwork candidate.
@@ -45,6 +47,18 @@ unmatched subtitle as a warning instead of guessing.
 Do not place source NFO or artwork in the Projection Batch. Add them to the
 post-apply artifact manifest so they are created as OverlayFiles through FUSE.
 When no NFO exists, generate a minimal NFO from resolved metadata.
+
+## Episode Source Priority
+
+The primary `--source` has highest priority. Each `--fallback-source` contributes
+only `SxxEyy` keys missing from all earlier sources. Lower-priority duplicate
+videos are reported as ignored with reason `lower_priority_episode_source`.
+Duplicate episode keys inside one fallback source remain a manual error.
+
+The planner does not infer quality from release names. Inspect sources with
+`ffprobe` and order them explicitly, such as 2160p first and 1080p second.
+Series NFO and artwork come from the primary source; selected fallback episodes
+may contribute their matching episode NFO and subtitle files.
 
 ## Metadata Resolution
 
@@ -128,6 +142,9 @@ TV Shows/Show (Year) {tmdb-ID}/Season 01/Show (Year) - S01E01 - Episode Title.mk
 For an anime media library, pass `--series-root anime`. The episode layout is
 the same except that `Anime/` replaces `Shows/` or `TV Shows/`.
 
+For a variety media library, pass `--series-root variety`. The episode layout
+uses `Variety/` as its root.
+
 Provider hints and years are omitted when unavailable. For movies prefer TMDB,
 then IMDb. For shows prefer TMDB, then TVDB, then IMDb. Preserve the source
 extension in lowercase. Use the corresponding media basename for external
@@ -146,7 +163,7 @@ Return `status: manual` and write no batch when the source contains:
 - BDMV or VIDEO_TS;
 - anime or another TV layout without standard `SxxEyy`;
 - one file containing multiple episodes;
-- multiple files claiming the same `SxxEyy`;
+- multiple files at the same source priority claiming the same `SxxEyy`;
 - multiple non-episode video candidates;
 - automatic edition markers;
 - movie or TV extras;

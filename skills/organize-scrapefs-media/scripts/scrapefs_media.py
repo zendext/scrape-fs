@@ -108,6 +108,15 @@ def build_parser():
         help="Inspect a local file or directory and write a batch plus artifact manifest.",
     )
     plan.add_argument("--source", required=True, help="Local media file or directory.")
+    plan.add_argument(
+        "--fallback-source",
+        action="append",
+        default=[],
+        help=(
+            "Lower-priority episode source used only for SxxEyy entries missing "
+            "from earlier sources. May be repeated."
+        ),
+    )
     plan.add_argument("--library", required=True, help="ACTIVE ScrapeFS Library name.")
     plan.add_argument(
         "--profile",
@@ -117,7 +126,7 @@ def build_parser():
     )
     plan.add_argument(
         "--series-root",
-        choices=("shows", "anime"),
+        choices=("shows", "anime", "variety"),
         default="shows",
         help="Projection root for episode sources.",
     )
@@ -198,6 +207,7 @@ def handle_plan(arguments):
             arguments.ffprobe,
             arguments.metadata,
             arguments.series_root,
+            arguments.fallback_source,
         )
     except ManualHandling as error:
         report = manual_report(arguments.source, [error.item])
@@ -371,104 +381,20 @@ def create_plan(
     ffprobe,
     metadata_path,
     series_root,
+    fallback_source_values,
 ):
     validate_library_name(library_name)
-    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", os.fspath(source_value)):
-        return (
-            manual_report(
-                source_value,
-                [
-                    manual_item(
-                        "remote_source",
-                        "remote and network source URLs require manual handling in v1",
-                        source_value,
-                    )
-                ],
-            ),
-            None,
-            None,
-        )
-    source = normalized_absolute_path(source_value)
-    linked_component = first_symlink_component(source)
-    if linked_component is not None:
-        return (
-            manual_report(
-                source,
-                [
-                    manual_item(
-                        "symlink_source",
-                        "source path contains a symbolic-link component",
-                        linked_component,
-                    )
-                ],
-            ),
-            None,
-            None,
-        )
+    source = normalized_local_source(source_value)
     metadata = load_metadata(metadata_path)
-    files, enumeration_manual = enumerate_source(source)
-    ignored: list[dict] = []
-    manual = list(enumeration_manual)
-
-    for path in files:
-        if any(
-            part.casefold() in DISC_COMPONENTS
-            for part in relative_parts(path, source)
-        ):
-            manual.append(
-                manual_item(
-                    "disc_layout",
-                    "BDMV and VIDEO_TS layouts require manual handling in v1",
-                    path,
-                )
-            )
+    inspected = inspect_media_source(source)
+    ignored = list(inspected["ignored"])
+    manual = list(inspected["manual"])
     if manual:
         return manual_report(source, manual, ignored), None, None
-
-    videos = []
-    subtitles = []
-    nfos = []
-    artwork = []
-    for path in files:
-        if is_sample(path, source):
-            ignored.append(
-                {
-                    "path": os.fspath(path),
-                    "reason": "sample",
-                }
-            )
-            continue
-        if is_complex_extra(path, source):
-            manual.append(
-                manual_item(
-                    "complex_extras",
-                    "movie and show extras require manual handling in v1",
-                    path,
-                )
-            )
-            continue
-        if is_edition(path):
-            manual.append(
-                manual_item(
-                    "edition_detection",
-                    "automatic edition detection requires manual handling in v1",
-                    path,
-                )
-            )
-            continue
-
-        extension = path.suffix.casefold()
-        if extension in VIDEO_EXTENSIONS:
-            videos.append(path)
-        elif extension in SUBTITLE_EXTENSIONS:
-            subtitles.append(path)
-        elif extension == ".nfo":
-            nfos.append(path)
-        elif extension in ARTWORK_EXTENSIONS:
-            artwork.append(path)
-
-    if manual:
-        return manual_report(source, manual, ignored), None, None
+    videos = list(inspected["videos"])
+    subtitles = list(inspected["subtitles"])
+    nfos = list(inspected["nfos"])
+    artwork = list(inspected["artwork"])
     if not videos:
         return (
             manual_report(
@@ -498,6 +424,103 @@ def create_plan(
     layout, layout_manual = classify_layout(videos, nfos, metadata)
     if layout_manual:
         return manual_report(source, layout_manual, ignored, probes), None, None
+
+    fallback_sources = []
+    if fallback_source_values and layout != "episodes":
+        return (
+            manual_report(
+                source,
+                [
+                    manual_item(
+                        "fallback_source_not_supported",
+                        "fallback sources are supported only for episode layouts",
+                        source,
+                    )
+                ],
+                ignored,
+                probes,
+            ),
+            None,
+            None,
+        )
+    for fallback_value in fallback_source_values:
+        fallback_source = normalized_local_source(fallback_value)
+        if fallback_source == source or fallback_source in fallback_sources:
+            return (
+                manual_report(
+                    source,
+                    [
+                        manual_item(
+                            "duplicate_fallback_source",
+                            "fallback sources must be distinct from earlier sources",
+                            fallback_source,
+                        )
+                    ],
+                    ignored,
+                    probes,
+                ),
+                None,
+                None,
+            )
+        fallback_sources.append(fallback_source)
+        fallback = inspect_media_source(fallback_source)
+        ignored.extend(fallback["ignored"])
+        if fallback["manual"]:
+            return (
+                manual_report(
+                    source,
+                    fallback["manual"],
+                    ignored,
+                    probes,
+                ),
+                None,
+                None,
+            )
+        if not fallback["videos"]:
+            return (
+                manual_report(
+                    source,
+                    [
+                        manual_item(
+                            "unsupported_media",
+                            "fallback source contains no supported local video files",
+                            fallback_source,
+                        )
+                    ],
+                    ignored,
+                    probes,
+                ),
+                None,
+                None,
+            )
+        selected, skipped = select_missing_episode_videos(
+            videos,
+            fallback["videos"],
+        )
+        ignored.extend(skipped)
+        selected_set = set(selected)
+        videos.extend(selected)
+        subtitles.extend(
+            subtitle
+            for subtitle in fallback["subtitles"]
+            if any(
+                subtitle_matches_video(subtitle, video)
+                for video in selected_set
+            )
+        )
+        selected_nfos = {video.with_suffix(".nfo") for video in selected}
+        nfos.extend(
+            nfo
+            for nfo in fallback["nfos"]
+            if nfo in selected_nfos
+        )
+        for video in selected:
+            try:
+                probes.append(probe_video(video, ffprobe))
+            except ManualHandling as error:
+                manual.append(error.item)
+        if manual:
+            return manual_report(source, manual, ignored, probes), None, None
 
     try:
         if layout == "movie":
@@ -549,7 +572,149 @@ def create_plan(
         "probes": probes,
         "artifacts": artifact_items,
     }
+    if fallback_sources:
+        report["fallback_sources"] = [
+            os.fspath(fallback_source)
+            for fallback_source in fallback_sources
+        ]
     return report, batch, artifacts
+
+
+def normalized_local_source(source_value):
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", os.fspath(source_value)):
+        raise ManualHandling(
+            "remote_source",
+            "remote and network source URLs require manual handling in v1",
+            source_value,
+        )
+    source = normalized_absolute_path(source_value)
+    linked_component = first_symlink_component(source)
+    if linked_component is not None:
+        raise ManualHandling(
+            "symlink_source",
+            "source path contains a symbolic-link component",
+            linked_component,
+        )
+    return source
+
+
+def inspect_media_source(source):
+    files, manual = enumerate_source(source)
+    ignored = []
+    videos = []
+    subtitles = []
+    nfos = []
+    artwork = []
+
+    for path in files:
+        if any(
+            part.casefold() in DISC_COMPONENTS
+            for part in relative_parts(path, source)
+        ):
+            manual.append(
+                manual_item(
+                    "disc_layout",
+                    "BDMV and VIDEO_TS layouts require manual handling in v1",
+                    path,
+                )
+            )
+            continue
+        if is_sample(path, source):
+            ignored.append(
+                {
+                    "path": os.fspath(path),
+                    "reason": "sample",
+                }
+            )
+            continue
+        if is_complex_extra(path, source):
+            manual.append(
+                manual_item(
+                    "complex_extras",
+                    "movie and show extras require manual handling in v1",
+                    path,
+                )
+            )
+            continue
+        if is_edition(path):
+            manual.append(
+                manual_item(
+                    "edition_detection",
+                    "automatic edition detection requires manual handling in v1",
+                    path,
+                )
+            )
+            continue
+
+        extension = path.suffix.casefold()
+        if extension in VIDEO_EXTENSIONS:
+            videos.append(path)
+        elif extension in SUBTITLE_EXTENSIONS:
+            subtitles.append(path)
+        elif extension == ".nfo":
+            nfos.append(path)
+        elif extension in ARTWORK_EXTENSIONS:
+            artwork.append(path)
+
+    return {
+        "videos": videos,
+        "subtitles": subtitles,
+        "nfos": nfos,
+        "artwork": artwork,
+        "ignored": ignored,
+        "manual": manual,
+    }
+
+
+def select_missing_episode_videos(existing_videos, fallback_videos):
+    existing_keys = set()
+    for video in existing_videos:
+        key = episode_key(video)
+        if key is not None:
+            existing_keys.add(key)
+    fallback_keys = set()
+    selected = []
+    ignored = []
+    for video in sorted(fallback_videos, key=os.fspath):
+        key = episode_key(video)
+        if key is None:
+            raise ManualHandling(
+                "ambiguous_layout",
+                "episode fallback sources require standard SxxEyy filenames",
+                video,
+            )
+        if key in fallback_keys:
+            raise ManualHandling(
+                "duplicate_episode",
+                f"multiple fallback files claim episode {key}",
+                video,
+            )
+        fallback_keys.add(key)
+        if key in existing_keys:
+            ignored.append(
+                {
+                    "path": os.fspath(video),
+                    "reason": "lower_priority_episode_source",
+                }
+            )
+            continue
+        selected.append(video)
+        existing_keys.add(key)
+    return selected, ignored
+
+
+def episode_key(path):
+    match = EPISODE_PATTERN.search(path.stem)
+    if match is None:
+        return None
+    return f"S{int(match.group('season')):02d}E{int(match.group('episode')):02d}"
+
+
+def subtitle_matches_video(subtitle, video):
+    return subtitle.parent == video.parent and (
+        subtitle.stem == video.stem
+        or subtitle.name.startswith(video.stem + ".")
+    )
 
 
 def enumerate_source(source):
@@ -983,11 +1148,12 @@ def plan_episodes(
     validate_title(show_title, videos[0])
     show_display = title_with_year(sanitize_name(show_title, profile), show_year)
     show_name = show_display + provider_hint(profile, provider_ids, movie=False)
-    root_name = (
-        "Anime"
-        if series_root == "anime"
-        else ("Shows" if profile == "jellyfin" else "TV Shows")
-    )
+    if series_root == "anime":
+        root_name = "Anime"
+    elif series_root == "variety":
+        root_name = "Variety"
+    else:
+        root_name = "Shows" if profile == "jellyfin" else "TV Shows"
     show_directory = PurePosixPath(root_name) / show_name
     matched_subtitles, unmatched = associate_subtitles(videos, subtitles)
     warnings.extend(unmatched_subtitle_warnings(unmatched))

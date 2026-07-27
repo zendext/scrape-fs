@@ -578,6 +578,110 @@ class ScrapeFSMediaTests(unittest.TestCase):
             all(target.startswith("media/Anime/") for target in artifact_targets)
         )
 
+    def test_plans_episodes_under_explicit_variety_root(self):
+        source = self.copy_fixture("episodes")
+        batch = self.root / "episodes-variety.batch.json"
+        artifacts = self.root / "episodes-variety.artifacts.json"
+
+        self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--series-root",
+            "variety",
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+        )
+
+        targets = [
+            entry["target"]
+            for entry in json.loads(batch.read_text(encoding="utf-8"))["entries"]
+        ]
+        artifact_targets = [
+            artifact["target"]
+            for artifact in json.loads(
+                artifacts.read_text(encoding="utf-8")
+            )["artifacts"]
+        ]
+        self.assertTrue(all(target.startswith("Variety/") for target in targets))
+        self.assertTrue(
+            all(target.startswith("media/Variety/") for target in artifact_targets)
+        )
+
+    def test_uses_fallback_source_only_for_missing_episodes(self):
+        primary = self.root / "primary"
+        fallback = self.root / "fallback"
+        primary.mkdir()
+        fallback.mkdir()
+        primary_episode = primary / "Show.S01E01.2160p.mkv"
+        duplicate_fallback = fallback / "Show.S01E01.1080p.mkv"
+        missing_fallback = fallback / "Show.S01E02.1080p.mkv"
+        primary_episode.write_text("primary episode", encoding="utf-8")
+        duplicate_fallback.write_text("duplicate fallback", encoding="utf-8")
+        missing_fallback.write_text("missing fallback", encoding="utf-8")
+        metadata = self.root / "fallback-metadata.json"
+        batch = self.root / "fallback.batch.json"
+        artifacts = self.root / "fallback.artifacts.json"
+        metadata.write_text(
+            json.dumps(
+                {
+                    "kind": "episodes",
+                    "show_title": "Show",
+                    "show_year": 2026,
+                    "provider_ids": {"tmdb": "12345"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_tool(
+            "plan",
+            "--source",
+            primary,
+            "--fallback-source",
+            fallback,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--metadata",
+            metadata,
+            "--batch",
+            batch,
+            "--artifacts",
+            artifacts,
+            "--ffprobe",
+            self.ffprobe,
+        )
+
+        report = json.loads(result.stdout)
+        sources = [
+            entry["source"]
+            for entry in json.loads(batch.read_text(encoding="utf-8"))["entries"]
+        ]
+        self.assertEqual(sources, [str(primary_episode), str(missing_fallback)])
+        self.assertEqual(
+            report["fallback_sources"],
+            [str(fallback)],
+        )
+        self.assertEqual(
+            report["ignored"],
+            [
+                {
+                    "path": str(duplicate_fallback),
+                    "reason": "lower_priority_episode_source",
+                }
+            ],
+        )
+
     def test_strips_decorative_corner_brackets_from_show_title(self):
         source = self.copy_fixture("episodes")
         metadata = self.root / "episodes-decorative-title.json"
