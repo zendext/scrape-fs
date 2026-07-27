@@ -39,6 +39,7 @@ VIDEO_EXTENSIONS = {
 SUBTITLE_EXTENSIONS = {".ass", ".smi", ".srt", ".ssa", ".sub", ".vtt"}
 ARTWORK_EXTENSIONS = {".jpeg", ".jpg", ".png", ".tbn", ".webp"}
 ARTWORK_STEMS = ("poster", "folder", "cover", "movie")
+SUPPORTED_PROVIDER_IDS = {"imdb", "tmdb", "tvdb"}
 DISC_COMPONENTS = {"bdmv", "video_ts"}
 EXTRA_COMPONENTS = {
     "behind the scenes",
@@ -863,6 +864,7 @@ def plan_movie(
     profile,
     metadata,
 ):
+    warnings = []
     nfo_path = first_existing(
         [
             video.with_suffix(".nfo"),
@@ -870,7 +872,7 @@ def plan_movie(
         ],
         nfos,
     )
-    nfo = parse_nfo(nfo_path, "movie") if nfo_path else {}
+    nfo = parse_nfo(nfo_path, "movie", warnings) if nfo_path else {}
     title = metadata_text(metadata, "title") or nfo.get("title")
     inferred_title, inferred_year = infer_movie_name(video.stem)
     title = title or inferred_title
@@ -889,7 +891,6 @@ def plan_movie(
             "target": (directory / (target_base + video.suffix.casefold())).as_posix(),
         }
     ]
-    warnings = []
     matched_subtitles, unmatched = associate_subtitles([video], subtitles)
     for subtitle in matched_subtitles.get(video, []):
         suffix = subtitle.name[len(video.stem) :]
@@ -945,8 +946,9 @@ def plan_episodes(
     profile,
     metadata,
 ):
+    warnings = []
     tvshow_path = first_named(nfos, "tvshow.nfo")
-    tvshow = parse_nfo(tvshow_path, "tvshow") if tvshow_path else {}
+    tvshow = parse_nfo(tvshow_path, "tvshow", warnings) if tvshow_path else {}
     inferred_show_title, inferred_show_year = infer_episode_series(videos)
     show_title = (
         metadata_text(metadata, "show_title")
@@ -968,7 +970,7 @@ def plan_episodes(
     root_name = "Shows" if profile == "jellyfin" else "TV Shows"
     show_directory = PurePosixPath(root_name) / show_name
     matched_subtitles, unmatched = associate_subtitles(videos, subtitles)
-    warnings = unmatched_subtitle_warnings(unmatched)
+    warnings.extend(unmatched_subtitle_warnings(unmatched))
     entries = []
     artifacts = []
     seen_episodes = set()
@@ -1010,7 +1012,7 @@ def plan_episodes(
         seen_episodes.add(episode_key)
         episode_nfo_path = first_existing([video.with_suffix(".nfo")], nfos)
         episode_nfo_data = (
-            parse_nfo(episode_nfo_path, "episodedetails")
+            parse_nfo(episode_nfo_path, "episodedetails", warnings)
             if episode_nfo_path
             else {}
         )
@@ -1090,7 +1092,7 @@ def first_named(paths, name):
     return sorted(matching, key=os.fspath)[0] if matching else None
 
 
-def parse_nfo(path, expected_root):
+def parse_nfo(path, expected_root, warnings=None):
     try:
         root = ET.parse(path).getroot()
     except (OSError, ET.ParseError) as error:
@@ -1129,6 +1131,19 @@ def parse_nfo(path, expected_root):
         provider = (child.get("type") or "").casefold()
         value = (child.text or "").strip()
         if provider and value:
+            if provider not in SUPPORTED_PROVIDER_IDS:
+                if warnings is not None:
+                    warnings.append(
+                        {
+                            "code": "unsupported_provider_id",
+                            "message": (
+                                "ignored lower-priority NFO provider ID "
+                                f"{provider!r}={value!r}"
+                            ),
+                            "path": os.fspath(path),
+                        }
+                    )
+                continue
             try:
                 provider_ids[provider] = validate_provider_id(provider, value)
             except ValueError as error:

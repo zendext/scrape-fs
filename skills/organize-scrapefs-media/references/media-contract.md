@@ -90,6 +90,12 @@ form. The planner does not contact those providers. The Agent may use an
 external provider only with the user's normal permissions and must put the
 resolved values in this file.
 
+For existing NFO files, valid supported IDs remain strict. Unknown,
+lower-priority provider IDs such as Wikidata are reported as warnings and
+ignored for deterministic naming instead of invalidating a higher-priority
+TMDB, TVDB, or IMDb identity. Movie target hints prefer TMDB and then IMDb;
+show target hints prefer TVDB, TMDB, and then IMDb.
+
 ## Deterministic Naming
 
 Use one movie folder for both Profiles.

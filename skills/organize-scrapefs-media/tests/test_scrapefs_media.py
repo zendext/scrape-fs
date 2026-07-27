@@ -171,6 +171,74 @@ class ScrapeFSMediaTests(unittest.TestCase):
             ],
         )
 
+    def test_ignores_lower_priority_nfo_provider_when_tmdb_is_valid(self):
+        source = self.copy_fixture("movie-directory")
+        nfo = source / "movie.nfo"
+        nfo.write_text(
+            nfo.read_text(encoding="utf-8").replace(
+                "</movie>",
+                '<uniqueid type="wikidata">Q123185887</uniqueid></movie>',
+            ),
+            encoding="utf-8",
+        )
+
+        report, batch_path, _ = self.plan(source, "jellyfin")
+
+        self.assertEqual(report["status"], "ready")
+        self.assertEqual(
+            json.loads(batch_path.read_text(encoding="utf-8"))["entries"][0][
+                "target"
+            ],
+            (
+                "Movies/Dune (2021) [tmdbid-438631]/"
+                "Dune (2021) [tmdbid-438631].mkv"
+            ),
+        )
+        self.assertIn(
+            {
+                "code": "unsupported_provider_id",
+                "message": (
+                    "ignored lower-priority NFO provider ID "
+                    "'wikidata'='Q123185887'"
+                ),
+                "path": str(nfo),
+            },
+            report["warnings"],
+        )
+
+    def test_rejects_invalid_supported_nfo_provider(self):
+        source = self.copy_fixture("movie-directory")
+        nfo = source / "movie.nfo"
+        nfo.write_text(
+            nfo.read_text(encoding="utf-8").replace(
+                ">438631<",
+                ">not-a-tmdb-id<",
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_tool(
+            "plan",
+            "--source",
+            source,
+            "--library",
+            "media",
+            "--profile",
+            "jellyfin",
+            "--batch",
+            self.root / "invalid-provider.batch.json",
+            "--artifacts",
+            self.root / "invalid-provider.artifacts.json",
+            "--ffprobe",
+            self.ffprobe,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 3)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["status"], "manual")
+        self.assertIn("invalid 'tmdb' provider ID", report["manual"][0]["message"])
+
     def test_plans_single_file_movie_from_agent_metadata_and_generates_nfo(self):
         source = self.root / "unidentified.mkv"
         source.write_text("fixture movie", encoding="utf-8")
