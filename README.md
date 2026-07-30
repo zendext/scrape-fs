@@ -2,6 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+> This project was written by AI. Use it at your own risk.
+
 ScrapeFS is an external-agent-assisted media organization and virtual directory filesystem for Linux.
 
 It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
