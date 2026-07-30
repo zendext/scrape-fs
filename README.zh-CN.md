@@ -147,7 +147,6 @@ sh -n \
   scripts/install.sh \
   scripts/package-release.sh \
   scripts/release-version.sh
-systemd-analyze verify packaging/systemd/scrapefsd.service
 python3 -m unittest discover \
   -s scripts/tests \
   -p 'test_*.py'
