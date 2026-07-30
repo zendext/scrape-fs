@@ -88,7 +88,7 @@ SQLite's own locking and transaction semantics protect database consistency. The
 
 Persistent internal identities use SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` values and Go `int64`, so deleted node IDs are not reused. Persisted timestamps use UTC Unix nanoseconds in SQLite `INTEGER` columns.
 
-The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. `scrapes` is a released legacy storage name. Schema migration 3 extends it for applied-batch provenance without rewriting the released migration and adds `projection_batch_entries` for ordered source identity and target history. Schema migration 4 extends the released `objects` placeholder with `STAGING`/`LIVE` lifecycle state and timestamps.
+The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. `scrapes` is a released legacy storage name. Schema migration 3 extends it for applied-batch provenance without rewriting the released migration and adds `projection_batch_entries` for ordered source identity and target history. Schema migration 4 extends the released `objects` placeholder with `STAGING`/`LIVE` lifecycle state and timestamps. Schema migration 5 permits an associated `projection.batch.undo` operation to record empty path and node-kind arrays when no Batch-owned Projection remains, while every other operation still requires at least one affected path.
 
 The schema uses declarative local integrity only: `STRICT` tables, primary keys, `NOT NULL`, row-local `CHECK` constraints, foreign keys, and unique indexes. SQLite triggers do not implement namespace business rules, lifecycle policy, namespace-version policy, or operation-log policy.
 

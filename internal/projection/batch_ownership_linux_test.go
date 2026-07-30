@@ -319,7 +319,9 @@ func TestRemoveBatchOwnedProjectionPreservesBatchHistoryAndUndo(t *testing.T) {
 		undoneDetail.Entries[0].ProjectionNodeID != nil ||
 		len(undoneDetail.Operations) != 4 ||
 		undoneDetail.Operations[2].Name != "projection.remove" ||
-		undoneDetail.Operations[3].Name != "projection.batch.undo" {
+		undoneDetail.Operations[3].Name != "projection.batch.undo" ||
+		len(undoneDetail.Operations[3].Details.Paths) != 0 ||
+		len(undoneDetail.Operations[3].Details.NodeKinds) != 0 {
 		t.Errorf("Batch detail after Undo = %#v", undoneDetail)
 	}
 }
@@ -457,6 +459,27 @@ func TestRebindRejectsBatchOwnedProjection(t *testing.T) {
 	})
 	if !errors.Is(err, projection.ErrBatchOwnedProjection) {
 		t.Fatalf("Rebind error = %v, want ErrBatchOwnedProjection", err)
+	}
+	replacement := *node.Source
+	replacement.Path = filepath.Join(t.TempDir(), "replacement.mkv")
+	if _, err := repository.Update(ctx, namespace.Operation{
+		Name:  "test.projection.rebind",
+		Actor: namespace.Actor{Kind: namespace.ActorSystem},
+		Details: namespace.OperationDetails{
+			Paths:     []string{"media:/Managed/Leaf/Dune.mkv"},
+			NodeKinds: []namespace.NodeKind{namespace.ProjectionFile},
+		},
+	}, func(transaction *namespace.Transaction) error {
+		_, err := transaction.RebindProjection(ctx, namespace.RebindProjectionNode{
+			ParentID:       *node.ParentID,
+			Name:           node.Name,
+			ExpectedID:     node.ID,
+			ExpectedSource: *node.Source,
+			Source:         replacement,
+		})
+		return err
+	}); !errors.Is(err, namespace.ErrBatchOwnedProjection) {
+		t.Fatalf("Transaction Rebind error = %v, want ErrBatchOwnedProjection", err)
 	}
 	current, err := repository.Lookup(
 		ctx,

@@ -463,19 +463,17 @@ func (service *Service) Undo(
 		if err != nil {
 			return err
 		}
-		if len(currentTargets) > 0 {
-			currentPaths := make([]string, len(currentTargets))
-			currentKinds := make([]namespace.NodeKind, len(currentTargets))
-			for index, target := range currentTargets {
-				currentPaths[index] = current.LibraryName + ":/" + target
-				currentKinds[index] = namespace.ProjectionFile
-			}
-			if err := transaction.SetOperationDetails(namespace.OperationDetails{
-				Paths:     currentPaths,
-				NodeKinds: currentKinds,
-			}); err != nil {
-				return err
-			}
+		currentPaths := make([]string, len(currentTargets))
+		currentKinds := make([]namespace.NodeKind, len(currentTargets))
+		for index, target := range currentTargets {
+			currentPaths[index] = current.LibraryName + ":/" + target
+			currentKinds[index] = namespace.ProjectionFile
+		}
+		if err := transaction.SetOperationDetails(namespace.OperationDetails{
+			Paths:     currentPaths,
+			NodeKinds: currentKinds,
+		}); err != nil {
+			return err
 		}
 		return transaction.MarkProjectionBatchUndone(
 			ctx,

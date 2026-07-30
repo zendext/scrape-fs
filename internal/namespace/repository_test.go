@@ -831,6 +831,28 @@ func TestRepositoryUpdateRejectsInvalidOperationBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestRepositoryUpdateRejectsEmptyBatchUndoWithoutReference(t *testing.T) {
+	database := openTestDatabase(t)
+	repository := NewRepository(database)
+	called := false
+
+	_, err := repository.Update(context.Background(), Operation{
+		Name:    "projection.batch.undo",
+		Actor:   Actor{Kind: ActorSystem},
+		Details: OperationDetails{Paths: []string{}, NodeKinds: []NodeKind{}},
+	}, func(*Transaction) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrInvalidOperation) {
+		t.Fatalf("Update error = %v, want ErrInvalidOperation", err)
+	}
+	if called {
+		t.Error("Update callback was called for unassociated empty Batch undo")
+	}
+	assertVersionAndLogCount(t, database, 0, 0)
+}
+
 func TestRepositoryQueuesLookupDuringUpdate(t *testing.T) {
 	database := openTestDatabase(t)
 	writer := NewRepository(database)
