@@ -66,9 +66,9 @@ scrapefs projection rm "jellyfin:/Films/Dune.mkv"
 
 Move accepts only a missing target in the same Library. It preserves the stable node ID, source metadata, attributes, creator, and Batch provenance, creates missing managed target directories in the same transaction, writes one operation-log entry, and increments namespace version once. A move of a Batch-owned Projection associates that operation with the originating Batch without changing its original entries or digest, so Batch show presents the apply-time target followed by later move history. Cross-Library move returns `CrossLibrary`; any existing node at the target returns `TargetConflict`.
 
-Remove deletes only the Projection node. It prunes empty managed directories toward LibraryRoot while retaining user-created and non-empty directories, writes one operation-log entry, and increments namespace version once. A failed move or remove leaves the namespace, version, operation log, and every source file unchanged. Both commands return `scrapefs.projection-result/v1`.
+Remove deletes only the Projection node. It prunes empty managed directories toward LibraryRoot while retaining user-created and non-empty directories, writes one operation-log entry, and increments namespace version once. Removing a Batch-owned Projection associates the operation with its originating Batch. The immutable apply-time entry remains available with a null live node reference, and the Batch remains `applied` until explicit undo. A failed move or remove leaves the namespace, version, operation log, and every source file unchanged. Both commands return `scrapefs.projection-result/v1`.
 
-Remove and rebind are direct-Projection operations. They reject a Projection whose `origin_scrape_id` identifies a Projection Batch with the stable `BatchOwnedProjection` error. A Batch-owned Projection can instead be moved within its Library and remains removable by Batch undo at its current path.
+Rebind remains a direct-Projection operation. It rejects a Projection whose `origin_scrape_id` identifies a Projection Batch with the stable `BatchOwnedProjection` error. A Batch-owned Projection can be moved within its Library or removed individually. Later Batch undo removes only the Batch-owned Projections that still exist and marks the Batch `undone`.
 
 ## 2. Source-Path Safety
 
@@ -207,9 +207,8 @@ unlink
 | fallocate | EOPNOTSUPP |
 | chmod/chown/utimens | EROFS |
 | link/symlink | EOPNOTSUPP |
-| unlink of a Batch-owned Projection | EROFS |
 
-Rename changes only the virtual path and is allowed for direct and Batch-owned Projections. Unlink removes only a direct Projection namespace node. An already opened source fd remains readable.
+Rename changes only the virtual path and is allowed for direct and Batch-owned Projections. Unlink removes the direct or Batch-owned Projection namespace node without touching its source. An already opened source fd remains readable.
 
 ## 7. Rename
 

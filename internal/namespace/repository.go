@@ -1703,7 +1703,12 @@ func (transaction *Transaction) RemoveProjection(
 		return Node{}, ErrReadOnly
 	}
 	if node.OriginScrapeID != nil {
-		return Node{}, ErrBatchOwnedProjection
+		if err := transaction.AssociateOperationWithProjectionBatch(
+			ctx,
+			*node.OriginScrapeID,
+		); err != nil {
+			return Node{}, err
+		}
 	}
 	return transaction.removeNode(ctx, node)
 }
