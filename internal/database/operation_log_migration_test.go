@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
@@ -114,42 +115,34 @@ func TestOperationLogMigrationAllowsEmptyBatchUndoDetails(t *testing.T) {
 		t.Errorf("Batch undo log ID = %d, want greater than %d", undoLogID, legacyLogID)
 	}
 
-	for name, test := range map[string]struct {
-		statement string
-		arguments []any
-	}{
-		"non-undo operation": {
-			statement: `
-			INSERT INTO operation_log (
-				operation, actor_kind, actor_id, scrape_id,
-				namespace_version, details_json, created_at
-			) VALUES (
-				'projection.remove', 'system', NULL, ?, 3,
-				'{"paths":[],"node_kinds":[]}', 3
-			)
-		`,
-			arguments: []any{batchID},
-		},
-		"undo without Batch": {
-			statement: `
-			INSERT INTO operation_log (
-				operation, actor_kind, actor_id, scrape_id,
-				namespace_version, details_json, created_at
-			) VALUES (
-				'projection.batch.undo', 'system', NULL, NULL, 3,
-				'{"paths":[],"node_kinds":[]}', 3
-			)
-		`,
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := upgraded.conn.ExecContext(
-				context.Background(),
-				test.statement,
-				test.arguments...,
-			); err == nil {
-				t.Fatal("invalid empty operation details succeeded")
-			}
-		})
+	if _, err := upgraded.conn.ExecContext(context.Background(), `
+		INSERT INTO operation_log (
+			operation, actor_kind, actor_id, scrape_id,
+			namespace_version, details_json, created_at
+		) VALUES (
+			'projection.remove', 'system', NULL, ?, 3,
+			'{"paths":[],"node_kinds":[]}', 3
+		)
+	`, batchID); err == nil {
+		t.Fatal("non-undo operation with empty details succeeded")
+	}
+
+	if _, err := upgraded.conn.ExecContext(
+		context.Background(),
+		"DELETE FROM scrapes WHERE id = ?",
+		batchID,
+	); err != nil {
+		t.Fatalf("delete Batch referenced by empty undo details: %v", err)
+	}
+	var persistedBatchID sql.NullInt64
+	if err := upgraded.conn.QueryRowContext(context.Background(), `
+		SELECT scrape_id
+		FROM operation_log
+		WHERE id = ?
+	`, undoLogID).Scan(&persistedBatchID); err != nil {
+		t.Fatalf("read cleared Batch reference: %v", err)
+	}
+	if persistedBatchID.Valid {
+		t.Errorf("Batch undo scrape ID = %d, want NULL", persistedBatchID.Int64)
 	}
 }

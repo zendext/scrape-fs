@@ -88,7 +88,7 @@ SQLite's own locking and transaction semantics protect database consistency. The
 
 Persistent internal identities use SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` values and Go `int64`, so deleted node IDs are not reused. Persisted timestamps use UTC Unix nanoseconds in SQLite `INTEGER` columns.
 
-The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. `scrapes` is a released legacy storage name. Schema migration 3 extends it for applied-batch provenance without rewriting the released migration and adds `projection_batch_entries` for ordered source identity and target history. Schema migration 4 extends the released `objects` placeholder with `STAGING`/`LIVE` lifecycle state and timestamps. Schema migration 5 permits an associated `projection.batch.undo` operation to record empty path and node-kind arrays when no Batch-owned Projection remains, while every other operation still requires at least one affected path.
+The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. `scrapes` is a released legacy storage name. Schema migration 3 extends it for applied-batch provenance without rewriting the released migration and adds `projection_batch_entries` for ordered source identity and target history. Schema migration 4 extends the released `objects` placeholder with `STAGING`/`LIVE` lifecycle state and timestamps. Schema migration 5 permits `projection.batch.undo` to retain empty path and node-kind arrays when no Batch-owned Projection remains, while every other operation still requires at least one affected path. The Repository requires a Batch association when it creates such an empty undo entry; the database keeps the entry valid if `ON DELETE SET NULL` later clears that association.
 
 The schema uses declarative local integrity only: `STRICT` tables, primary keys, `NOT NULL`, row-local `CHECK` constraints, foreign keys, and unique indexes. SQLite triggers do not implement namespace business rules, lifecycle policy, namespace-version policy, or operation-log policy.
 
@@ -291,7 +291,7 @@ Requirements:
 - the daemon Repository API is append-only and exposes no operation-log update or delete operation;
 - `scrape_id` is a released legacy storage name used to associate an applied Projection batch; deleting referenced provenance may clear it through `ON DELETE SET NULL`;
 - `actor_kind` distinguishes control, fuse, and system; the `agent` value in the released schema remains a legacy value, while an external Agent operation is recorded as control or fuse according to the interface it uses;
-- `details_json` stores non-empty, equally sized `paths` and `node_kinds` arrays whose entries are paired snapshots; the Repository validates each path and node kind before insertion;
+- `details_json` stores equally sized `paths` and `node_kinds` arrays whose entries are paired snapshots; they are normally non-empty, but an associated `projection.batch.undo` uses empty arrays when it removed no nodes, and remains valid if `ON DELETE SET NULL` later clears the association; the Repository validates this exception and every path and node kind before insertion;
 - strong foreign keys MUST NOT prevent node or Library retirement;
 - the first version uses the log for audit, doctor, and manual recovery analysis;
 - event replay is not provided.

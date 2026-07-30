@@ -35,10 +35,7 @@ CREATE TABLE operation_log (
 						json_array_length(details_json, '$.paths')
 					AND (
 						json_array_length(details_json, '$.paths') > 0
-						OR (
-							operation = 'projection.batch.undo'
-							AND scrape_id IS NOT NULL
-						)
+						OR operation = 'projection.batch.undo'
 					),
 					0
 				)
