@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/zendext/scrape-fs/internal/database"
@@ -184,205 +185,325 @@ func TestMoveBatchOwnedProjectionPreservesProvenanceAndUndo(t *testing.T) {
 	}
 }
 
-func TestDirectRemoveAndRebindRejectBatchOwnedProjection(t *testing.T) {
-	for _, operation := range []string{"remove", "rebind"} {
-		t.Run(operation, func(t *testing.T) {
-			ctx := context.Background()
-			opened := openBatchOwnershipDatabase(t)
-			repository := namespace.NewRepository(opened)
-			libraryRecord := createBatchOwnershipLibrary(t, repository)
-			sourcePath := filepath.Join(t.TempDir(), "Dune.mkv")
-			sourceContent := []byte("batch source")
-			if err := os.WriteFile(sourcePath, sourceContent, 0o600); err != nil {
-				t.Fatalf("WriteFile source: %v", err)
-			}
-			batchService := projectionbatch.NewService(repository)
-			data := batchOwnershipJSON(t, sourcePath, "Managed/Leaf/Dune.mkv")
-			validation, err := batchService.Validate(ctx, data)
-			if err != nil {
-				t.Fatalf("Validate Batch: %v", err)
-			}
-			applied, err := batchService.Apply(ctx, projectionbatch.ApplyRequest{
-				Data:           data,
-				ExpectedDigest: validation.Digest,
-				Actor:          namespace.Actor{Kind: namespace.ActorSystem},
-				Caller:         projectionbatch.Caller{UID: 1000, GID: 1001},
-			})
-			if err != nil {
-				t.Fatalf("Apply Batch: %v", err)
-			}
-			node, err := repository.Lookup(
-				ctx,
-				libraryRecord.RootNodeID,
-				"Managed/Leaf/Dune.mkv",
-			)
-			if err != nil {
-				t.Fatalf("Lookup Batch Projection: %v", err)
-			}
-			if node.OriginScrapeID == nil {
-				t.Fatal("Batch Projection OriginScrapeID = nil")
-			}
-			beforeDetail, err := batchService.Show(ctx, applied.BatchID)
-			if err != nil {
-				t.Fatalf("Show Batch before lifecycle attempt: %v", err)
-			}
-			beforeEntries, err := repository.ProjectionBatchEntries(ctx, *node.OriginScrapeID)
-			if err != nil {
-				t.Fatalf("ProjectionBatchEntries before lifecycle attempt: %v", err)
-			}
-			beforeState := readBatchOwnershipState(t, opened)
+func TestRemoveBatchOwnedProjectionPreservesBatchHistoryAndUndo(t *testing.T) {
+	ctx := context.Background()
+	opened := openBatchOwnershipDatabase(t)
+	repository := namespace.NewRepository(opened)
+	libraryRecord := createBatchOwnershipLibrary(t, repository)
+	sourcePath := filepath.Join(t.TempDir(), "Dune.mkv")
+	sourceContent := []byte("batch source")
+	if err := os.WriteFile(sourcePath, sourceContent, 0o600); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	batchService := projectionbatch.NewService(repository)
+	data := batchOwnershipJSON(t, sourcePath, "Managed/Leaf/Dune.mkv")
+	validation, err := batchService.Validate(ctx, data)
+	if err != nil {
+		t.Fatalf("Validate Batch: %v", err)
+	}
+	applied, err := batchService.Apply(ctx, projectionbatch.ApplyRequest{
+		Data:           data,
+		ExpectedDigest: validation.Digest,
+		Actor:          namespace.Actor{Kind: namespace.ActorSystem},
+		Caller:         projectionbatch.Caller{UID: 1000, GID: 1001},
+	})
+	if err != nil {
+		t.Fatalf("Apply Batch: %v", err)
+	}
+	before, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Managed/Leaf/Dune.mkv",
+	)
+	if err != nil {
+		t.Fatalf("Lookup Batch Projection: %v", err)
+	}
+	if before.OriginScrapeID == nil {
+		t.Fatal("Batch Projection OriginScrapeID = nil")
+	}
 
-			replacementPath := filepath.Join(t.TempDir(), "replacement.mkv")
-			if err := os.WriteFile(replacementPath, []byte("replacement"), 0o600); err != nil {
-				t.Fatalf("WriteFile replacement: %v", err)
-			}
-			serviceSourcePath := replacementPath
-			if operation == "rebind" {
-				serviceSourcePath = filepath.Join(t.TempDir(), "must-not-be-opened.mkv")
-			}
-			service := projection.NewService(repository)
-			switch operation {
-			case "remove":
-				_, err = service.Remove(ctx, projection.RemoveRequest{
-					Target: "media:/Managed/Leaf/Dune.mkv",
-					Actor:  namespace.Actor{Kind: namespace.ActorSystem},
-				})
-			case "rebind":
-				_, err = service.Rebind(ctx, projection.RebindRequest{
-					Target:     "media:/Managed/Leaf/Dune.mkv",
-					SourcePath: serviceSourcePath,
-					Actor:      namespace.Actor{Kind: namespace.ActorSystem},
-				})
-			}
-			if !errors.Is(err, projection.ErrBatchOwnedProjection) {
-				t.Fatalf(
-					"%s Batch-owned Projection error = %v, want ErrBatchOwnedProjection",
-					operation,
-					err,
-				)
-			}
+	service := projection.NewService(repository)
+	if _, err := service.Move(ctx, projection.MoveRequest{
+		Target:    "media:/Managed/Leaf/Dune.mkv",
+		NewTarget: "media:/Moved/New/Renamed.mkv",
+		Actor:     namespace.Actor{Kind: namespace.ActorSystem},
+	}); err != nil {
+		t.Fatalf("Move Batch-owned Projection: %v", err)
+	}
+	beforeRemove := readBatchOwnershipState(t, opened)
+	removed, err := service.Remove(ctx, projection.RemoveRequest{
+		Target: "media:/Moved/New/Renamed.mkv",
+		Actor:  namespace.Actor{Kind: namespace.ActorSystem},
+	})
+	if err != nil {
+		t.Fatalf("Remove Batch-owned Projection: %v", err)
+	}
+	if removed.Node.ID != before.ID ||
+		removed.Node.OriginScrapeID == nil ||
+		*removed.Node.OriginScrapeID != *before.OriginScrapeID ||
+		removed.Target != "Moved/New/Renamed.mkv" {
+		t.Errorf("removed Batch Projection = %#v, want node %d", removed, before.ID)
+	}
+	if _, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Moved/New/Renamed.mkv",
+	); !errors.Is(err, namespace.ErrNotFound) {
+		t.Errorf("removed target error = %v, want ErrNotFound", err)
+	}
+	if _, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Moved",
+	); !errors.Is(err, namespace.ErrNotFound) {
+		t.Errorf("removed managed directory error = %v, want ErrNotFound", err)
+	}
+	afterRemove := readBatchOwnershipState(t, opened)
+	if afterRemove.entries != beforeRemove.entries ||
+		afterRemove.version != beforeRemove.version+1 ||
+		afterRemove.logs != beforeRemove.logs+1 {
+		t.Errorf("state after remove = %#v, before = %#v", afterRemove, beforeRemove)
+	}
+	entries, err := repository.ProjectionBatchEntries(ctx, *before.OriginScrapeID)
+	if err != nil {
+		t.Fatalf("ProjectionBatchEntries after remove: %v", err)
+	}
+	if len(entries) != 1 ||
+		entries[0].ProjectionNodeID != nil ||
+		entries[0].Source.Path != sourcePath ||
+		entries[0].Target != "Managed/Leaf/Dune.mkv" {
+		t.Errorf("Batch entries after remove = %#v", entries)
+	}
+	detail, err := batchService.Show(ctx, applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch after remove: %v", err)
+	}
+	if detail.Batch.Status != string(namespace.ProjectionBatchApplied) ||
+		len(detail.Operations) != 3 ||
+		detail.Operations[1].Name != "projection.move" ||
+		detail.Operations[2].Name != "projection.remove" ||
+		!reflect.DeepEqual(
+			detail.Operations[2].Details.Paths,
+			[]string{"media:/Moved/New/Renamed.mkv"},
+		) {
+		t.Errorf("Batch detail after remove = %#v", detail)
+	}
+	if got, err := os.ReadFile(sourcePath); err != nil || string(got) != string(sourceContent) {
+		t.Errorf("source after remove = %q/%v", got, err)
+	}
 
-			_, err = repository.Update(ctx, namespace.Operation{
-				Name:  "test.projection." + operation,
-				Actor: namespace.Actor{Kind: namespace.ActorSystem},
-				Details: namespace.OperationDetails{
-					Paths:     []string{"media:/Managed/Leaf/Dune.mkv"},
-					NodeKinds: []namespace.NodeKind{namespace.ProjectionFile},
-				},
-			}, func(transaction *namespace.Transaction) error {
-				switch operation {
-				case "remove":
-					_, err := transaction.RemoveProjection(ctx, namespace.RemoveProjectionNode{
-						ParentID:   *node.ParentID,
-						Name:       node.Name,
-						ExpectedID: node.ID,
-					})
-					return err
-				case "rebind":
-					replacement := *node.Source
-					replacement.Path = replacementPath
-					_, err := transaction.RebindProjection(
-						ctx,
-						namespace.RebindProjectionNode{
-							ParentID:       *node.ParentID,
-							Name:           node.Name,
-							ExpectedID:     node.ID,
-							ExpectedSource: *node.Source,
-							Source:         replacement,
-						},
-					)
-					return err
-				default:
-					t.Fatalf("unknown operation %q", operation)
-					return nil
-				}
-			})
-			if !errors.Is(err, namespace.ErrBatchOwnedProjection) {
-				t.Fatalf(
-					"Transaction %s error = %v, want ErrBatchOwnedProjection",
-					operation,
-					err,
-				)
-			}
+	undone, err := batchService.Undo(ctx, projectionbatch.UndoRequest{
+		BatchID: applied.BatchID,
+		Actor:   namespace.Actor{Kind: namespace.ActorSystem},
+		Caller:  projectionbatch.Caller{UID: 1000, GID: 1001},
+	})
+	if err != nil {
+		t.Fatalf("Undo Batch after remove: %v", err)
+	}
+	if undone.Status != string(namespace.ProjectionBatchUndone) {
+		t.Errorf("Undo status = %q, want undone", undone.Status)
+	}
+	if _, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Managed",
+	); !errors.Is(err, namespace.ErrNotFound) {
+		t.Errorf("historical managed directory after Undo error = %v, want ErrNotFound", err)
+	}
+	undoneDetail, err := batchService.Show(ctx, applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch after Undo: %v", err)
+	}
+	if undoneDetail.Batch.Status != string(namespace.ProjectionBatchUndone) ||
+		len(undoneDetail.Entries) != 1 ||
+		undoneDetail.Entries[0].ProjectionNodeID != nil ||
+		len(undoneDetail.Operations) != 4 ||
+		undoneDetail.Operations[2].Name != "projection.remove" ||
+		undoneDetail.Operations[3].Name != "projection.batch.undo" ||
+		len(undoneDetail.Operations[3].Details.Paths) != 0 ||
+		len(undoneDetail.Operations[3].Details.NodeKinds) != 0 {
+		t.Errorf("Batch detail after Undo = %#v", undoneDetail)
+	}
+}
 
-			current, err := repository.Lookup(
-				ctx,
-				libraryRecord.RootNodeID,
-				"Managed/Leaf/Dune.mkv",
-			)
-			if err != nil {
-				t.Fatalf("Lookup Batch Projection after rejected lifecycle: %v", err)
-			}
-			if current.ID != node.ID ||
-				current.OriginScrapeID == nil ||
-				*current.OriginScrapeID != *node.OriginScrapeID ||
-				current.Source == nil ||
-				node.Source == nil ||
-				*current.Source != *node.Source {
-				t.Errorf("Batch Projection changed: before=%#v after=%#v", node, current)
-			}
-			for _, path := range []string{"Managed", "Managed/Leaf"} {
-				if _, err := repository.Lookup(ctx, libraryRecord.RootNodeID, path); err != nil {
-					t.Errorf("managed directory %q after rejected lifecycle: %v", path, err)
-				}
-			}
-			afterEntries, err := repository.ProjectionBatchEntries(ctx, *node.OriginScrapeID)
-			if err != nil {
-				t.Fatalf("ProjectionBatchEntries after rejected lifecycle: %v", err)
-			}
-			if !reflect.DeepEqual(afterEntries, beforeEntries) {
-				t.Errorf("Batch entries changed: before=%#v after=%#v", beforeEntries, afterEntries)
-			}
-			afterDetail, err := batchService.Show(ctx, applied.BatchID)
-			if err != nil {
-				t.Fatalf("Show Batch after rejected lifecycle: %v", err)
-			}
-			if !reflect.DeepEqual(afterDetail, beforeDetail) {
-				t.Errorf("Batch detail changed: before=%#v after=%#v", beforeDetail, afterDetail)
-			}
-			if afterState := readBatchOwnershipState(t, opened); afterState != beforeState {
-				t.Errorf("database state changed: before=%#v after=%#v", beforeState, afterState)
-			}
-			if got, err := os.ReadFile(sourcePath); err != nil || string(got) != string(sourceContent) {
-				t.Errorf("source after rejected lifecycle = %q, %v", got, err)
-			}
+func TestRemoveBatchOwnedProjectionRollsBackAfterLogFailure(t *testing.T) {
+	ctx := context.Background()
+	opened := openBatchOwnershipDatabase(t)
+	repository := namespace.NewRepository(opened)
+	libraryRecord := createBatchOwnershipLibrary(t, repository)
+	sourcePath := filepath.Join(t.TempDir(), "Dune.mkv")
+	if err := os.WriteFile(sourcePath, []byte("batch source"), 0o600); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	batchService := projectionbatch.NewService(repository)
+	data := batchOwnershipJSON(t, sourcePath, "Managed/Leaf/Dune.mkv")
+	validation, err := batchService.Validate(ctx, data)
+	if err != nil {
+		t.Fatalf("Validate Batch: %v", err)
+	}
+	applied, err := batchService.Apply(ctx, projectionbatch.ApplyRequest{
+		Data:           data,
+		ExpectedDigest: validation.Digest,
+		Actor:          namespace.Actor{Kind: namespace.ActorSystem},
+		Caller:         projectionbatch.Caller{UID: 1000, GID: 1001},
+	})
+	if err != nil {
+		t.Fatalf("Apply Batch: %v", err)
+	}
+	node, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Managed/Leaf/Dune.mkv",
+	)
+	if err != nil {
+		t.Fatalf("Lookup Batch Projection: %v", err)
+	}
+	if node.OriginScrapeID == nil {
+		t.Fatal("Batch Projection OriginScrapeID = nil")
+	}
+	beforeEntries, err := repository.ProjectionBatchEntries(ctx, *node.OriginScrapeID)
+	if err != nil {
+		t.Fatalf("ProjectionBatchEntries before remove: %v", err)
+	}
+	beforeDetail, err := batchService.Show(ctx, applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch before remove: %v", err)
+	}
+	beforeState := readBatchOwnershipState(t, opened)
+	failBatchProjectionRemoveLog(t, opened)
 
-			undone, err := batchService.Undo(ctx, projectionbatch.UndoRequest{
-				BatchID: applied.BatchID,
-				Actor:   namespace.Actor{Kind: namespace.ActorSystem},
-				Caller:  projectionbatch.Caller{UID: 1000, GID: 1001},
-			})
-			if err != nil {
-				t.Fatalf("Undo Batch after rejected lifecycle: %v", err)
-			}
-			if undone.Status != string(namespace.ProjectionBatchUndone) {
-				t.Errorf("Undo status = %q, want undone", undone.Status)
-			}
-			if _, err := repository.Lookup(
-				ctx,
-				libraryRecord.RootNodeID,
-				"Managed/Leaf/Dune.mkv",
-			); !errors.Is(err, namespace.ErrNotFound) {
-				t.Errorf("Batch Projection after Undo error = %v, want ErrNotFound", err)
-			}
-			if _, err := repository.Lookup(
-				ctx,
-				libraryRecord.RootNodeID,
-				"Managed",
-			); !errors.Is(err, namespace.ErrNotFound) {
-				t.Errorf("managed directory after Undo error = %v, want ErrNotFound", err)
-			}
-			undoneDetail, err := batchService.Show(ctx, applied.BatchID)
-			if err != nil {
-				t.Fatalf("Show Batch after Undo: %v", err)
-			}
-			if undoneDetail.Batch.Status != string(namespace.ProjectionBatchUndone) ||
-				len(undoneDetail.Entries) != 1 ||
-				undoneDetail.Entries[0].ProjectionNodeID != nil ||
-				len(undoneDetail.Operations) != 2 {
-				t.Errorf("Batch detail after Undo = %#v", undoneDetail)
-			}
+	if _, err := projection.NewService(repository).Remove(ctx, projection.RemoveRequest{
+		Target: "media:/Managed/Leaf/Dune.mkv",
+		Actor:  namespace.Actor{Kind: namespace.ActorSystem},
+	}); err == nil || !strings.Contains(err.Error(), "forced operation log failure") {
+		t.Fatalf("Remove error = %v, want forced operation log failure", err)
+	}
+	current, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Managed/Leaf/Dune.mkv",
+	)
+	if err != nil || current.ID != node.ID {
+		t.Errorf("Projection after rolled-back remove = %#v/%v", current, err)
+	}
+	afterEntries, err := repository.ProjectionBatchEntries(ctx, *node.OriginScrapeID)
+	if err != nil {
+		t.Fatalf("ProjectionBatchEntries after rolled-back remove: %v", err)
+	}
+	if !reflect.DeepEqual(afterEntries, beforeEntries) {
+		t.Errorf("Batch entries changed: before=%#v after=%#v", beforeEntries, afterEntries)
+	}
+	afterDetail, err := batchService.Show(ctx, applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch after rolled-back remove: %v", err)
+	}
+	if !reflect.DeepEqual(afterDetail, beforeDetail) {
+		t.Errorf("Batch detail changed: before=%#v after=%#v", beforeDetail, afterDetail)
+	}
+	if afterState := readBatchOwnershipState(t, opened); afterState != beforeState {
+		t.Errorf("database state changed: before=%#v after=%#v", beforeState, afterState)
+	}
+	for _, path := range []string{"Managed", "Managed/Leaf"} {
+		if _, err := repository.Lookup(ctx, libraryRecord.RootNodeID, path); err != nil {
+			t.Errorf("managed directory %q after rollback: %v", path, err)
+		}
+	}
+}
+
+func TestRebindRejectsBatchOwnedProjection(t *testing.T) {
+	ctx := context.Background()
+	opened := openBatchOwnershipDatabase(t)
+	repository := namespace.NewRepository(opened)
+	libraryRecord := createBatchOwnershipLibrary(t, repository)
+	sourcePath := filepath.Join(t.TempDir(), "Dune.mkv")
+	sourceContent := []byte("batch source")
+	if err := os.WriteFile(sourcePath, sourceContent, 0o600); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+	batchService := projectionbatch.NewService(repository)
+	data := batchOwnershipJSON(t, sourcePath, "Managed/Leaf/Dune.mkv")
+	validation, err := batchService.Validate(ctx, data)
+	if err != nil {
+		t.Fatalf("Validate Batch: %v", err)
+	}
+	applied, err := batchService.Apply(ctx, projectionbatch.ApplyRequest{
+		Data:           data,
+		ExpectedDigest: validation.Digest,
+		Actor:          namespace.Actor{Kind: namespace.ActorSystem},
+		Caller:         projectionbatch.Caller{UID: 1000, GID: 1001},
+	})
+	if err != nil {
+		t.Fatalf("Apply Batch: %v", err)
+	}
+	node, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Managed/Leaf/Dune.mkv",
+	)
+	if err != nil {
+		t.Fatalf("Lookup Batch Projection: %v", err)
+	}
+	if node.OriginScrapeID == nil {
+		t.Fatal("Batch Projection OriginScrapeID = nil")
+	}
+	beforeDetail, err := batchService.Show(ctx, applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch before rebind: %v", err)
+	}
+	beforeState := readBatchOwnershipState(t, opened)
+
+	_, err = projection.NewService(repository).Rebind(ctx, projection.RebindRequest{
+		Target:     "media:/Managed/Leaf/Dune.mkv",
+		SourcePath: filepath.Join(t.TempDir(), "must-not-be-opened.mkv"),
+		Actor:      namespace.Actor{Kind: namespace.ActorSystem},
+	})
+	if !errors.Is(err, projection.ErrBatchOwnedProjection) {
+		t.Fatalf("Rebind error = %v, want ErrBatchOwnedProjection", err)
+	}
+	replacement := *node.Source
+	replacement.Path = filepath.Join(t.TempDir(), "replacement.mkv")
+	if _, err := repository.Update(ctx, namespace.Operation{
+		Name:  "test.projection.rebind",
+		Actor: namespace.Actor{Kind: namespace.ActorSystem},
+		Details: namespace.OperationDetails{
+			Paths:     []string{"media:/Managed/Leaf/Dune.mkv"},
+			NodeKinds: []namespace.NodeKind{namespace.ProjectionFile},
+		},
+	}, func(transaction *namespace.Transaction) error {
+		_, err := transaction.RebindProjection(ctx, namespace.RebindProjectionNode{
+			ParentID:       *node.ParentID,
+			Name:           node.Name,
+			ExpectedID:     node.ID,
+			ExpectedSource: *node.Source,
+			Source:         replacement,
 		})
+		return err
+	}); !errors.Is(err, namespace.ErrBatchOwnedProjection) {
+		t.Fatalf("Transaction Rebind error = %v, want ErrBatchOwnedProjection", err)
+	}
+	current, err := repository.Lookup(
+		ctx,
+		libraryRecord.RootNodeID,
+		"Managed/Leaf/Dune.mkv",
+	)
+	if err != nil {
+		t.Fatalf("Lookup Batch Projection after rejected rebind: %v", err)
+	}
+	if current.ID != node.ID || current.Source == nil || *current.Source != *node.Source {
+		t.Errorf("Batch Projection changed: before=%#v after=%#v", node, current)
+	}
+	afterDetail, err := batchService.Show(ctx, applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch after rejected rebind: %v", err)
+	}
+	if !reflect.DeepEqual(afterDetail, beforeDetail) {
+		t.Errorf("Batch detail changed: before=%#v after=%#v", beforeDetail, afterDetail)
+	}
+	if afterState := readBatchOwnershipState(t, opened); afterState != beforeState {
+		t.Errorf("database state changed: before=%#v after=%#v", beforeState, afterState)
+	}
+	if got, err := os.ReadFile(sourcePath); err != nil || string(got) != string(sourceContent) {
+		t.Errorf("source after rejected rebind = %q/%v", got, err)
 	}
 }
 
@@ -471,4 +592,28 @@ func readBatchOwnershipState(t *testing.T, opened *database.DB) batchOwnershipSt
 		t.Fatalf("read database state: %v", err)
 	}
 	return state
+}
+
+func failBatchProjectionRemoveLog(t *testing.T, opened *database.DB) {
+	t.Helper()
+	if err := opened.UseConnection(context.Background(), func(connection *database.Connection) error {
+		transaction, err := connection.BeginTx(context.Background(), nil)
+		if err != nil {
+			return err
+		}
+		defer transaction.Rollback()
+		if _, err := transaction.ExecContext(context.Background(), `
+			CREATE TEMP TRIGGER fail_batch_projection_remove_log
+			BEFORE INSERT ON operation_log
+			WHEN NEW.operation = 'projection.remove'
+			BEGIN
+				SELECT RAISE(ABORT, 'forced operation log failure');
+			END
+		`); err != nil {
+			return err
+		}
+		return transaction.Commit()
+	}); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
 }

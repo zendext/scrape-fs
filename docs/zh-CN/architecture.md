@@ -86,7 +86,7 @@ SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 dae
 
 持久化内部 ID 使用 SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`，Go 中表示为 `int64`，因此已删除节点的 ID 不会复用。持久化时间使用 SQLite `INTEGER` 保存 UTC Unix 纳秒。
 
-基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。`scrapes` 是已发布的 legacy storage 名称；schema migration 3 在不修改已发布 migration 的前提下扩展它保存 applied Batch provenance，并新增 `projection_batch_entries` 保存有序的 source identity 和 target 历史。schema migration 4 扩展已发布的 `objects` 占位表，保存 `STAGING`/`LIVE` 生命周期状态和时间戳。
+基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。`scrapes` 是已发布的 legacy storage 名称；schema migration 3 在不修改已发布 migration 的前提下扩展它保存 applied Batch provenance，并新增 `projection_batch_entries` 保存有序的 source identity 和 target 历史。schema migration 4 扩展已发布的 `objects` 占位表，保存 `STAGING`/`LIVE` 生命周期状态和时间戳。schema migration 5 允许 `projection.batch.undo` 在没有剩余 Batch-owned Projection 时保留空的 path 和 node-kind 数组，同时继续要求其他 operation 至少包含一个受影响路径。Repository 在创建这种空 undo 日志时要求关联 Batch；如果 `ON DELETE SET NULL` 后续清空该关联，数据库仍保持日志合法。
 
 schema 只使用声明式局部完整性约束：`STRICT` 表、主键、`NOT NULL`、行内 `CHECK`、外键和唯一索引。SQLite trigger 不实现命名空间业务规则、生命周期策略、namespace version 策略或 operation log 策略。
 
@@ -289,7 +289,7 @@ operation_log
 - daemon 的 Repository API 只允许追加 operation log，不提供 update 或 delete 操作；
 - `scrape_id` 是已发布的 legacy storage 名称，用于关联 applied Projection Batch；删除被引用的 provenance 时可以通过 `ON DELETE SET NULL` 清空；
 - `actor_kind` 区分 control、fuse 和 system；已发布 schema 中的 `agent` 值保留为 legacy 值，外部 Agent 通过 CLI 或 FUSE 操作时分别记录为 control 或 fuse；
-- `details_json` 使用非空且长度相同的 `paths` 与 `node_kinds` 数组，按相同下标保存路径和节点类型快照；Repository 在插入前校验每个路径和节点类型；
+- `details_json` 使用长度相同的 `paths` 与 `node_kinds` 数组，按相同下标保存路径和节点类型快照；数组通常非空，但关联到 Batch 的 `projection.batch.undo` 在没有删除节点时使用空数组，并在 `ON DELETE SET NULL` 后续清空关联时继续合法；Repository 在插入前校验该例外以及每个路径和节点类型；
 - 日志不得通过强外键阻止节点或 Library retire；
 - 第一版日志用于审计、doctor 和人工恢复分析；
 - 第一版不提供事件重放。

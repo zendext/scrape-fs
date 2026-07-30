@@ -24,7 +24,9 @@
 - apply 在一个事务中创建 provenance 和全部 Projection，不产生部分结果。
 - apply 失败不留下 Batch provenance。
 - 成功 apply 返回稳定 Batch ID。
+- Batch-owned Projection 可以单独 remove；Batch 保持 applied，原始 entry 继续可读。
 - undo 在单事务中完成。
+- undo 只删除仍存在的 Batch-owned Projection，并在没有剩余节点时仍成功。
 - undo 不删除 OverlayFile。
 
 ## 3. ProjectionFile

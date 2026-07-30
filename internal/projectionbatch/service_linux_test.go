@@ -632,30 +632,14 @@ func TestServiceUndoPreservesOverlayReportsItAndRejectsRepeat(t *testing.T) {
 		t.Fatalf("Lookup current parent: %v", err)
 	}
 	createOverlay(currentParent, "current.nfo", "media:/Final/Dune/current.nfo")
-	alreadyRemoved, err := repository.Lookup(
+	if _, err := projectionService.Remove(
 		context.Background(),
-		libraryRecord.RootNodeID,
-		"Movies/Dune/Dune.ass",
-	)
-	if err != nil {
-		t.Fatalf("Lookup Projection for early removal: %v", err)
-	}
-	if err := opened.UseConnection(context.Background(), func(connection *database.Connection) error {
-		transaction, err := connection.BeginTx(context.Background(), nil)
-		if err != nil {
-			return err
-		}
-		defer transaction.Rollback()
-		if _, err := transaction.ExecContext(
-			context.Background(),
-			"DELETE FROM nodes WHERE id = ?",
-			alreadyRemoved.ID,
-		); err != nil {
-			return err
-		}
-		return transaction.Commit()
-	}); err != nil {
-		t.Fatalf("remove Projection before undo: %v", err)
+		projection.RemoveRequest{
+			Target: "media:/Movies/Dune/Dune.ass",
+			Actor:  namespace.Actor{Kind: namespace.ActorSystem},
+		},
+	); err != nil {
+		t.Fatalf("Remove Batch Projection before undo: %v", err)
 	}
 
 	result, err := service.Undo(context.Background(), UndoRequest{
@@ -707,12 +691,13 @@ func TestServiceUndoPreservesOverlayReportsItAndRejectsRepeat(t *testing.T) {
 		detail.Entries[0].Source.Path != firstSource {
 		t.Errorf("undone detail = %#v", detail)
 	}
-	if len(detail.Operations) != 4 ||
+	if len(detail.Operations) != 5 ||
 		detail.Operations[1].Name != "projection.move" ||
 		detail.Operations[2].Name != "projection.move" ||
-		detail.Operations[3].Name != "projection.batch.undo" ||
+		detail.Operations[3].Name != "projection.remove" ||
+		detail.Operations[4].Name != "projection.batch.undo" ||
 		!reflect.DeepEqual(
-			detail.Operations[3].Details,
+			detail.Operations[4].Details,
 			namespace.OperationDetails{
 				Paths:     []string{"media:/Final/Dune/Dune.mkv"},
 				NodeKinds: []namespace.NodeKind{namespace.ProjectionFile},

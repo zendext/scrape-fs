@@ -411,7 +411,7 @@ func TestProjectionFuseLifecycleRefreshesRenamedParentPath(t *testing.T) {
 	}
 }
 
-func TestProjectionFuseRenamesBatchOwnedProjection(t *testing.T) {
+func TestProjectionFuseRenamesAndUnlinksBatchOwnedProjection(t *testing.T) {
 	fixture := newWritableFuseFixture(t)
 	ctx := fuseCallerContext(1234, 5678)
 	sourcePath := filepath.Join(t.TempDir(), "source.mkv")
@@ -471,6 +471,30 @@ func TestProjectionFuseRenamesBatchOwnedProjection(t *testing.T) {
 	if len(detail.Operations) != 2 ||
 		detail.Operations[1].Name != "projection.move" {
 		t.Errorf("Batch operations after FUSE rename = %#v", detail.Operations)
+	}
+	if errno := movies.Unlink(ctx, "renamed.mkv"); errno != 0 {
+		t.Fatalf("Unlink Batch Projection errno = %v", errno)
+	}
+	if _, err := fixture.repository.Lookup(
+		context.Background(),
+		fixture.library.RootNodeID,
+		"Movies/renamed.mkv",
+	); !errors.Is(err, namespace.ErrNotFound) {
+		t.Errorf("unlinked Batch Projection error = %v, want ErrNotFound", err)
+	}
+	detail, err = batches.Show(context.Background(), applied.BatchID)
+	if err != nil {
+		t.Fatalf("Show Batch after FUSE unlink: %v", err)
+	}
+	if detail.Batch.Status != string(namespace.ProjectionBatchApplied) ||
+		len(detail.Entries) != 1 ||
+		detail.Entries[0].ProjectionNodeID != nil ||
+		len(detail.Operations) != 3 ||
+		detail.Operations[2].Name != "projection.remove" {
+		t.Errorf("Batch detail after FUSE unlink = %#v", detail)
+	}
+	if _, err := os.Stat(sourcePath); err != nil {
+		t.Errorf("source after FUSE unlink: %v", err)
 	}
 }
 
@@ -538,7 +562,7 @@ func TestProjectionFileReopensAfterDatabaseRestart(t *testing.T) {
 	assertProjectionHandleContent(t, fileHandle.(gofs.FileReader), content)
 }
 
-func TestProjectionFuseMapsBatchOwnedMutationToReadOnly(t *testing.T) {
+func TestProjectionFuseMapsBatchOwnershipErrorToReadOnly(t *testing.T) {
 	if errno := errorNumber(namespace.ErrBatchOwnedProjection); errno != syscall.EROFS {
 		t.Errorf("Batch-owned Projection errno = %v, want EROFS", errno)
 	}

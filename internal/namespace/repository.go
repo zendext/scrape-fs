@@ -774,8 +774,9 @@ func (repository *Repository) update(
 	}
 
 	namespaceTransaction := &Transaction{
-		transaction: transaction,
-		now:         repository.now,
+		transaction:   transaction,
+		now:           repository.now,
+		operationName: operation.Name,
 	}
 	if err := change(namespaceTransaction); err != nil {
 		return 0, rollback(err)
@@ -857,6 +858,7 @@ func (repository *Repository) update(
 type Transaction struct {
 	transaction          *database.Transaction
 	now                  func() time.Time
+	operationName        string
 	changed              bool
 	audited              bool
 	operationScrapeID    *int64
@@ -951,7 +953,11 @@ func (transaction *Transaction) ProjectionBatchOperations(
 }
 
 func (transaction *Transaction) SetOperationDetails(details OperationDetails) error {
-	if err := validateOperationDetails(details); err != nil {
+	if err := validateOperationDetails(
+		transaction.operationName,
+		transaction.operationScrapeID != nil,
+		details,
+	); err != nil {
 		return err
 	}
 	encoded, err := json.Marshal(details)
@@ -1703,7 +1709,12 @@ func (transaction *Transaction) RemoveProjection(
 		return Node{}, ErrReadOnly
 	}
 	if node.OriginScrapeID != nil {
-		return Node{}, ErrBatchOwnedProjection
+		if err := transaction.AssociateOperationWithProjectionBatch(
+			ctx,
+			*node.OriginScrapeID,
+		); err != nil {
+			return Node{}, err
+		}
 	}
 	return transaction.removeNode(ctx, node)
 }
@@ -2621,7 +2632,11 @@ func validateOperation(operation Operation, change func(*Transaction) error) err
 	if operation.ScrapeID != nil && *operation.ScrapeID <= 0 {
 		return fmt.Errorf("%w: invalid Scrape ID", ErrInvalidOperation)
 	}
-	if err := validateOperationDetails(operation.Details); err != nil {
+	if err := validateOperationDetails(
+		operation.Name,
+		operation.ScrapeID != nil,
+		operation.Details,
+	); err != nil {
 		return err
 	}
 	if change == nil {
@@ -2630,15 +2645,22 @@ func validateOperation(operation Operation, change func(*Transaction) error) err
 	return nil
 }
 
-func validateOperationDetails(details OperationDetails) error {
-	if len(details.Paths) == 0 {
-		return fmt.Errorf("%w: details paths must not be empty", ErrInvalidOperation)
-	}
+func validateOperationDetails(
+	operationName string,
+	hasBatchReference bool,
+	details OperationDetails,
+) error {
 	if len(details.Paths) != len(details.NodeKinds) {
 		return fmt.Errorf(
 			"%w: details paths and node kinds must have equal lengths",
 			ErrInvalidOperation,
 		)
+	}
+	if len(details.Paths) == 0 {
+		if operationName == "projection.batch.undo" && hasBatchReference {
+			return nil
+		}
+		return fmt.Errorf("%w: details paths must not be empty", ErrInvalidOperation)
 	}
 	for index, path := range details.Paths {
 		if path == "" {

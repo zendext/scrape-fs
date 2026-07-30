@@ -214,14 +214,6 @@ func (service *Service) Remove(
 	if err != nil {
 		return namespace.Projection{}, err
 	}
-	if source.OriginScrapeID != nil {
-		return namespace.Projection{}, fmt.Errorf(
-			"%w: %s:/%s",
-			ErrBatchOwnedProjection,
-			libraryName,
-			relativePath,
-		)
-	}
 
 	var removed namespace.Node
 	_, err = service.repository.Update(ctx, namespace.Operation{

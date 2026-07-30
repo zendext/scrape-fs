@@ -226,11 +226,11 @@ object 错误使用确定性顺序；计数区分 LIVE、STAGING、无数据库�
 
 `projection add`、`projection mv` 和 `projection rm` 返回 `scrapefs.projection-result/v1`；remove 返回已删除 Projection 的快照。源文件选择、目标校验与 namespace mutation 仅在 control 授权成功后执行。`projection list` 使用 `scrapefs.projection-list/v1` 返回 direct 与 Batch Projection，按 Library、相对 target 和 node ID 确定性排序。`--library <name>` 只返回指定 ACTIVE Library；列表使用持久化缓存 metadata，不打开源文件。
 
-`projection mv` 只接受同一 ACTIVE Library 内不存在的目标，保留 node ID、source metadata、attributes、creator 和 Batch provenance，在同一事务中创建缺失的 managed 目标目录，写一条 operation log，并使 namespace version 增加 1。Projection 属于 Batch 时，该 move operation 会关联到对应 Batch，原始 entry 和 digest 保持不变。跨 Library move 返回 `CrossLibrary`；目标已存在返回 `TargetConflict`。`projection rm` 只删除 direct Projection 节点，并向 LibraryRoot 清理空的 managed Directory；用户创建或非空目录必须保留。它写一条 operation log，并使 namespace version 增加 1。两个命令均不得打开、重命名或删除源文件。
+`projection mv` 只接受同一 ACTIVE Library 内不存在的目标，保留 node ID、source metadata、attributes、creator 和 Batch provenance，在同一事务中创建缺失的 managed 目标目录，写一条 operation log，并使 namespace version 增加 1。Projection 属于 Batch 时，该 move operation 会关联到对应 Batch，原始 entry 和 digest 保持不变。跨 Library move 返回 `CrossLibrary`；目标已存在返回 `TargetConflict`。`projection rm` 删除 direct 或 Batch-owned Projection 节点，并向 LibraryRoot 清理空的 managed Directory；用户创建或非空目录必须保留。它写一条 operation log，并使 namespace version 增加 1。删除 Batch-owned Projection 时，remove operation 会关联到原始 Batch；原始 entry 继续保留但 live node reference 变为空，Batch 状态仍为 `applied`。两个命令均不得打开、重命名或删除源文件。
 
 不带 `--confirm` 的 `projection rebind` 会安全打开候选源文件，并返回 `scrapefs.projection-rebind-result/v1`：status 为 `confirmation_required`，同时包含稳定 Projection 快照、完整的新旧缓存 source metadata，以及绑定 node ID、target、source path 和严格 identity 的 confirmation digest。使用 `--confirm <digest>` 重复执行时，daemon 会重新打开并重新校验 source，只应用与 preview 完全一致的变更，并返回 `applied`。Projection 或 source 已变化时返回 `ConfirmationMismatch`，不产生 mutation。成功 rebind 保留 node ID 和虚拟 target，更新 source metadata 与虚拟 ctime，写一条 audit 记录，但不增加 namespace version。
 
-Remove 和 rebind 只适用于 `origin_scrape_id` 为空的 direct Projection。Batch-owned Projection 对这两个命令返回 `BatchOwnedProjection`，但可以在同一 Library 内 move。Batch show 保留原始 apply-time entry 并展示关联的 move operation；Batch undo 按 Projection 的当前路径删除节点、记录该实际删除路径，并清理 move history 沿途留下的空 managed Directory。
+Rebind 只适用于 `origin_scrape_id` 为空的 direct Projection；Batch-owned Projection 返回 `BatchOwnedProjection`。Batch-owned Projection 可以在同一 Library 内 move，也可以单独 remove。Batch show 保留原始 apply-time entry 并展示关联的 move 和 remove operation；Batch undo 只删除仍存在的 Batch-owned Projection，记录实际删除路径，清理路径历史沿途留下的空 managed Directory，并在所有 Projection 已提前删除时仍将 Batch 标记为 `undone`。
 
 所有 Projection 命令均要求管理员或控制用户授权。目标不存在返回 `ProjectionNotFound`；rebind 的不安全、缺失、无权限或非普通源文件沿用 `projection add` 的稳定 source error code。
 

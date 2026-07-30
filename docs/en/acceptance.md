@@ -26,7 +26,9 @@
 - Apply creates provenance and every Projection in one transaction without partial results.
 - Failed apply leaves no batch provenance.
 - Successful apply returns a stable batch ID.
+- A Batch-owned Projection can be removed individually while the Batch remains applied and its original entry remains available.
 - Undo runs in one transaction.
+- Undo removes only remaining Batch-owned Projections and succeeds when none remain.
 - Undo does not remove OverlayFiles.
 
 ## 3. ProjectionFile

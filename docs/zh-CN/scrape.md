@@ -210,7 +210,7 @@ scrapefs projection batch show batch-42
 scrapefs projection batch undo batch-42
 ```
 
-`show` 只展示已 applied 或 undone Batch 的 provenance、原始 apply-time Projection entry 和关联的 operation-log 快照。同一 Library 内后续发生的 Projection move 会追加到该历史中，不修改 entry 或已确认的 Batch digest。`show` 不提供待处理 Plan。
+`show` 只展示已 applied 或 undone Batch 的 provenance、原始 apply-time Projection entry 和关联的 operation-log 快照。同一 Library 内后续发生的 Projection move 或单项 remove 会追加到该历史中，不修改 entry 或已确认的 Batch digest。删除 Projection 只清空 entry 的 live node reference，Batch 仍保持 `applied`。`show` 不提供待处理 Plan。
 
 Library retired 后，Batch 历史仍可通过 `list` 和 `show` 读取。undo 要求 LibraryRoot 仍可用；Library 已 retired 时拒绝 undo，且不修改 Batch 状态。
 
@@ -222,7 +222,7 @@ undo 在单个 SQLite 事务中：
 4. 将 Batch 状态改为 undone，并保存调用者 UID/GID；
 5. namespace version 增加 1。
 
-undo 按 provenance 删除每个仍存在的 Batch-owned Projection，包括已经离开原始 target 的 Projection。它清理原始、中间和当前 target 留下的空 managed Directory，并在 operation log 中记录实际删除路径。undo 不删除通过 FUSE 创建的 OverlayFile。CLI 必须列出 Batch-owned Projection 经过的全部 target 目录下保留的 OverlayFile。
+undo 按 provenance 删除每个仍存在的 Batch-owned Projection，包括已经离开原始 target 的 Projection，并跳过已单独 remove 的 entry。即使已经没有 Projection 节点，undo 仍成功并将 Batch 标记为 `undone`。它清理原始、中间和当前 target 留下的空 managed Directory，并在仍有节点时于 operation log 中记录实际删除路径。undo 不删除通过 FUSE 创建的 OverlayFile。CLI 必须列出 Batch-owned Projection 经过的全部 target 目录下保留的 OverlayFile。
 
 重复 undo 已 undone Batch 返回 `AlreadyUndone`。
 

@@ -6,7 +6,7 @@ ScrapeFS 是一个面向 Linux 的外部 Agent 辅助媒体整理与虚拟目录
 
 它将一个或多个本地文件系统中的媒体文件投影为适合播放器识别的媒体库，同时不移动、不重命名、不修改源文件。
 
-> 当前状态：v1 目标功能已实现，项目处于预发布阶段，尚未发布稳定版本。daemon 已支持加载并校验配置、获取宿主文件系统运行时锁、初始化 SQLite 和 Overlay object store、重建内存索引、挂载持久化 namespace，并通过 Unix 控制 socket 提供经过授权的 Library、direct Projection、Projection Batch、status 和只读 doctor 操作。readiness 只会在 index、mount 和 socket 可用后发送；已提交的 namespace 变更会触发 FUSE cache invalidation，正常停止会排空在途写入后再卸载。FUSE client 可以创建和修改普通 Directory 及 object-backed OverlayFile，通过经过身份校验的 source descriptor 读取 ProjectionFile，并通过共享 Projection lifecycle 操作 rename 或 unlink direct ProjectionFile。仓库同时提供第一版可安装外部 Agent Skill，用于媒体枚举、探测、命名、Batch 确认与 FUSE artifact 工作流。
+> 当前状态：v1 目标功能已实现，项目处于预发布阶段，尚未发布稳定版本。daemon 已支持加载并校验配置、获取宿主文件系统运行时锁、初始化 SQLite 和 Overlay object store、重建内存索引、挂载持久化 namespace，并通过 Unix 控制 socket 提供经过授权的 Library、direct Projection、Projection Batch、status 和只读 doctor 操作。readiness 只会在 index、mount 和 socket 可用后发送；已提交的 namespace 变更会触发 FUSE cache invalidation，正常停止会排空在途写入后再卸载。FUSE client 可以创建和修改普通 Directory 及 object-backed OverlayFile，通过经过身份校验的 source descriptor 读取 ProjectionFile，并通过共享 Projection lifecycle 操作 rename 或 unlink direct 和 Batch-owned ProjectionFile。仓库同时提供第一版可安装外部 Agent Skill，用于媒体枚举、探测、命名、Batch 确认与 FUSE artifact 工作流。
 
 ## 核心模型
 

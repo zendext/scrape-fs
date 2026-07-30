@@ -27,8 +27,9 @@ func TestStatusReportsStableComponentAndLibrarySnapshot(t *testing.T) {
 	runtime.SetMount(nil)
 	runtime.SetSocket(nil)
 	runtime.SetReady(true)
+	schemaVersion := database.SupportedSchemaVersion()
 	service := newService(
-		fakeDatabase{version: 4},
+		fakeDatabase{version: schemaVersion},
 		fakeRepository{
 			inspection: namespace.RepositoryInspection{
 				NamespaceVersion: 7,
@@ -81,8 +82,8 @@ func TestStatusReportsStableComponentAndLibrarySnapshot(t *testing.T) {
 		t.Errorf("status identity = %#v", result)
 	}
 	if result.Database.State != StateReady ||
-		result.Database.SchemaVersion != 4 ||
-		result.Database.SupportedSchemaVersion != 4 {
+		result.Database.SchemaVersion != schemaVersion ||
+		result.Database.SupportedSchemaVersion != schemaVersion {
 		t.Errorf("database status = %#v", result.Database)
 	}
 	if result.Namespace.State != StateReady ||
@@ -137,7 +138,7 @@ func TestStatusAndDoctorJSONSchemasHaveStableFields(t *testing.T) {
 	runtime.SetSocket(nil)
 	runtime.SetReady(true)
 	service := newService(
-		fakeDatabase{version: 4},
+		fakeDatabase{version: database.SupportedSchemaVersion()},
 		fakeRepository{
 			inspection: namespace.RepositoryInspection{
 				ActiveLibraries: 1,
@@ -295,7 +296,7 @@ func TestStatusKeepsReadinessFalseUntilRuntimeIsMarkedReady(t *testing.T) {
 	runtime.SetMount(nil)
 	runtime.SetSocket(nil)
 	service := newService(
-		fakeDatabase{version: 4},
+		fakeDatabase{version: database.SupportedSchemaVersion()},
 		fakeRepository{},
 		fakeIndex{},
 		fakeObjectStore{},
@@ -322,7 +323,7 @@ func TestStatusClearsReadinessWhenRuntimeMetadataDegrades(t *testing.T) {
 	runtime.SetSocket(func() error { return errors.New("socket inode changed") })
 	runtime.SetReady(true)
 	result := newService(
-		fakeDatabase{version: 4},
+		fakeDatabase{version: database.SupportedSchemaVersion()},
 		fakeRepository{},
 		fakeIndex{},
 		fakeObjectStore{},
@@ -375,7 +376,7 @@ func TestDoctorReportsDatabaseCorruption(t *testing.T) {
 	runtime.SetReady(true)
 	service := newService(
 		fakeDatabase{
-			version:   4,
+			version:   database.SupportedSchemaVersion(),
 			integrity: []string{"row 7 missing from index nodes_parent_id"},
 		},
 		fakeRepository{},
@@ -400,7 +401,7 @@ func TestDoctorDoesNotMisclassifyNamespaceCorruptionAsInvalidLibrary(t *testing.
 	runtime.SetSocket(nil)
 	runtime.SetReady(true)
 	service := newService(
-		fakeDatabase{version: 4},
+		fakeDatabase{version: database.SupportedSchemaVersion()},
 		fakeRepository{
 			libraries: []namespace.Library{
 				{
@@ -561,7 +562,7 @@ func TestDoctorReturnsDeterministicHealthyWarningAndBlockingFindings(t *testing.
 		},
 	}
 	service := newService(
-		fakeDatabase{version: 4},
+		fakeDatabase{version: database.SupportedSchemaVersion()},
 		fakeRepository{
 			inspection: namespace.RepositoryInspection{
 				NamespaceVersion: 9,
@@ -657,7 +658,7 @@ func TestDoctorHealthyResultIsExplicit(t *testing.T) {
 	runtime.SetSocket(nil)
 	runtime.SetReady(true)
 	service := newService(
-		fakeDatabase{version: 4},
+		fakeDatabase{version: database.SupportedSchemaVersion()},
 		fakeRepository{},
 		fakeIndex{},
 		fakeObjectStore{},
