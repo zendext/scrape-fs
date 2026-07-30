@@ -9,6 +9,7 @@ import unittest
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+LICENSE = REPOSITORY / "LICENSE"
 PACKAGER = REPOSITORY / "scripts" / "package-release.sh"
 VERSION_CLASSIFIER = REPOSITORY / "scripts" / "release-version.sh"
 WORKFLOW = REPOSITORY / ".github" / "workflows" / "release.yml"
@@ -64,6 +65,7 @@ class ReleasePackageTests(unittest.TestCase):
 
         expected_members = {
             root_name,
+            f"{root_name}/LICENSE",
             f"{root_name}/install.sh",
             f"{root_name}/scrapefs",
             f"{root_name}/scrapefsd",
@@ -86,6 +88,10 @@ class ReleasePackageTests(unittest.TestCase):
                 0o755,
             )
             self.assertEqual(
+                package.getmember(f"{root_name}/LICENSE").mode,
+                0o644,
+            )
+            self.assertEqual(
                 package.getmember(
                     f"{root_name}/scrapefsd.service"
                 ).mode,
@@ -94,6 +100,10 @@ class ReleasePackageTests(unittest.TestCase):
             package.extractall(extracted)
 
         bundle = extracted / root_name
+        self.assertEqual(
+            (bundle / "LICENSE").read_text(encoding="utf-8"),
+            LICENSE.read_text(encoding="utf-8"),
+        )
         for name in ("scrapefs", "scrapefsd"):
             version_result = subprocess.run(
                 [str(bundle / name), "--version"],

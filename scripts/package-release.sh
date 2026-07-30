@@ -38,6 +38,7 @@ repository=$(
 )
 
 for path in \
+    "$repository/LICENSE" \
     "$repository/scripts/install.sh" \
     "$repository/scripts/release-version.sh" \
     "$repository/packaging/systemd/scrapefsd.service"
@@ -107,6 +108,9 @@ ldflags="-s -w -X github.com/zendext/scrape-fs/internal/buildinfo.Version=$versi
 install -m 0755 \
     "$repository/scripts/install.sh" \
     "$package_directory/install.sh"
+install -m 0644 \
+    "$repository/LICENSE" \
+    "$package_directory/LICENSE"
 install -m 0644 \
     "$repository/packaging/systemd/scrapefsd.service" \
     "$package_directory/scrapefsd.service"
