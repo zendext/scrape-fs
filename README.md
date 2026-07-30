@@ -149,3 +149,7 @@ to audit and undo a successfully applied batch.
 - [简体中文文档](docs/zh-CN/README.md)
 
 The Chinese documentation is currently the normative source. The English documentation is its maintained translation.
+
+## License
+
+ScrapeFS is licensed under the [Apache License 2.0](LICENSE).

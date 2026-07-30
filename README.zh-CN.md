@@ -144,3 +144,7 @@ Plan、draft 或 revision；外部 Agent 保存工作上下文，daemon 只保�
 - [English documentation](docs/en/README.md)
 
 中文文档是当前规范原文，英文文档是同步维护的翻译。
+
+## 许可证
+
+ScrapeFS 使用 [Apache License 2.0](LICENSE)。
