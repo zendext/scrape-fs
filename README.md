@@ -8,6 +8,16 @@ ScrapeFS is an external-agent-assisted media organization and virtual directory 
 
 It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
 
+## Typical Use Cases
+
+- Keep media in the original paths managed by a BitTorrent client for continued
+  seeding while exposing a virtual library with player-friendly directories and
+  filenames to Jellyfin or Plex.
+- Aggregate media from multiple disks or download directories into one Library
+  without copying files or changing the existing directory layout.
+- Let an external Agent identify media and generate a Projection Batch, then
+  create NFO, artwork, subtitles, and other companion files through FUSE.
+
 ## Installation and Setup
 
 ScrapeFS requires Linux, systemd, `/dev/fuse`, `findmnt` from util-linux, and

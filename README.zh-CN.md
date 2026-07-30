@@ -8,6 +8,15 @@ ScrapeFS 是一个面向 Linux 的外部 Agent 辅助媒体整理与虚拟目录
 
 它将一个或多个本地文件系统中的媒体文件投影为适合播放器识别的媒体库，同时不移动、不重命名、不修改源文件。
 
+## 典型场景
+
+- 保持媒体文件位于 BT 下载器管理的原始路径中持续做种，同时为 Jellyfin 或 Plex
+  提供具有规范目录和文件名的虚拟媒体库。
+- 将多个磁盘或下载目录中的媒体聚合到同一个 Library，而不复制文件或改变原有
+  目录结构。
+- 由外部 Agent 识别媒体并生成 Projection Batch，再通过 FUSE 创建 NFO、海报和
+  字幕等附属文件。
+
 ## 安装与设置
 
 ScrapeFS 要求 Linux、systemd、`/dev/fuse`、util-linux 提供的 `findmnt`，
