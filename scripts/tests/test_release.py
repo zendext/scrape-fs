@@ -192,6 +192,11 @@ class ReleasePackageTests(unittest.TestCase):
         self.assertIn("--prerelease", workflow)
         self.assertIn("--latest=false", workflow)
 
+    def test_workflow_does_not_require_host_systemd_verification(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertNotIn("systemd-analyze verify", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
