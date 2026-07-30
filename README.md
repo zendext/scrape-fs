@@ -6,7 +6,41 @@ ScrapeFS is an external-agent-assisted media organization and virtual directory 
 
 It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
 
-> Status: the v1 target feature set is implemented. The project is in a pre-release stage and has not published a stable release. The daemon loads and validates configuration, acquires its host-filesystem runtime lock, initializes SQLite and the Overlay object store, rebuilds the in-memory index, mounts the persisted namespace, and serves authenticated Library, direct Projection, Projection Batch, status, and read-only doctor operations through the Unix control socket. Readiness is emitted only after the index, mount, and socket are usable; committed namespace changes trigger FUSE cache invalidation, and normal shutdown drains admitted writes before unmounting. FUSE clients can create and modify ordinary directories and object-backed OverlayFiles, read ProjectionFiles through verified source descriptors, and rename or unlink direct and Batch-owned ProjectionFiles through shared Projection lifecycle operations. The repository also ships the first installable external Agent skill for media enumeration, probing, naming, batch confirmation, and FUSE artifact workflows.
+## Installation and Setup
+
+ScrapeFS requires Linux, systemd, `/dev/fuse`, `findmnt` from util-linux, and
+root access for installing files, creating groups, and mounting FUSE.
+
+The preferred path is to download the `linux/amd64` archive and `SHA256SUMS`
+from [GitHub Releases](https://github.com/zendext/scrape-fs/releases):
+
+```bash
+version=vX.Y.Z
+archive="scrape-fs_${version}_linux_amd64.tar.gz"
+
+sha256sum -c SHA256SUMS
+tar -xzf "$archive"
+cd "${archive%.tar.gz}"
+sudo ./install.sh --administrator "$USER"
+```
+
+The installer preserves an existing configuration and does not start the
+service automatically. Before the first start, review the configuration, then
+start the daemon, verify the runtime, and create the first Library:
+
+```bash
+sudo cat /etc/scrapefs/config.toml
+sudo systemctl enable --now scrapefsd.service
+
+scrapefs status
+scrapefs doctor
+scrapefs library add jellyfin --profile jellyfin@1
+scrapefs library list
+```
+
+Manual source builds remain supported. See the
+[deployment guide](docs/en/deployment.md) for the complete installer behavior,
+source-build procedure, paths, permissions, and update workflow.
 
 ## Core Model
 
@@ -86,83 +120,10 @@ python3 "$SKILL_DIR/scripts/scrapefs_media.py" validate \
 
 `scrapefsd` does not run a model or expose file-read, `ffprobe`, or network tools to an Agent. Validate checks the batch without persistence. The user must return the complete validation digest verbatim before the Skill freshly validates and applies. The Skill creates NFO and artwork through ordinary FUSE operations after apply. See [Projection batches and the external Agent workflow](docs/en/scrape.md) for installation, confirmation, and recovery details.
 
-The earlier specification used `scrapefs scrape <source> --library <name>` and assumed the daemon would enumerate and identify media. That command is removed from the target v1 CLI. ScrapeFS also does not persist unapplied plans, drafts, or revisions. The external Agent owns work context, while the daemon stores only minimal provenance for a successfully applied batch and later undo.
-
-## First-Version Boundaries
-
-The first version targets:
-
-- Linux and FUSE;
-- Plex and Jellyfin libraries;
-- movies, standard `SxxEyy` episodes, and external subtitles;
-- read-only source Projections;
-- writable OverlayFiles;
-- versioned JSON Projection batches;
-- a machine-readable CLI for people and external Agent skills.
-
-It does not target an embedded model provider, daemon-side Agent sessions, torrent management, downloader integration, a GUI, writable Projections, a complete POSIX filesystem, dynamic Profile plugins, or cross-host path translation.
-
-## Installation
-
-The preferred path is to download the `linux/amd64` archive and `SHA256SUMS`
-from [GitHub Releases](https://github.com/zendext/scrape-fs/releases):
-
-```bash
-version=vX.Y.Z
-archive="scrape-fs_${version}_linux_amd64.tar.gz"
-
-sha256sum -c SHA256SUMS
-tar -xzf "$archive"
-cd "${archive%.tar.gz}"
-sudo ./install.sh --administrator "$USER"
-```
-
-Manual source builds remain supported. Both paths use the same installer,
-which preserves an existing configuration and does not start the service
-automatically. See the [deployment guide](docs/en/deployment.md) for the full
-procedure.
-
-## Development
-
-ScrapeFS currently requires Linux and Go 1.25 or newer.
-
-Build both command packages:
-
-```bash
-go build ./cmd/...
-```
-
-Run the current entry points:
-
-```bash
-go run ./cmd/scrapefs --help
-go run ./cmd/scrapefsd --version
-```
-
-Run the baseline checks:
-
-```bash
-go test ./...
-go test -race ./...
-go vet ./...
-test -z "$(gofmt -l .)"
-sh -n \
-  scripts/install.sh \
-  scripts/package-release.sh \
-  scripts/release-version.sh
-python3 -m unittest discover \
-  -s scripts/tests \
-  -p 'test_*.py'
-python3 -m unittest discover \
-  -s skills/organize-scrapefs-media/tests \
-  -p 'test_*.py'
-```
-
-`go test ./...` includes real FUSE-mount and cross-UID/GID ACL integration
-tests. The FUSE tests require `/dev/fuse` and either root or effective
-`CAP_SYS_ADMIN`; the cross-role ACL connection test requires root or a
-root-mapped user namespace. Tests explicitly report skipped when these
-requirements are unavailable.
+`scrapefs scrape <source> --library <name>` is not part of the CLI. ScrapeFS
+does not persist unapplied plans, drafts, or revisions. The external Agent owns
+the work context, while the daemon stores only the minimal provenance needed
+to audit and undo a successfully applied batch.
 
 ## Documentation
 
@@ -173,7 +134,6 @@ requirements are unavailable.
 - [Filesystem and object storage](docs/en/filesystem.md)
 - [Deployment guide](docs/en/deployment.md)
 - [Operations and CLI](docs/en/operations.md)
-- [First-version acceptance criteria](docs/en/acceptance.md)
 - [简体中文文档](docs/zh-CN/README.md)
 
 The Chinese documentation is currently the normative source. The English documentation is its maintained translation.
