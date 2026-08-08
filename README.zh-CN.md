@@ -106,6 +106,8 @@ scrapefs projection mv \
 
 `projection add` 安全打开源文件并原子创建映射；`projection list` 从持久化 namespace 返回稳定 ID、虚拟目标和缓存的源文件身份，不重新打开源文件。`projection mv`、`projection rm` 和已确认的 `projection rebind` 在适用时保留稳定 node ID，并且不会修改任一源文件。
 
+新建和 rebind 的 Projection 使用可跨普通文件系统 remount 保持稳定的 source identity。旧数据库中的 legacy identity 必须由控制用户先预览并原样确认 `scrapefs projection identity migrate --library <name>` 返回的 digest 后显式迁移；daemon 启动时不会自动迁移。
+
 ## 外部 Agent Skill
 
 需要识别媒体时，安装仓库中的

@@ -88,7 +88,7 @@ SQLite's own locking and transaction semantics protect database consistency. The
 
 Persistent internal identities use SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` values and Go `int64`, so deleted node IDs are not reused. Persisted timestamps use UTC Unix nanoseconds in SQLite `INTEGER` columns.
 
-The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. `scrapes` is a released legacy storage name. Schema migration 3 extends it for applied-batch provenance without rewriting the released migration and adds `projection_batch_entries` for ordered source identity and target history. Schema migration 4 extends the released `objects` placeholder with `STAGING`/`LIVE` lifecycle state and timestamps. Schema migration 5 permits `projection.batch.undo` to retain empty path and node-kind arrays when no Batch-owned Projection remains, while every other operation still requires at least one affected path. The Repository requires a Batch association when it creates such an empty undo entry; the database keeps the entry valid if `ON DELETE SET NULL` later clears that association.
+The foundational namespace migration creates ID-only `objects` and `scrapes` tables as foreign-key targets. `scrapes` is a released legacy storage name. Schema migration 3 extends it for applied-batch provenance without rewriting the released migration and adds `projection_batch_entries` for ordered source identity and target history. Schema migration 4 extends the released `objects` placeholder with `STAGING`/`LIVE` lifecycle state and timestamps. Schema migration 5 permits `projection.batch.undo` to retain empty path and node-kind arrays when no Batch-owned Projection remains, while every other operation still requires at least one affected path. Schema migration 6 adds nullable filesystem type and complete two-part filesystem ID fields to live Projection nodes and Projection Batch entries; existing rows remain NULL until explicitly migrated. The Repository requires a Batch association when it creates an empty undo entry; the database keeps the entry valid if `ON DELETE SET NULL` later clears that association.
 
 The schema uses declarative local integrity only: `STRICT` tables, primary keys, `NOT NULL`, row-local `CHECK` constraints, foreign keys, and unique indexes. SQLite triggers do not implement namespace business rules, lifecycle policy, namespace-version policy, or operation-log policy.
 
@@ -203,6 +203,9 @@ nodes
 ├── name
 ├── kind
 ├── source_path
+├── source_filesystem_type
+├── source_filesystem_id_0
+├── source_filesystem_id_1
 ├── source_device_id
 ├── source_inode
 ├── cached_size
@@ -227,7 +230,8 @@ nodes
 
 Field rules:
 
-- ProjectionFile uses the source fields.
+- ProjectionFile uses the source fields; the three `source_filesystem_*` fields are either all NULL or all non-NULL.
+- A non-NULL v2 filesystem identity is the `fstatfs` filesystem type and complete filesystem ID from the securely opened descriptor; `source_device_id` is cached compatibility and diagnostic metadata only.
 - OverlayFile uses `object_id`.
 - Directory uses neither source nor object fields.
 - `managed_directory=true` marks a directory created automatically by a Projection batch or `projection add`.
@@ -266,6 +270,7 @@ The following do not increment it:
 - write, truncate, flush, and fsync;
 - chmod, chown, and utimens;
 - Projection rebind;
+- Projection identity migration;
 - Library Profile changes;
 - stateless projection batch validation.
 

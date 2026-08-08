@@ -1032,12 +1032,19 @@ func fillProjectionAttr(
 }
 
 func projectionIdentity(source namespace.ProjectionSource) sourcefile.Identity {
-	return sourcefile.Identity{
+	identity := sourcefile.Identity{
 		DeviceID: source.DeviceID,
 		Inode:    source.Inode,
 		Size:     source.Size,
 		MtimeNS:  source.MtimeNS,
 	}
+	if source.HasFilesystem {
+		identity.Filesystem = &sourcefile.FilesystemIdentity{
+			Type: source.Filesystem.Type,
+			ID:   source.Filesystem.ID,
+		}
+	}
+	return identity
 }
 
 func fillOverlayAttr(

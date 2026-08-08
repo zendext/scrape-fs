@@ -131,6 +131,8 @@ func (request CreateLibrary) Validate() error {
 
 type ProjectionSource struct {
 	Path          string
+	Filesystem    FilesystemIdentity
+	HasFilesystem bool
 	DeviceID      int64
 	Inode         int64
 	Size          int64
@@ -138,6 +140,11 @@ type ProjectionSource struct {
 	MtimeNS       int64
 	SourceCtimeNS int64
 	VerifiedAtNS  int64
+}
+
+type FilesystemIdentity struct {
+	Type int64    `json:"type"`
+	ID   [2]int32 `json:"id"`
 }
 
 type CreateNode struct {
@@ -194,6 +201,11 @@ type RebindProjectionNode struct {
 	ExpectedID     int64
 	ExpectedSource ProjectionSource
 	Source         ProjectionSource
+}
+
+type ProjectionIdentityMigration struct {
+	ProjectionID int64
+	Filesystem   FilesystemIdentity
 }
 
 type SetAttributes struct {

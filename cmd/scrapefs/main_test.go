@@ -586,6 +586,61 @@ func TestRunProjectionRebindPreviewOmitsConfirmation(t *testing.T) {
 	}
 }
 
+func TestRunProjectionIdentityMigratePassesLibraryAndConfirmation(t *testing.T) {
+	service := &fakeBatchService{
+		projectionMigrated: control.ProjectionIdentityMigrationResult{
+			Schema:             control.ProjectionIdentityMigrationResultSchema,
+			Status:             control.ProjectionIdentityMigrationApplied,
+			Library:            "media",
+			ConfirmationDigest: "sha256:confirmed",
+			Candidates:         []control.ProjectionIdentityMigrationCandidate{},
+			Rejections:         []control.ProjectionIdentityMigrationRejection{},
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithBatchService(
+		[]string{
+			"projection", "identity", "migrate",
+			"--library", "media",
+			"--confirm", "sha256:confirmed",
+		},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+		service,
+		projectionbatch.Caller{UID: 1000, GID: 1001},
+	)
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	request := service.projectionMigrationRequest
+	if request.LibraryName != "media" ||
+		request.ConfirmationDigest != "sha256:confirmed" ||
+		request.Actor.Kind != namespace.ActorControl ||
+		request.Actor.ID == nil || *request.Actor.ID != 1000 {
+		t.Errorf("migration request = %#v", request)
+	}
+	var result control.ProjectionIdentityMigrationResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("Unmarshal stdout: %v", err)
+	}
+	if !reflect.DeepEqual(result, service.projectionMigrated) {
+		t.Errorf("stdout = %#v, want %#v", result, service.projectionMigrated)
+	}
+}
+
+func TestRunProjectionIdentityHelpDescribesMigration(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if exitCode := run([]string{"projection", "identity", "--help"}, &stdout, &stderr); exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "migrate") {
+		t.Errorf("identity help = %q, want migrate command", stdout.String())
+	}
+}
+
 func TestRunHelpListsLibraryCommands(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -844,43 +899,45 @@ func TestRunLibraryAddRejectsInvalidProfileWithoutCallingService(t *testing.T) {
 }
 
 type fakeBatchService struct {
-	validation              projectionbatch.ValidationResult
-	applied                 projectionbatch.ApplyResult
-	listed                  projectionbatch.ListResult
-	shown                   projectionbatch.DetailResult
-	undone                  projectionbatch.UndoResult
-	err                     error
-	validated               []byte
-	applyRequest            projectionbatch.ApplyRequest
-	undoRequest             projectionbatch.UndoRequest
-	libraryCreated          control.LibraryResult
-	libraryRemoved          control.LibraryResult
-	libraryRenamed          control.LibraryResult
-	libraryProfileSet       control.LibraryResult
-	librariesListed         control.LibraryListResult
-	libraryName             string
-	libraryNewName          string
-	libraryRecursive        bool
-	libraryProfile          library.ProfileIdentifier
-	libraryCreateCalls      int
-	libraryRenameCalls      int
-	libraryProfileCalls     int
-	projectionCreated       control.ProjectionResult
-	projectionsListed       control.ProjectionListResult
-	projectionMoved         control.ProjectionResult
-	projectionRemoved       control.ProjectionResult
-	projectionRebound       control.ProjectionRebindResult
-	projectionCreateRequest projection.CreateRequest
-	projectionLibrary       string
-	projectionMoveRequest   projection.MoveRequest
-	projectionRemoveRequest projection.RemoveRequest
-	projectionRebindRequest projection.RebindRequest
-	gcResult                objectstore.GCResult
-	gcCalls                 int
-	status                  diagnostics.StatusResult
-	doctor                  diagnostics.DoctorResult
-	statusCalls             int
-	doctorCalls             int
+	validation                 projectionbatch.ValidationResult
+	applied                    projectionbatch.ApplyResult
+	listed                     projectionbatch.ListResult
+	shown                      projectionbatch.DetailResult
+	undone                     projectionbatch.UndoResult
+	err                        error
+	validated                  []byte
+	applyRequest               projectionbatch.ApplyRequest
+	undoRequest                projectionbatch.UndoRequest
+	libraryCreated             control.LibraryResult
+	libraryRemoved             control.LibraryResult
+	libraryRenamed             control.LibraryResult
+	libraryProfileSet          control.LibraryResult
+	librariesListed            control.LibraryListResult
+	libraryName                string
+	libraryNewName             string
+	libraryRecursive           bool
+	libraryProfile             library.ProfileIdentifier
+	libraryCreateCalls         int
+	libraryRenameCalls         int
+	libraryProfileCalls        int
+	projectionCreated          control.ProjectionResult
+	projectionsListed          control.ProjectionListResult
+	projectionMoved            control.ProjectionResult
+	projectionRemoved          control.ProjectionResult
+	projectionRebound          control.ProjectionRebindResult
+	projectionMigrated         control.ProjectionIdentityMigrationResult
+	projectionCreateRequest    projection.CreateRequest
+	projectionLibrary          string
+	projectionMoveRequest      projection.MoveRequest
+	projectionRemoveRequest    projection.RemoveRequest
+	projectionRebindRequest    projection.RebindRequest
+	projectionMigrationRequest projection.IdentityMigrationRequest
+	gcResult                   objectstore.GCResult
+	gcCalls                    int
+	status                     diagnostics.StatusResult
+	doctor                     diagnostics.DoctorResult
+	statusCalls                int
+	doctorCalls                int
 }
 
 func (service *fakeBatchService) Status(
@@ -984,6 +1041,14 @@ func (service *fakeBatchService) RebindProjection(
 ) (control.ProjectionRebindResult, error) {
 	service.projectionRebindRequest = request
 	return service.projectionRebound, service.err
+}
+
+func (service *fakeBatchService) MigrateProjectionIdentity(
+	_ context.Context,
+	request projection.IdentityMigrationRequest,
+) (control.ProjectionIdentityMigrationResult, error) {
+	service.projectionMigrationRequest = request
+	return service.projectionMigrated, service.err
 }
 
 func (service *fakeBatchService) Validate(

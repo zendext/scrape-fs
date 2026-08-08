@@ -144,6 +144,7 @@ scrapefs projection list [--library <name>]
 scrapefs projection mv <library:/target> <library:/new-target>
 scrapefs projection rm <library:/target>
 scrapefs projection rebind <library:/target> --source <path> [--confirm <digest>]
+scrapefs projection identity migrate --library <name> [--confirm <digest>]
 
 scrapefs projection batch validate
 scrapefs projection batch apply
@@ -182,7 +183,7 @@ Doctor performs these read-only checks through daemon APIs:
 
 - SQLite schema, `PRAGMA quick_check`, and `PRAGMA foreign_key_check`;
 - ACTIVE/RETIRED Library, LibraryRoot, and namespace-tree relationships;
-- secure Projection source reopen and device/inode/size/mtime identity;
+- secure Projection source reopen; v2 uses filesystem type, complete filesystem ID, inode, size, and mtime identity, while legacy uses device, inode, size, and mtime identity;
 - Overlay references, LIVE/STAGING objects, missing objects, conflicting files, and orphans;
 - full-value comparison between a Repository snapshot and the current in-memory index;
 - mount path, ScrapeFS mount ownership, socket inode, mode, owner/group, and role ACLs.
@@ -216,6 +217,8 @@ UNSAFE_RUNTIME
 
 Doctor does not invoke startup recovery, GC, Projection rebind, or any repair path. It does not modify namespace version, operation logs, Libraries, nodes, object records, backing files, or source files. Repair and explicit reclamation remain separate administrator operations.
 
+When an ordinary remount changes the device ID and produces `STALE_PROJECTION` for a legacy identity, a control user runs the separate `projection identity migrate` preview/confirmation workflow. Doctor never migrates it automatically.
+
 `scrapefs gc` requires administrator authorization and returns
 `scrapefs.gc-result/v1`. Its arrays and per-object errors are deterministic, and
 its counts distinguish LIVE, STAGING, untracked, referenced, active, grace-period,
@@ -235,6 +238,10 @@ candidate eligible for unsafe deletion.
 `projection mv` accepts only a missing target in the same ACTIVE Library, preserves the node ID, source metadata, attributes, creator, and Batch provenance, creates missing managed target directories atomically, writes one operation-log entry, and increments namespace version once. When the Projection is Batch-owned, the move operation is associated with that Batch while its original entries and digest remain unchanged. Cross-Library moves return `CrossLibrary`; an existing target returns `TargetConflict`. `projection rm` deletes a direct or Batch-owned Projection node, prunes empty managed directories toward LibraryRoot, retains user-created or non-empty directories, writes one operation-log entry, and increments namespace version once. A Batch-owned remove is associated with the originating Batch; its original entry remains with a null live node reference while the Batch stays `applied`. Neither command opens, renames, or removes the source file.
 
 `projection rebind` without `--confirm` securely opens the proposed source and returns `scrapefs.projection-rebind-result/v1` with status `confirmation_required`, the stable Projection snapshot, complete previous and proposed cached source metadata, and a confirmation digest bound to the node ID, target, source paths, and strict identities. Repeating the command with `--confirm <digest>` reopens and revalidates the source and applies only the exact preview, returning status `applied`. A changed Projection or source returns `ConfirmationMismatch` with no mutation. Successful rebind preserves the node ID and virtual target, updates source metadata and virtual ctime, writes one audit entry, and does not increment namespace version.
+
+`projection identity migrate --library <name>` accepts only an ACTIVE Library. Without `--confirm`, it returns a deterministic read-only `scrapefs.projection-identity-migration-result/v1` preview containing a candidate or rejection for every legacy Projection, a digest for the complete ordered migration, and status `confirmation_required`. A candidate requires path, inode, size, mtime, and cached ctime to match after a secure reopen; a device ID difference is allowed. With `--confirm <digest>`, the daemon performs a fresh scan and requires byte-for-byte digest equality. Any change to a Projection, source, target, Batch ownership, or result set returns `ConfirmationMismatch` and leaves every identity unchanged.
+
+Successful confirmation returns status `applied`. One Repository transaction updates every candidate node's filesystem identity and the original Batch entry for each Batch-owned Projection. It preserves the Batch ID, digest, target, history, source file, virtual target, and namespace version; writes an audit log entry; and invalidates affected FUSE inode attribute caches after commit. Rejections are unchanged. Source objects in `projection list` and `projection batch show` represent new and migrated identities as `filesystem: {"type": <integer>, "id": [<integer>, <integer>]}` while retaining existing compatibility fields such as `device_id`. Daemon startup does not run automatic identity migration.
 
 Rebind applies only to direct Projections whose `origin_scrape_id` is null; a Batch-owned Projection returns `BatchOwnedProjection`. Batch-owned Projections can be moved within their Library or removed individually. Batch show retains the original apply-time entries and includes associated move and remove operations. Batch undo removes only the Batch-owned Projections that still exist, records their actual deletion paths, prunes empty managed directories left along their path history, and marks the Batch `undone` even when every Projection was removed earlier.
 

@@ -140,6 +140,7 @@ scrapefs projection list [--library <name>]
 scrapefs projection mv <library:/target> <library:/new-target>
 scrapefs projection rm <library:/target>
 scrapefs projection rebind <library:/target> --source <path> [--confirm <digest>]
+scrapefs projection identity migrate --library <name> [--confirm <digest>]
 
 scrapefs projection batch validate
 scrapefs projection batch apply
@@ -178,7 +179,7 @@ doctor 通过 daemon 内部 API 执行只读检查：
 
 - SQLite schema、`PRAGMA quick_check` 与 `PRAGMA foreign_key_check`；
 - ACTIVE/RETIRED Library、LibraryRoot 和 namespace tree 关系；
-- Projection source 的安全 reopen 与 device/inode/size/mtime identity；
+- Projection source 的安全 reopen；v2 使用 filesystem type、完整 filesystem ID、inode、size 和 mtime identity，legacy 使用 device、inode、size 和 mtime identity；
 - Overlay reference、LIVE/STAGING object、缺失 object、冲突文件和 orphan；
 - Repository 快照与当前内存 index 的完整值比较；
 - mount path、ScrapeFS mount ownership、socket inode、mode、owner/group 和角色 ACL。
@@ -212,6 +213,8 @@ UNSAFE_RUNTIME
 
 doctor 禁止调用 startup recovery、GC、Projection rebind 或任何 repair 路径。它不得修改 namespace version、operation log、Library、node、object record、backing file 或 source file。repair 和显式回收仍由独立的管理员操作完成。
 
+对于 legacy identity 因普通 remount 的 device ID 变化而产生的 `STALE_PROJECTION`，控制用户必须单独运行 `projection identity migrate` 的 preview/confirm 工作流；doctor 不自动迁移。
+
 `scrapefs gc` 需要管理员授权，并返回 `scrapefs.gc-result/v1`。数组和逐
 object 错误使用确定性顺序；计数区分 LIVE、STAGING、无数据库记录、仍被引用、
 活动 handle、grace period 和缺失但仍被引用等结果。结果同时包含 daemon 的启动
@@ -229,6 +232,10 @@ object 错误使用确定性顺序；计数区分 LIVE、STAGING、无数据库�
 `projection mv` 只接受同一 ACTIVE Library 内不存在的目标，保留 node ID、source metadata、attributes、creator 和 Batch provenance，在同一事务中创建缺失的 managed 目标目录，写一条 operation log，并使 namespace version 增加 1。Projection 属于 Batch 时，该 move operation 会关联到对应 Batch，原始 entry 和 digest 保持不变。跨 Library move 返回 `CrossLibrary`；目标已存在返回 `TargetConflict`。`projection rm` 删除 direct 或 Batch-owned Projection 节点，并向 LibraryRoot 清理空的 managed Directory；用户创建或非空目录必须保留。它写一条 operation log，并使 namespace version 增加 1。删除 Batch-owned Projection 时，remove operation 会关联到原始 Batch；原始 entry 继续保留但 live node reference 变为空，Batch 状态仍为 `applied`。两个命令均不得打开、重命名或删除源文件。
 
 不带 `--confirm` 的 `projection rebind` 会安全打开候选源文件，并返回 `scrapefs.projection-rebind-result/v1`：status 为 `confirmation_required`，同时包含稳定 Projection 快照、完整的新旧缓存 source metadata，以及绑定 node ID、target、source path 和严格 identity 的 confirmation digest。使用 `--confirm <digest>` 重复执行时，daemon 会重新打开并重新校验 source，只应用与 preview 完全一致的变更，并返回 `applied`。Projection 或 source 已变化时返回 `ConfirmationMismatch`，不产生 mutation。成功 rebind 保留 node ID 和虚拟 target，更新 source metadata 与虚拟 ctime，写一条 audit 记录，但不增加 namespace version。
+
+`projection identity migrate --library <name>` 只接受 ACTIVE Library。省略 `--confirm` 时返回 `scrapefs.projection-identity-migration-result/v1` 的确定性只读 preview，包括每个 legacy Projection 的 candidate 或 rejection、完整有序迁移的 digest，以及 status `confirmation_required`。candidate 要求安全 reopen 后 path、inode、size、mtime 和缓存 ctime 相同；device ID 可以不同。带 `--confirm <digest>` 时 daemon fresh scan 并要求 digest 逐字节相等；任一 Projection、source、target、Batch ownership 或结果集合变化返回 `ConfirmationMismatch`，全部 identity 保持不变。
+
+确认成功后 status 为 `applied`。daemon 在一个 Repository 事务中更新全部 candidate 的 node filesystem identity，并同步更新 Batch-owned Projection 的原始 Batch entry；保留 Batch ID、digest、target、history、source 文件、虚拟 target 和 namespace version，写 audit log，并在 commit 后失效相关 FUSE inode attribute cache。rejection 不会被修改。新建和迁移后的 `projection list` 与 `projection batch show` source 对象使用 `filesystem: {"type": <整数>, "id": [<整数>, <整数>]}`，并继续返回 `device_id` 等已有兼容字段。daemon startup 不执行自动 identity migration。
 
 Rebind 只适用于 `origin_scrape_id` 为空的 direct Projection；Batch-owned Projection 返回 `BatchOwnedProjection`。Batch-owned Projection 可以在同一 Library 内 move，也可以单独 remove。Batch show 保留原始 apply-time entry 并展示关联的 move 和 remove operation；Batch undo 只删除仍存在的 Batch-owned Projection，记录实际删除路径，清理路径历史沿途留下的空 managed Directory，并在所有 Projection 已提前删除时仍将 Batch 标记为 `undone`。
 

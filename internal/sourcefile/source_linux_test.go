@@ -55,6 +55,15 @@ func TestOpenReturnsReadOnlyDescriptorAndMetadata(t *testing.T) {
 		opened.CtimeNS != stat.Ctim.Nano() {
 		t.Errorf("metadata = %#v, want stat %#v", opened.Metadata, stat)
 	}
+	var statfs unix.Statfs_t
+	if err := unix.Statfs(path, &statfs); err != nil {
+		t.Fatalf("Statfs: %v", err)
+	}
+	if opened.Filesystem == nil ||
+		opened.Filesystem.Type != statfs.Type ||
+		opened.Filesystem.ID != statfs.Fsid.Val {
+		t.Errorf("filesystem identity = %#v, want type %d ID %v", opened.Filesystem, statfs.Type, statfs.Fsid.Val)
+	}
 
 	originalPath := path + ".original"
 	if err := os.Rename(path, originalPath); err != nil {
@@ -243,14 +252,22 @@ func TestOpenVerifiedChecksStrictIdentity(t *testing.T) {
 	}
 
 	tests := map[string]Identity{
-		"device ID": identity,
-		"inode":     identity,
-		"size":      identity,
-		"mtime":     identity,
+		"filesystem type": identity,
+		"filesystem ID":   identity,
+		"inode":           identity,
+		"size":            identity,
+		"mtime":           identity,
 	}
-	deviceMismatch := tests["device ID"]
-	deviceMismatch.DeviceID ^= 1
-	tests["device ID"] = deviceMismatch
+	filesystemTypeMismatch := tests["filesystem type"]
+	filesystemType := *filesystemTypeMismatch.Filesystem
+	filesystemType.Type ^= 1
+	filesystemTypeMismatch.Filesystem = &filesystemType
+	tests["filesystem type"] = filesystemTypeMismatch
+	filesystemIDMismatch := tests["filesystem ID"]
+	filesystemID := *filesystemIDMismatch.Filesystem
+	filesystemID.ID[1] ^= 1
+	filesystemIDMismatch.Filesystem = &filesystemID
+	tests["filesystem ID"] = filesystemIDMismatch
 	inodeMismatch := tests["inode"]
 	inodeMismatch.Inode ^= 1
 	tests["inode"] = inodeMismatch
@@ -276,6 +293,56 @@ func TestOpenVerifiedChecksStrictIdentity(t *testing.T) {
 	verified, err := OpenVerified(path, identity)
 	if err != nil {
 		t.Fatalf("OpenVerified matching identity: %v", err)
+	}
+	if err := verified.Close(); err != nil {
+		t.Fatalf("Close verified: %v", err)
+	}
+}
+
+func TestOpenVerifiedKeepsLegacyDeviceIDStrict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(path, []byte("source"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	opened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	identity := opened.Identity
+	if err := opened.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	identity.Filesystem = nil
+	identity.DeviceID ^= 1
+	verified, err := OpenVerified(path, identity)
+	if verified != nil {
+		verified.Close()
+	}
+	if !errors.Is(err, unix.ESTALE) {
+		t.Fatalf("OpenVerified legacy device mismatch error = %v, want ESTALE", err)
+	}
+}
+
+func TestOpenVerifiedIgnoresDeviceIDForStableFilesystemIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(path, []byte("source"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	opened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	identity := opened.Identity
+	if err := opened.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	identity.DeviceID ^= 1
+	verified, err := OpenVerified(path, identity)
+	if err != nil {
+		t.Fatalf("OpenVerified after device ID change: %v", err)
 	}
 	if err := verified.Close(); err != nil {
 		t.Fatalf("Close verified: %v", err)

@@ -66,12 +66,13 @@ type librarySetProfileCLI struct {
 }
 
 type projectionCLI struct {
-	Add    projectionAddCLI    `cmd:"" help:"Create a direct Projection."`
-	List   projectionListCLI   `cmd:"" help:"List Projections."`
-	Mv     projectionMoveCLI   `cmd:"" help:"Move a Projection within one Library."`
-	Rm     projectionRemoveCLI `cmd:"" help:"Remove a Projection."`
-	Rebind projectionRebindCLI `cmd:"" help:"Preview or confirm a Projection source rebind."`
-	Batch  projectionBatchCLI  `cmd:"" help:"Validate, apply, inspect, and undo Projection Batches."`
+	Add      projectionAddCLI      `cmd:"" help:"Create a direct Projection."`
+	List     projectionListCLI     `cmd:"" help:"List Projections."`
+	Mv       projectionMoveCLI     `cmd:"" help:"Move a Projection within one Library."`
+	Rm       projectionRemoveCLI   `cmd:"" help:"Remove a Projection."`
+	Rebind   projectionRebindCLI   `cmd:"" help:"Preview or confirm a Projection source rebind."`
+	Identity projectionIdentityCLI `cmd:"" help:"Manage persisted Projection source identities."`
+	Batch    projectionBatchCLI    `cmd:"" help:"Validate, apply, inspect, and undo Projection Batches."`
 }
 
 type projectionAddCLI struct {
@@ -95,6 +96,15 @@ type projectionRemoveCLI struct {
 type projectionRebindCLI struct {
 	Target  string `arg:"" name:"target" help:"Existing virtual target."`
 	Source  string `help:"Absolute replacement source file path." required:""`
+	Confirm string `help:"Apply the exact confirmation digest returned by a preview."`
+}
+
+type projectionIdentityCLI struct {
+	Migrate projectionIdentityMigrateCLI `cmd:"" help:"Preview or confirm migration of legacy source identities."`
+}
+
+type projectionIdentityMigrateCLI struct {
+	Library string `help:"Migrate legacy identities in this ACTIVE Library." required:""`
 	Confirm string `help:"Apply the exact confirmation digest returned by a preview."`
 }
 
@@ -161,6 +171,10 @@ type controlService interface {
 		context.Context,
 		projection.RebindRequest,
 	) (control.ProjectionRebindResult, error)
+	MigrateProjectionIdentity(
+		context.Context,
+		projection.IdentityMigrationRequest,
+	) (control.ProjectionIdentityMigrationResult, error)
 	Validate(context.Context, []byte) (projectionbatch.ValidationResult, error)
 	Apply(context.Context, projectionbatch.ApplyRequest) (projectionbatch.ApplyResult, error)
 	List(context.Context) (projectionbatch.ListResult, error)
@@ -347,6 +361,18 @@ func runWithBatchService(
 			ConfirmationDigest: commandLine.Projection.Rebind.Confirm,
 			Actor:              actor,
 		})
+		if err != nil {
+			return writeCommandError(stderr, err)
+		}
+	case strings.HasPrefix(command, "projection identity migrate"):
+		result, err = service.MigrateProjectionIdentity(
+			ctx,
+			projection.IdentityMigrationRequest{
+				LibraryName:        commandLine.Projection.Identity.Migrate.Library,
+				ConfirmationDigest: commandLine.Projection.Identity.Migrate.Confirm,
+				Actor:              actor,
+			},
+		)
 		if err != nil {
 			return writeCommandError(stderr, err)
 		}

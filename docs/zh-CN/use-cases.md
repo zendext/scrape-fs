@@ -32,6 +32,7 @@
 | UC-12 | 删除 Library |
 | UC-13 | daemon 重启恢复 |
 | UC-14 | 使用 doctor 检查异常 |
+| UC-15 | 显式迁移 legacy Projection source identity |
 
 ## UC-01 创建 Library
 
@@ -671,4 +672,52 @@ doctor 默认不修改源文件或命名空间。需要修改的操作由用户�
 
 - [Projection 模型](projection.md)
 - [文件系统与对象存储](filesystem.md)
+- [运行与 CLI](operations.md)
+
+## UC-15 显式迁移 legacy Projection source identity
+
+### 参与者
+
+控制用户、管理员
+
+### 目标
+
+在普通文件系统 remount 改变 device ID 后，使未更换、未原地修改的 legacy Projection 使用稳定 filesystem identity，同时继续拒绝真实替换或内容变化。
+
+### 前置条件
+
+- daemon 已 ready；
+- 目标 Library 为 ACTIVE；
+- 调用者有控制权限；
+- legacy source 可以由 daemon 安全打开。
+
+### 触发
+
+```bash
+scrapefs projection identity migrate --library jellyfin
+```
+
+### 主流程
+
+1. daemon 按稳定顺序读取全部 legacy Projection，并安全重新打开每个 source。
+2. path、inode、size、mtime 和缓存 ctime 相同的记录成为 candidate；device ID 可以不同，其他记录作为 rejection 返回。
+3. daemon 返回全部 candidate、rejection 和绑定完整结果的 digest，不写数据库。
+4. 用户审阅后原样提交 `--confirm sha256:<digest>`。
+5. daemon fresh scan；digest 完全相同时，在一个事务中迁移 direct 与 Batch-owned candidate，并保留 Batch provenance。
+6. commit 后 daemon 失效受影响 inode attribute cache。
+
+### 备选流程
+
+- ctime 或其他必需字段不同：该记录被拒绝并保持 legacy。
+- preview 后 source、Projection、target、Batch ownership 或候选集合变化：返回 `ConfirmationMismatch`，不迁移任何记录。
+- Library 不存在或不是 ACTIVE：返回 `LibraryNotFound`。
+
+### 结果
+
+成功 candidate 的 FUSE open 和 doctor 使用 filesystem type、完整 filesystem ID、inode、size 与 mtime 校验，不再比较 device ID。source、虚拟 target、node ID、Batch digest 和 namespace version 保持不变；daemon 重启不会自动迁移仍为 legacy 的记录。
+
+### 相关规格
+
+- [Projection 模型](projection.md)
+- [系统架构](architecture.md)
 - [运行与 CLI](operations.md)

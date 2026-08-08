@@ -558,5 +558,5 @@ func equalProjectionSource(left, right *ProjectionSource) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}
-	return *left == *right
+	return projectionSourcesEqual(*left, *right)
 }

@@ -200,7 +200,7 @@ undone
 
 基础 namespace migration 已发布 `scrapes`、`nodes.origin_scrape_id` 和 `operation_log.scrape_id` 名称。schema migration 3 扩展这些 legacy storage 名称保存 Batch provenance，避免重写已发布 migration。它们是内部存储名称，不属于 CLI 或 JSON Schema。
 
-Batch 不保存外部 Agent 的 prompt、对话、metadata response 或未应用 JSON。`projection_batch_entries` 保存有序的 source identity 和 target 历史，使 `show` 在 undo 后仍能完整展示；operation log 保存 apply 和 undo 的路径快照。
+Batch 不保存外部 Agent 的 prompt、对话、metadata response 或未应用 JSON。`projection_batch_entries` 保存有序的 source identity 和 target 历史，使 `show` 在 undo 后仍能完整展示；新 apply 保存 filesystem type、完整 filesystem ID、inode、size 和 mtime 的 v2 identity，同时保留 device ID metadata。显式 legacy identity migration 会在同一事务中为 live Batch-owned Projection 及其原始 entry 补充 filesystem identity，不改变 Batch digest、target 或 history。operation log 保存 apply 和 undo 的路径快照。
 
 ## 7. Show、List 和 Undo
 

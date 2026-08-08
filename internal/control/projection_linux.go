@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	ProjectionResultSchema       = "scrapefs.projection-result/v1"
-	ProjectionListSchema         = "scrapefs.projection-list/v1"
-	ProjectionRebindResultSchema = "scrapefs.projection-rebind-result/v1"
+	ProjectionResultSchema                  = "scrapefs.projection-result/v1"
+	ProjectionListSchema                    = "scrapefs.projection-list/v1"
+	ProjectionRebindResultSchema            = "scrapefs.projection-rebind-result/v1"
+	ProjectionIdentityMigrationResultSchema = "scrapefs.projection-identity-migration-result/v1"
 )
 
 type ProjectionService interface {
@@ -20,6 +21,7 @@ type ProjectionService interface {
 	Move(context.Context, projection.MoveRequest) (namespace.Projection, error)
 	Remove(context.Context, projection.RemoveRequest) (namespace.Projection, error)
 	Rebind(context.Context, projection.RebindRequest) (projection.RebindResult, error)
+	MigrateIdentity(context.Context, projection.IdentityMigrationRequest) (projection.IdentityMigrationResult, error)
 }
 
 type ProjectionResult struct {
@@ -40,14 +42,15 @@ type ProjectionSnapshot struct {
 }
 
 type ProjectionSourceSnapshot struct {
-	Path          string `json:"path"`
-	DeviceID      int64  `json:"device_id"`
-	Inode         int64  `json:"inode"`
-	Size          int64  `json:"size"`
-	AtimeNS       int64  `json:"atime_ns"`
-	MtimeNS       int64  `json:"mtime_ns"`
-	SourceCtimeNS int64  `json:"source_ctime_ns"`
-	VerifiedAtNS  int64  `json:"verified_at_ns"`
+	Path          string                        `json:"path"`
+	Filesystem    *namespace.FilesystemIdentity `json:"filesystem,omitempty"`
+	DeviceID      int64                         `json:"device_id"`
+	Inode         int64                         `json:"inode"`
+	Size          int64                         `json:"size"`
+	AtimeNS       int64                         `json:"atime_ns"`
+	MtimeNS       int64                         `json:"mtime_ns"`
+	SourceCtimeNS int64                         `json:"source_ctime_ns"`
+	VerifiedAtNS  int64                         `json:"verified_at_ns"`
 }
 
 type ProjectionRebindStatus string
@@ -64,6 +67,44 @@ type ProjectionRebindResult struct {
 	Projection         ProjectionSnapshot       `json:"projection"`
 	PreviousSource     ProjectionSourceSnapshot `json:"previous_source"`
 	ProposedSource     ProjectionSourceSnapshot `json:"proposed_source"`
+}
+
+type ProjectionIdentityMigrationStatus string
+
+const (
+	ProjectionIdentityMigrationConfirmationRequired ProjectionIdentityMigrationStatus = "confirmation_required"
+	ProjectionIdentityMigrationApplied              ProjectionIdentityMigrationStatus = "applied"
+)
+
+type ProjectionIdentityMigrationResult struct {
+	Schema             string                                 `json:"schema"`
+	Status             ProjectionIdentityMigrationStatus      `json:"status"`
+	Library            string                                 `json:"library"`
+	ConfirmationDigest string                                 `json:"confirmation_digest"`
+	Candidates         []ProjectionIdentityMigrationCandidate `json:"candidates"`
+	Rejections         []ProjectionIdentityMigrationRejection `json:"rejections"`
+}
+
+type ProjectionIdentityMigrationCandidate struct {
+	Projection    ProjectionSnapshot               `json:"projection"`
+	CurrentSource ProjectionIdentityObservedSource `json:"current_source"`
+}
+
+type ProjectionIdentityMigrationRejection struct {
+	Projection    ProjectionSnapshot                `json:"projection"`
+	CurrentSource *ProjectionIdentityObservedSource `json:"current_source,omitempty"`
+	Code          string                            `json:"code"`
+	Message       string                            `json:"message"`
+}
+
+type ProjectionIdentityObservedSource struct {
+	Path          string                       `json:"path"`
+	Filesystem    namespace.FilesystemIdentity `json:"filesystem"`
+	DeviceID      int64                        `json:"device_id"`
+	Inode         int64                        `json:"inode"`
+	Size          int64                        `json:"size"`
+	MtimeNS       int64                        `json:"mtime_ns"`
+	SourceCtimeNS int64                        `json:"source_ctime_ns"`
 }
 
 func (client *Client) CreateProjection(
@@ -135,6 +176,20 @@ func (client *Client) RebindProjection(
 	return result, err
 }
 
+func (client *Client) MigrateProjectionIdentity(
+	ctx context.Context,
+	migrate projection.IdentityMigrationRequest,
+) (ProjectionIdentityMigrationResult, error) {
+	var result ProjectionIdentityMigrationResult
+	err := client.call(ctx, request{
+		Schema:             requestSchema,
+		Command:            "projection.identity.migrate",
+		LibraryName:        migrate.LibraryName,
+		ConfirmationDigest: migrate.ConfirmationDigest,
+	}, &result)
+	return result, err
+}
+
 func projectionResult(node namespace.Node, target string) ProjectionResult {
 	libraryName, _, _ := strings.Cut(target, ":/")
 	return ProjectionResult{
@@ -169,6 +224,54 @@ func projectionRebindResult(result projection.RebindResult) ProjectionRebindResu
 	}
 }
 
+func projectionIdentityMigrationResult(
+	result projection.IdentityMigrationResult,
+) ProjectionIdentityMigrationResult {
+	status := ProjectionIdentityMigrationConfirmationRequired
+	if result.Applied {
+		status = ProjectionIdentityMigrationApplied
+	}
+	candidates := make([]ProjectionIdentityMigrationCandidate, len(result.Candidates))
+	for index, candidate := range result.Candidates {
+		candidates[index] = ProjectionIdentityMigrationCandidate{
+			Projection:    snapshotProjection(candidate.Projection),
+			CurrentSource: snapshotObservedSource(candidate.Current),
+		}
+	}
+	rejections := make([]ProjectionIdentityMigrationRejection, len(result.Rejections))
+	for index, rejection := range result.Rejections {
+		rejections[index] = ProjectionIdentityMigrationRejection{
+			Projection: snapshotProjection(rejection.Projection),
+			Code:       rejection.Code,
+			Message:    rejection.Message,
+		}
+		if rejection.Current != nil {
+			current := snapshotObservedSource(*rejection.Current)
+			rejections[index].CurrentSource = &current
+		}
+	}
+	return ProjectionIdentityMigrationResult{
+		Schema:             ProjectionIdentityMigrationResultSchema,
+		Status:             status,
+		Library:            result.Library,
+		ConfirmationDigest: result.ConfirmationDigest,
+		Candidates:         candidates,
+		Rejections:         rejections,
+	}
+}
+
+func snapshotObservedSource(source projection.ObservedSource) ProjectionIdentityObservedSource {
+	return ProjectionIdentityObservedSource{
+		Path:          source.Path,
+		Filesystem:    source.Filesystem,
+		DeviceID:      source.DeviceID,
+		Inode:         source.Inode,
+		Size:          source.Size,
+		MtimeNS:       source.MtimeNS,
+		SourceCtimeNS: source.SourceCtimeNS,
+	}
+}
+
 func projectionListResult(records []namespace.Projection) ProjectionListResult {
 	projections := make([]ProjectionSnapshot, len(records))
 	for index, record := range records {
@@ -194,7 +297,7 @@ func snapshotProjection(record namespace.Projection) ProjectionSnapshot {
 }
 
 func snapshotProjectionSource(source namespace.ProjectionSource) ProjectionSourceSnapshot {
-	return ProjectionSourceSnapshot{
+	snapshot := ProjectionSourceSnapshot{
 		Path:          source.Path,
 		DeviceID:      source.DeviceID,
 		Inode:         source.Inode,
@@ -204,4 +307,9 @@ func snapshotProjectionSource(source namespace.ProjectionSource) ProjectionSourc
 		SourceCtimeNS: source.SourceCtimeNS,
 		VerifiedAtNS:  source.VerifiedAtNS,
 	}
+	if source.HasFilesystem {
+		filesystem := source.Filesystem
+		snapshot.Filesystem = &filesystem
+	}
+	return snapshot
 }

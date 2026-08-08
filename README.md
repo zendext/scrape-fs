@@ -109,6 +109,8 @@ scrapefs projection mv \
 
 `projection add` safely opens the source and atomically creates the mapping. `projection list` returns stable IDs, virtual targets, and cached source identity from the persisted namespace without reopening sources. `projection mv`, `projection rm`, and confirmed `projection rebind` preserve the stable node ID where applicable and never modify either source file.
 
+New and rebound Projections use a source identity that remains stable across ordinary filesystem remounts. Legacy identities from existing databases require a control user to preview and explicitly confirm the digest returned by `scrapefs projection identity migrate --library <name>`; daemon startup never migrates them automatically.
+
 ## External Agent Skill
 
 When media identification is needed, install the repository's

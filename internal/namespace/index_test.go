@@ -66,6 +66,37 @@ func TestIndexRebuildsNamespaceAndObjectMappings(t *testing.T) {
 	}
 }
 
+func TestDiffNodesInvalidatesInodeWhenStableFilesystemIdentityIsAdded(t *testing.T) {
+	parentID := int64(2)
+	legacy := Node{
+		ID:       3,
+		ParentID: &parentID,
+		Name:     "Dune.mkv",
+		Kind:     ProjectionFile,
+		Source: &ProjectionSource{
+			Path:     "/srv/Dune.mkv",
+			DeviceID: 47,
+			Inode:    164144,
+			Size:     42,
+			MtimeNS:  7,
+		},
+	}
+	migrated := legacy
+	migratedSource := *legacy.Source
+	migratedSource.Filesystem = FilesystemIdentity{Type: 0x2fc12fc1, ID: [2]int32{1, 2}}
+	migratedSource.HasFilesystem = true
+	migrated.Source = &migratedSource
+
+	changes := diffNodes(
+		map[int64]Node{legacy.ID: legacy},
+		map[int64]Node{migrated.ID: migrated},
+	)
+	if len(changes.Entries) != 0 ||
+		len(changes.InodeIDs) != 1 || changes.InodeIDs[0] != legacy.ID {
+		t.Fatalf("identity migration changes = %#v, want inode-only invalidation", changes)
+	}
+}
+
 func TestIndexInspectDetectsRepositoryDivergenceWithoutRebuild(t *testing.T) {
 	opened := openTestDatabase(t)
 	repository := NewRepository(opened)

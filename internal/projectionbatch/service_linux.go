@@ -98,14 +98,15 @@ type DetailEntry struct {
 }
 
 type SourceIdentity struct {
-	Path          string `json:"path"`
-	DeviceID      int64  `json:"device_id"`
-	Inode         int64  `json:"inode"`
-	Size          int64  `json:"size"`
-	AtimeNS       int64  `json:"atime_ns"`
-	MtimeNS       int64  `json:"mtime_ns"`
-	SourceCtimeNS int64  `json:"source_ctime_ns"`
-	VerifiedAtNS  int64  `json:"verified_at_ns"`
+	Path          string                        `json:"path"`
+	Filesystem    *namespace.FilesystemIdentity `json:"filesystem,omitempty"`
+	DeviceID      int64                         `json:"device_id"`
+	Inode         int64                         `json:"inode"`
+	Size          int64                         `json:"size"`
+	AtimeNS       int64                         `json:"atime_ns"`
+	MtimeNS       int64                         `json:"mtime_ns"`
+	SourceCtimeNS int64                         `json:"source_ctime_ns"`
+	VerifiedAtNS  int64                         `json:"verified_at_ns"`
 }
 
 type OperationSnapshot struct {
@@ -637,7 +638,7 @@ func summarizeBatch(batch namespace.ProjectionBatch) BatchSummary {
 }
 
 func sourceIdentity(source namespace.ProjectionSource) SourceIdentity {
-	return SourceIdentity{
+	identity := SourceIdentity{
 		Path:          source.Path,
 		DeviceID:      source.DeviceID,
 		Inode:         source.Inode,
@@ -647,6 +648,11 @@ func sourceIdentity(source namespace.ProjectionSource) SourceIdentity {
 		SourceCtimeNS: source.SourceCtimeNS,
 		VerifiedAtNS:  source.VerifiedAtNS,
 	}
+	if source.HasFilesystem {
+		filesystem := source.Filesystem
+		identity.Filesystem = &filesystem
+	}
+	return identity
 }
 
 func formatBatchID(id int64) string {

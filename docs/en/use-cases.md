@@ -34,6 +34,7 @@ This document describes the main first-version workflows from an actor-goal pers
 | UC-12 | Remove a Library |
 | UC-13 | Recover after daemon restart |
 | UC-14 | Diagnose problems with doctor |
+| UC-15 | Explicitly migrate legacy Projection source identities |
 
 ## UC-01 Create a Library
 
@@ -671,4 +672,52 @@ Doctor does not modify source files or the namespace by default. Repairs require
 
 - [Projection model](projection.md)
 - [Filesystem and object storage](filesystem.md)
+- [Operations and CLI](operations.md)
+
+## UC-15 Explicitly Migrate Legacy Projection Source Identities
+
+### Actors
+
+Control user, administrator
+
+### Goal
+
+After an ordinary filesystem remount changes the device ID, give unchanged and unmodified legacy Projections a stable filesystem identity while continuing to reject real replacements or content changes.
+
+### Preconditions
+
+- The daemon is ready.
+- The target Library is ACTIVE.
+- The caller has control permission.
+- The daemon can securely open the legacy sources.
+
+### Trigger
+
+```bash
+scrapefs projection identity migrate --library jellyfin
+```
+
+### Main Flow
+
+1. The daemon reads every legacy Projection in stable order and securely reopens each source.
+2. A record becomes a candidate when path, inode, size, mtime, and cached ctime match. Device ID may differ; every other record is returned as a rejection.
+3. The daemon returns every candidate, every rejection, and a digest bound to the complete result without writing the database.
+4. After review, the user submits `--confirm sha256:<digest>` verbatim.
+5. The daemon performs a fresh scan. On an exact digest match, one transaction migrates direct and Batch-owned candidates while preserving Batch provenance.
+6. After commit, the daemon invalidates affected inode attribute caches.
+
+### Alternative Flows
+
+- ctime or another required field differs: reject that record and keep it legacy.
+- A source, Projection, target, Batch ownership, or candidate set changes after preview: return `ConfirmationMismatch` and migrate nothing.
+- The Library is missing or not ACTIVE: return `LibraryNotFound`.
+
+### Result
+
+FUSE open and doctor verify successful candidates with filesystem type, complete filesystem ID, inode, size, and mtime without comparing device ID. Sources, virtual targets, node IDs, Batch digests, and namespace version remain unchanged. Daemon restart does not automatically migrate records that remain legacy.
+
+### Related Specifications
+
+- [Projection model](projection.md)
+- [Architecture](architecture.md)
 - [Operations and CLI](operations.md)
