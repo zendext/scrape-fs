@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/zendext/scrape-fs/internal/namespace"
+	"github.com/zendext/scrape-fs/internal/sourcefile"
 )
 
 func TestServiceMigratesDirectAndBatchOwnedLegacyIdentitiesAtomically(t *testing.T) {
@@ -35,6 +36,19 @@ func TestServiceMigratesDirectAndBatchOwnedLegacyIdentitiesAtomically(t *testing
 	if preview.Applied || preview.ConfirmationDigest == "" ||
 		len(preview.Candidates) != 2 || len(preview.Rejections) != 0 {
 		t.Fatalf("preview = %#v", preview)
+	}
+	observedByProjectionID := make(map[int64]ObservedSource, len(preview.Candidates))
+	for _, candidate := range preview.Candidates {
+		cached := candidate.Projection.Node.Source
+		if cached == nil || cached.DeviceID == candidate.Current.DeviceID {
+			t.Errorf(
+				"candidate %d device IDs = cached %v current %d, want remount mismatch",
+				candidate.Projection.Node.ID,
+				cached,
+				candidate.Current.DeviceID,
+			)
+		}
+		observedByProjectionID[candidate.Projection.Node.ID] = candidate.Current
 	}
 	repeated, err := service.MigrateIdentity(ctx, IdentityMigrationRequest{
 		LibraryName: "media",
@@ -86,6 +100,37 @@ func TestServiceMigratesDirectAndBatchOwnedLegacyIdentitiesAtomically(t *testing
 	for _, projection := range projections {
 		if projection.Node.Source == nil || !projection.Node.Source.HasFilesystem {
 			t.Errorf("migrated Projection %d source = %#v", projection.Node.ID, projection.Node.Source)
+			continue
+		}
+		source := *projection.Node.Source
+		current, found := observedByProjectionID[projection.Node.ID]
+		if !found {
+			t.Fatalf("migrated Projection %d was not in preview", projection.Node.ID)
+		}
+		if source.DeviceID == current.DeviceID {
+			t.Errorf(
+				"migrated Projection %d device ID = %d, want retained remount mismatch from current %d",
+				projection.Node.ID,
+				source.DeviceID,
+				current.DeviceID,
+			)
+		}
+		verified, err := sourcefile.OpenVerified(source.Path, sourcefile.Identity{
+			Filesystem: &sourcefile.FilesystemIdentity{
+				Type: source.Filesystem.Type,
+				ID:   source.Filesystem.ID,
+			},
+			DeviceID: source.DeviceID,
+			Inode:    source.Inode,
+			Size:     source.Size,
+			MtimeNS:  source.MtimeNS,
+		})
+		if err != nil {
+			t.Errorf("verify migrated Projection %d across device mismatch: %v", projection.Node.ID, err)
+			continue
+		}
+		if err := verified.Close(); err != nil {
+			t.Errorf("close verified migrated Projection %d: %v", projection.Node.ID, err)
 		}
 	}
 	entries, err := repository.ProjectionBatchEntries(ctx, batchID)
@@ -97,6 +142,12 @@ func TestServiceMigratesDirectAndBatchOwnedLegacyIdentitiesAtomically(t *testing
 	}
 	if entries[0].Target != "Batch.mkv" || entries[0].ProjectionNodeID == nil {
 		t.Errorf("Batch provenance changed = %#v", entries[0])
+	} else if current := observedByProjectionID[*entries[0].ProjectionNodeID]; entries[0].Source.DeviceID == current.DeviceID {
+		t.Errorf(
+			"migrated Batch entry device ID = %d, want retained remount mismatch from current %d",
+			entries[0].Source.DeviceID,
+			current.DeviceID,
+		)
 	}
 }
 
@@ -241,6 +292,7 @@ func createLegacyProjection(
 	}
 	source.Filesystem = namespace.FilesystemIdentity{}
 	source.HasFilesystem = false
+	source.DeviceID ^= 1
 	return createLegacyProjectionWithSource(t, library, source, target, batchID, service.repository)
 }
 
@@ -298,6 +350,7 @@ func createLegacyBatchProjection(
 	}
 	source.Filesystem = namespace.FilesystemIdentity{}
 	source.HasFilesystem = false
+	source.DeviceID ^= 1
 	var batch namespace.ProjectionBatch
 	_, err = service.repository.Update(context.Background(), namespace.Operation{
 		Name:  "projection.batch.apply",
