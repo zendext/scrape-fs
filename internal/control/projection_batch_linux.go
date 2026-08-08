@@ -647,6 +647,23 @@ func handleConnection(
 		if err == nil {
 			result = projectionRebindResult(rebound)
 		}
+	case "projection.identity.migrate":
+		if options.projectionService == nil {
+			err = fmt.Errorf("Projection control service is unavailable")
+			break
+		}
+		var migrated projection.IdentityMigrationResult
+		migrated, err = options.projectionService.MigrateIdentity(
+			ctx,
+			projection.IdentityMigrationRequest{
+				LibraryName:        request.LibraryName,
+				ConfirmationDigest: request.ConfirmationDigest,
+				Actor:              actor,
+			},
+		)
+		if err == nil {
+			result = projectionIdentityMigrationResult(migrated)
+		}
 	case "projection.batch.validate":
 		result, err = service.Validate(ctx, request.Batch)
 	case "projection.batch.apply":

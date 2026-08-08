@@ -101,6 +101,8 @@ ProjectionFile 必须保存：
 
 ```text
 source_path
+source_filesystem_type
+source_filesystem_id[2]
 source_device_id
 source_inode
 cached_size
@@ -113,11 +115,16 @@ verified_at_ns
 严格身份比较使用：
 
 ```text
-device ID
+filesystem type
+完整 filesystem ID
 inode
 size
 mtime_ns
 ```
+
+filesystem identity 必须通过已经安全打开的 source descriptor 执行 Linux `fstatfs` 获得。JSON 将其统一表示为 `{"type": <整数>, "id": [<整数>, <整数>]}`；数据库使用 nullable `source_filesystem_type`、`source_filesystem_id_0` 和 `source_filesystem_id_1` 保存同一值。`source_device_id` 继续作为兼容和诊断 metadata 保存，但 v2 严格比较不得使用它。ctime 不参与持续 open 校验。
+
+新建 Projection、Batch validate/apply 产生的 Projection，以及 rebind 后的 Projection 必须写入 v2 filesystem identity。缺少这三个 filesystem 字段的 legacy Projection 在显式迁移前继续使用原有的 device ID、inode、size 和 mtime 严格比较；不得在 daemon 启动时自动迁移。
 
 open 流程：
 
@@ -134,7 +141,25 @@ open 流程：
 - open 返回底层安全打开错误，例如 `ENOENT` 或 `ENODEV`；
 - doctor 报告 broken projection。
 
-## 4. Rebind
+## 4. Legacy identity 显式迁移
+
+```bash
+scrapefs projection identity migrate --library jellyfin
+```
+
+命令只接受 ACTIVE Library。首次调用执行确定性只读 preview：按 target 和 node ID 稳定排序扫描该 Library 中全部 legacy Projection，使用安全 source primitive 重新打开每个路径，并返回全部 candidate、全部 rejection 和绑定完整有序扫描结果的 confirmation digest。device ID 可以不同，但 path、inode、size、mtime 和缓存的 source ctime 必须全部相同；ctime 不同必须拒绝。
+
+```bash
+scrapefs projection identity migrate \
+  --library jellyfin \
+  --confirm sha256:<digest>
+```
+
+确认时 daemon 必须 fresh scan，并逐字节比较 digest。任一 Projection、Batch ownership、target、缓存身份、source 或 candidate/rejection 集合变化都返回 `ConfirmationMismatch`，且不得修改任何身份。匹配时，一个 Repository 事务为全部 candidate 写入 filesystem identity；Batch-owned Projection 的原始 `projection_batch_entries` identity 在同一事务更新，Batch ID、digest、target 和 operation history 保持不变。成功迁移写一条 audit operation，不增加 namespace version，不修改 source 或虚拟 target，并只在 commit 后失效受影响 FUSE inode 的 attribute cache。rejection 保持 legacy，不阻止其他 candidate 原子升级。
+
+preview 和确认结果使用 `scrapefs.projection-identity-migration-result/v1`，status 分别为 `confirmation_required` 和 `applied`。`projection list` 与 `projection batch show` 对新建或已迁移记录返回 `source.filesystem`，同时保留 `device_id` 等兼容字段。
+
+## 5. Rebind
 
 ```bash
 scrapefs projection rebind \
@@ -164,7 +189,7 @@ rebind 必须：
 
 Preview 和确认失败不得修改状态。成功 rebind 保留 node ID 和 target，写一条 audit 记录，但不增加 namespace version。
 
-## 5. 文件属性
+## 6. 文件属性
 
 ProjectionFile getattr 返回：
 
@@ -182,7 +207,7 @@ nlink   = 1
 
 源路径不可用、文件丢失或身份不匹配时，lookup/getattr 使用缓存属性。缓存缺失或损坏时返回 `EIO`。
 
-## 6. FUSE 语义
+## 7. FUSE 语义
 
 支持：
 
@@ -208,7 +233,7 @@ unlink
 
 rename 只修改虚拟路径，direct 与 Batch-owned Projection 均可执行。unlink 可以删除 direct 或 Batch-owned Projection 的命名空间节点，但不接触源文件。已打开的源文件 fd 继续可读。
 
-## 7. Rename
+## 8. Rename
 
 第一版支持 `flags=0` 和 `RENAME_NOREPLACE`。
 

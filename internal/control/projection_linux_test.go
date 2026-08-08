@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/zendext/scrape-fs/internal/database"
@@ -48,6 +49,7 @@ func TestProjectionClientServerCreateAndListRoundTrip(t *testing.T) {
 		created.Projection.Library != "media" ||
 		created.Projection.Target != "media:/Movies/Dune.mkv" ||
 		created.Projection.Source.Path != source ||
+		created.Projection.Source.Filesystem == nil ||
 		created.Projection.Source.Size != int64(len(content)) {
 		t.Errorf("CreateProjection result = %#v", created)
 	}
@@ -58,14 +60,14 @@ func TestProjectionClientServerCreateAndListRoundTrip(t *testing.T) {
 	}
 	if listed.Schema != ProjectionListSchema ||
 		len(listed.Projections) != 1 ||
-		listed.Projections[0] != created.Projection {
+		!reflect.DeepEqual(listed.Projections[0], created.Projection) {
 		t.Errorf("ListProjections result = %#v, created = %#v", listed, created)
 	}
 	scoped, err := client.ListProjections(context.Background(), "media")
 	if err != nil {
 		t.Fatalf("ListProjections(media): %v", err)
 	}
-	if len(scoped.Projections) != 1 || scoped.Projections[0] != created.Projection {
+	if len(scoped.Projections) != 1 || !reflect.DeepEqual(scoped.Projections[0], created.Projection) {
 		t.Errorf("ListProjections(media) = %#v", scoped)
 	}
 	if got, err := os.ReadFile(source); err != nil || string(got) != string(content) {
@@ -446,6 +448,68 @@ func TestProjectionControlRejectsUnauthorizedLifecycleBeforeServiceCall(t *testi
 	}
 }
 
+func TestProjectionIdentityMigrationControlRoundTrip(t *testing.T) {
+	projectionService := &countingProjectionService{
+		migrationResult: projection.IdentityMigrationResult{
+			Library:            "media",
+			ConfirmationDigest: "sha256:preview",
+			Candidates:         []projection.IdentityMigrationCandidate{},
+			Rejections:         []projection.IdentityMigrationRejection{},
+		},
+	}
+	socketPath := filepath.Join(controlSocketTempDir(t), "control.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	ready := make(chan struct{})
+	go func() {
+		done <- serveWithOptions(
+			ctx,
+			socketPath,
+			0o660,
+			staticBatchService{},
+			serverOptions{
+				limits: defaultServerLimits(),
+				security: serverSecurity{
+					daemonUID:        uint32(os.Geteuid()),
+					administratorUID: uint32(os.Geteuid()),
+					controlGroupID:   uint32(os.Getegid()),
+				},
+				readPeerIdentity:  readPeerIdentity,
+				ready:             ready,
+				projectionService: projectionService,
+			},
+		)
+	}()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("serveWithOptions: %v", err)
+		}
+	}()
+	waitForServerReady(t, ready)
+
+	result, err := NewClient(socketPath).MigrateProjectionIdentity(
+		context.Background(),
+		projection.IdentityMigrationRequest{
+			LibraryName:        "media",
+			ConfirmationDigest: "sha256:confirmed",
+		},
+	)
+	if err != nil {
+		t.Fatalf("MigrateProjectionIdentity: %v", err)
+	}
+	if result.Schema != ProjectionIdentityMigrationResultSchema ||
+		result.Status != ProjectionIdentityMigrationConfirmationRequired ||
+		result.Library != "media" || result.ConfirmationDigest != "sha256:preview" {
+		t.Errorf("migration result = %#v", result)
+	}
+	if projectionService.migrationRequest.LibraryName != "media" ||
+		projectionService.migrationRequest.ConfirmationDigest != "sha256:confirmed" ||
+		projectionService.migrationRequest.Actor.Kind != namespace.ActorControl {
+		t.Errorf("migration request = %#v", projectionService.migrationRequest)
+	}
+}
+
 func TestProjectionListPersistsAcrossControlServerRestart(t *testing.T) {
 	root := controlSocketTempDir(t)
 	databasePath := filepath.Join(root, "state", "scrapefs.db")
@@ -495,13 +559,15 @@ func TestProjectionListPersistsAcrossControlServerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListProjections after restart: %v", err)
 	}
-	if len(listed.Projections) != 1 || listed.Projections[0] != created.Projection {
+	if len(listed.Projections) != 1 || !reflect.DeepEqual(listed.Projections[0], created.Projection) {
 		t.Errorf("ListProjections after restart = %#v, created = %#v", listed, created)
 	}
 }
 
 type countingProjectionService struct {
-	calls int
+	calls            int
+	migrationRequest projection.IdentityMigrationRequest
+	migrationResult  projection.IdentityMigrationResult
 }
 
 func (service *countingProjectionService) Create(
@@ -542,6 +608,15 @@ func (service *countingProjectionService) Rebind(
 ) (projection.RebindResult, error) {
 	service.calls++
 	return projection.RebindResult{}, nil
+}
+
+func (service *countingProjectionService) MigrateIdentity(
+	_ context.Context,
+	request projection.IdentityMigrationRequest,
+) (projection.IdentityMigrationResult, error) {
+	service.calls++
+	service.migrationRequest = request
+	return service.migrationResult, nil
 }
 
 func openProjectionControlDatabase(t *testing.T, root string) *database.DB {

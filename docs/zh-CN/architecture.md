@@ -86,7 +86,7 @@ SQLite 自身的锁与事务语义负责保护数据库一致性。额外的 dae
 
 持久化内部 ID 使用 SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`，Go 中表示为 `int64`，因此已删除节点的 ID 不会复用。持久化时间使用 SQLite `INTEGER` 保存 UTC Unix 纳秒。
 
-基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。`scrapes` 是已发布的 legacy storage 名称；schema migration 3 在不修改已发布 migration 的前提下扩展它保存 applied Batch provenance，并新增 `projection_batch_entries` 保存有序的 source identity 和 target 历史。schema migration 4 扩展已发布的 `objects` 占位表，保存 `STAGING`/`LIVE` 生命周期状态和时间戳。schema migration 5 允许 `projection.batch.undo` 在没有剩余 Batch-owned Projection 时保留空的 path 和 node-kind 数组，同时继续要求其他 operation 至少包含一个受影响路径。Repository 在创建这种空 undo 日志时要求关联 Batch；如果 `ON DELETE SET NULL` 后续清空该关联，数据库仍保持日志合法。
+基础命名空间 migration 创建只有 ID 的 `objects` 和 `scrapes` 表作为外键目标。`scrapes` 是已发布的 legacy storage 名称；schema migration 3 在不修改已发布 migration 的前提下扩展它保存 applied Batch provenance，并新增 `projection_batch_entries` 保存有序的 source identity 和 target 历史。schema migration 4 扩展已发布的 `objects` 占位表，保存 `STAGING`/`LIVE` 生命周期状态和时间戳。schema migration 5 允许 `projection.batch.undo` 在没有剩余 Batch-owned Projection 时保留空的 path 和 node-kind 数组，同时继续要求其他 operation 至少包含一个受影响路径。schema migration 6 向 live Projection node 和 Projection Batch entry 添加 nullable filesystem type 与完整两段 filesystem ID；已有行保持 NULL，必须通过显式 identity migration 升级。Repository 在创建空 undo 日志时要求关联 Batch；如果 `ON DELETE SET NULL` 后续清空该关联，数据库仍保持日志合法。
 
 schema 只使用声明式局部完整性约束：`STRICT` 表、主键、`NOT NULL`、行内 `CHECK`、外键和唯一索引。SQLite trigger 不实现命名空间业务规则、生命周期策略、namespace version 策略或 operation log 策略。
 
@@ -201,6 +201,9 @@ nodes
 ├── name
 ├── kind
 ├── source_path
+├── source_filesystem_type
+├── source_filesystem_id_0
+├── source_filesystem_id_1
 ├── source_device_id
 ├── source_inode
 ├── cached_size
@@ -225,7 +228,8 @@ nodes
 
 字段规则：
 
-- ProjectionFile 使用 source 字段。
+- ProjectionFile 使用 source 字段；三个 `source_filesystem_*` 字段必须同时为 NULL 或同时非 NULL。
+- 非 NULL filesystem identity 表示 v2，由已安全打开 descriptor 的 `fstatfs` filesystem type 和完整 filesystem ID 组成；`source_device_id` 只作为缓存兼容和诊断 metadata。
 - OverlayFile 使用 `object_id`。
 - Directory 不使用 source/object 字段。
 - `managed_directory=true` 表示由 Projection Batch 或 `projection add` 自动创建。
@@ -264,6 +268,7 @@ SQLite 保存单调递增的 `namespace_version`。
 - write、truncate、flush、fsync；
 - chmod、chown、utimens；
 - Projection rebind；
+- Projection identity migration；
 - Library Profile 切换；
 - 无状态 projection batch validate。
 

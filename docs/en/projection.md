@@ -103,6 +103,8 @@ ProjectionFile stores:
 
 ```text
 source_path
+source_filesystem_type
+source_filesystem_id[2]
 source_device_id
 source_inode
 cached_size
@@ -115,11 +117,16 @@ verified_at_ns
 Strict identity comparison uses:
 
 ```text
-device ID
+filesystem type
+complete filesystem ID
 inode
 size
 mtime_ns
 ```
+
+The filesystem identity comes from Linux `fstatfs` on the already securely opened source descriptor. JSON represents it consistently as `{"type": <integer>, "id": [<integer>, <integer>]}`; the database stores the same value in nullable `source_filesystem_type`, `source_filesystem_id_0`, and `source_filesystem_id_1` fields. `source_device_id` remains cached compatibility and diagnostic metadata but is not compared by strict v2 verification. ctime is not part of ongoing open verification.
+
+New Projections, Projections produced by batch validate/apply, and rebound Projections always store the v2 filesystem identity. A legacy Projection without those three filesystem fields retains strict device ID, inode, size, and mtime verification until explicit migration. Daemon startup never migrates it automatically.
 
 Open flow:
 
@@ -136,7 +143,25 @@ When the source path is unavailable:
 - open returns the safe-open error, such as `ENOENT` or `ENODEV`;
 - doctor reports a broken projection.
 
-## 4. Rebind
+## 4. Explicit Legacy Identity Migration
+
+```bash
+scrapefs projection identity migrate --library jellyfin
+```
+
+The command accepts only an ACTIVE Library. Its first invocation is a deterministic read-only preview: it scans every legacy Projection in stable target and node-ID order, securely reopens each path, and returns every candidate, every rejection, and a confirmation digest bound to the complete ordered scan. A device ID difference is allowed, but path, inode, size, mtime, and cached source ctime must all match. A ctime mismatch is rejected.
+
+```bash
+scrapefs projection identity migrate \
+  --library jellyfin \
+  --confirm sha256:<digest>
+```
+
+Confirmation performs a fresh scan and compares the digest byte for byte. Any change to a Projection, Batch ownership, target, cached identity, source, or candidate/rejection set returns `ConfirmationMismatch` without changing any identity. On a match, one Repository transaction adds the filesystem identity to every candidate. For a Batch-owned Projection, the original `projection_batch_entries` identity is updated in the same transaction while the Batch ID, digest, target, and operation history remain unchanged. A successful migration writes one audit operation, does not increment namespace version, does not modify a source or virtual target, and invalidates affected FUSE inode attribute caches only after commit. Rejections remain legacy and do not prevent the candidates from being upgraded atomically.
+
+Preview and confirmation use `scrapefs.projection-identity-migration-result/v1` with status `confirmation_required` and `applied`, respectively. `projection list` and `projection batch show` return `source.filesystem` for new or migrated records while retaining compatibility fields such as `device_id`.
+
+## 5. Rebind
 
 ```bash
 scrapefs projection rebind \
@@ -166,7 +191,7 @@ Rebind:
 
 Preview and failed confirmation do not mutate state. Successful rebind preserves the node ID and target, writes one audit entry, and does not increment namespace version.
 
-## 5. Attributes
+## 6. Attributes
 
 ProjectionFile getattr returns:
 
@@ -184,7 +209,7 @@ nlink   = 1
 
 When the source is missing, unavailable, or stale, lookup and getattr use cached attributes. Missing or corrupt cache data returns `EIO`.
 
-## 6. FUSE Semantics
+## 7. FUSE Semantics
 
 Supported:
 
@@ -210,7 +235,7 @@ unlink
 
 Rename changes only the virtual path and is allowed for direct and Batch-owned Projections. Unlink removes the direct or Batch-owned Projection namespace node without touching its source. An already opened source fd remains readable.
 
-## 7. Rename
+## 8. Rename
 
 The first version supports `flags=0` and `RENAME_NOREPLACE`.
 

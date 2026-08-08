@@ -652,6 +652,44 @@ func TestDoctorReturnsDeterministicHealthyWarningAndBlockingFindings(t *testing.
 	}
 }
 
+func TestDoctorTreatsStableFilesystemIdentityAsHealthyAcrossDeviceChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.mkv")
+	if err := os.WriteFile(path, []byte("source"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	opened, err := sourcefile.Open(path)
+	if err != nil {
+		t.Fatalf("sourcefile.Open: %v", err)
+	}
+	metadata := opened.Metadata
+	if err := opened.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	service := &Service{
+		repository: fakeRepository{projections: []namespace.Projection{{
+			LibraryName: "media",
+			Target:      "Movies/Source.mkv",
+			Node: namespace.Node{
+				ID: 7,
+				Source: &namespace.ProjectionSource{
+					Path:          metadata.Path,
+					Filesystem:    namespace.FilesystemIdentity{Type: metadata.Filesystem.Type, ID: metadata.Filesystem.ID},
+					HasFilesystem: true,
+					DeviceID:      metadata.DeviceID ^ 1,
+					Inode:         metadata.Inode,
+					Size:          metadata.Size,
+					MtimeNS:       metadata.MtimeNS,
+				},
+			},
+		}}},
+		verifySource: verifyProjectionSource,
+	}
+	findings := service.projectionFindings(context.Background(), StateReady)
+	if len(findings) != 1 || findings[0].Code != CodeProjectionsOK {
+		t.Fatalf("projection findings = %#v, want PROJECTIONS_OK", findings)
+	}
+}
+
 func TestDoctorHealthyResultIsExplicit(t *testing.T) {
 	runtime := NewRuntime("/mnt/scrapefs", "/run/scrapefs/scrapefs.sock")
 	runtime.SetMount(nil)

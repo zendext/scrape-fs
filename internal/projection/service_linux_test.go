@@ -55,6 +55,7 @@ func TestServiceCreateProjectionAtomically(t *testing.T) {
 		t.Fatal("Source = nil")
 	}
 	if created.Source.Path != sourcePath ||
+		!created.Source.HasFilesystem ||
 		created.Source.DeviceID != int64(before.Dev) ||
 		created.Source.Inode != int64(before.Ino) ||
 		created.Source.Size != before.Size ||

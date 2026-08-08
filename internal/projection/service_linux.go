@@ -598,7 +598,12 @@ func (service *Service) projectionSource(path string) (namespace.ProjectionSourc
 		)
 	}
 	return namespace.ProjectionSource{
-		Path:          metadata.Path,
+		Path: metadata.Path,
+		Filesystem: namespace.FilesystemIdentity{
+			Type: metadata.Filesystem.Type,
+			ID:   metadata.Filesystem.ID,
+		},
+		HasFilesystem: true,
 		DeviceID:      metadata.DeviceID,
 		Inode:         metadata.Inode,
 		Size:          metadata.Size,
@@ -616,20 +621,28 @@ func rebindConfirmationDigest(
 	proposed namespace.ProjectionSource,
 ) (string, error) {
 	type confirmationSource struct {
-		Path     string `json:"path"`
-		DeviceID int64  `json:"device_id"`
-		Inode    int64  `json:"inode"`
-		Size     int64  `json:"size"`
-		MtimeNS  int64  `json:"mtime_ns"`
+		Path       string                        `json:"path"`
+		Filesystem *namespace.FilesystemIdentity `json:"filesystem,omitempty"`
+		DeviceID   *int64                        `json:"device_id,omitempty"`
+		Inode      int64                         `json:"inode"`
+		Size       int64                         `json:"size"`
+		MtimeNS    int64                         `json:"mtime_ns"`
 	}
 	snapshot := func(source namespace.ProjectionSource) confirmationSource {
-		return confirmationSource{
-			Path:     source.Path,
-			DeviceID: source.DeviceID,
-			Inode:    source.Inode,
-			Size:     source.Size,
-			MtimeNS:  source.MtimeNS,
+		snapshot := confirmationSource{
+			Path:    source.Path,
+			Inode:   source.Inode,
+			Size:    source.Size,
+			MtimeNS: source.MtimeNS,
 		}
+		if source.HasFilesystem {
+			filesystem := source.Filesystem
+			snapshot.Filesystem = &filesystem
+		} else {
+			deviceID := source.DeviceID
+			snapshot.DeviceID = &deviceID
+		}
+		return snapshot
 	}
 	encoded, err := json.Marshal(struct {
 		Schema       string             `json:"schema"`

@@ -319,7 +319,9 @@ func TestServiceApplyCreatesBatchAtomicallyAndPersistsAcrossRestart(t *testing.T
 	}
 	if len(detail.Entries) != 2 ||
 		detail.Entries[0].Source.Path != firstSource ||
-		detail.Entries[1].Source.Path != secondSource {
+		detail.Entries[1].Source.Path != secondSource ||
+		detail.Entries[0].Source.Filesystem == nil ||
+		detail.Entries[1].Source.Filesystem == nil {
 		t.Errorf("detail entries = %#v", detail.Entries)
 	}
 	if len(detail.Operations) != 1 ||
@@ -343,7 +345,7 @@ func TestServiceApplyCreatesBatchAtomicallyAndPersistsAcrossRestart(t *testing.T
 	}
 	if reopened.Batch != detail.Batch ||
 		len(reopened.Entries) != len(detail.Entries) ||
-		reopened.Entries[0].Source != detail.Entries[0].Source ||
+		!reflect.DeepEqual(reopened.Entries[0].Source, detail.Entries[0].Source) ||
 		len(reopened.Operations) != len(detail.Operations) {
 		t.Errorf("reopened detail = %#v, want %#v", reopened, detail)
 	}

@@ -319,12 +319,19 @@ func (service *Service) projectionFindings(
 			continue
 		}
 		source := *projection.Node.Source
-		err := service.verifySource(source.Path, sourcefile.Identity{
+		identity := sourcefile.Identity{
 			DeviceID: source.DeviceID,
 			Inode:    source.Inode,
 			Size:     source.Size,
 			MtimeNS:  source.MtimeNS,
-		})
+		}
+		if source.HasFilesystem {
+			identity.Filesystem = &sourcefile.FilesystemIdentity{
+				Type: source.Filesystem.Type,
+				ID:   source.Filesystem.ID,
+			}
+		}
+		err := service.verifySource(source.Path, identity)
 		if err == nil {
 			continue
 		}
@@ -339,7 +346,7 @@ func (service *Service) projectionFindings(
 			Code:        code,
 			Component:   "projection",
 			Message:     message,
-			Remediation: "rebind or remove the Projection explicitly",
+			Remediation: "migrate a legacy identity, rebind, or remove the Projection explicitly",
 			Library:     projection.LibraryName,
 			Target:      target,
 			NodeID:      projection.Node.ID,

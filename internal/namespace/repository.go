@@ -441,6 +441,95 @@ func (repository *Repository) Projections(
 	return projections, nil
 }
 
+func (repository *Repository) LegacyProjections(
+	ctx context.Context,
+	libraryName string,
+) (Library, []Projection, error) {
+	if err := validateName(libraryName); err != nil {
+		return Library{}, nil, fmt.Errorf("%w: invalid name: %v", ErrInvalidLibrary, err)
+	}
+	var library Library
+	var projections []Projection
+	err := repository.useConnection(ctx, func(connection *database.Connection) error {
+		var err error
+		library, err = queryLibrary(
+			ctx,
+			connection,
+			"libraries.status = 'ACTIVE' AND libraries.name = ?",
+			libraryName,
+		)
+		if errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("%w: %q", ErrLibraryNotFound, libraryName)
+		}
+		if err != nil {
+			return err
+		}
+		projections, err = legacyProjections(ctx, connection, library)
+		return err
+	})
+	return library, projections, err
+}
+
+func legacyProjections(
+	ctx context.Context,
+	query nodeQuery,
+	library Library,
+) ([]Projection, error) {
+	var projections []Projection
+	var cursorID int64
+	for {
+		node, err := queryNode(ctx, query, `
+			kind = 'PROJECTION_FILE'
+			AND source_filesystem_type IS NULL
+			AND id > ?
+			ORDER BY id
+			LIMIT 1
+		`, cursorID)
+		if errors.Is(err, ErrNotFound) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list legacy Projection nodes: %w", err)
+		}
+		cursorID = node.ID
+		rootID, target, err := nodePathToLibraryRoot(ctx, query, node.ID)
+		if err != nil {
+			return nil, err
+		}
+		if rootID != library.RootNodeID {
+			continue
+		}
+		projections = append(projections, Projection{
+			LibraryID:   library.ID,
+			LibraryName: library.Name,
+			Target:      target,
+			Node:        node,
+		})
+	}
+	sort.Slice(projections, func(left, right int) bool {
+		if projections[left].Target != projections[right].Target {
+			return projections[left].Target < projections[right].Target
+		}
+		return projections[left].Node.ID < projections[right].Node.ID
+	})
+	return projections, nil
+}
+
+func projectionsEqual(left, right []Projection) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].LibraryID != right[index].LibraryID ||
+			left[index].LibraryName != right[index].LibraryName ||
+			left[index].Target != right[index].Target ||
+			!equalNode(left[index].Node, right[index].Node) {
+			return false
+		}
+	}
+	return true
+}
+
 func (repository *Repository) ProjectionBatches(
 	ctx context.Context,
 ) ([]ProjectionBatch, error) {
@@ -1384,6 +1473,9 @@ func (transaction *Transaction) createNode(
 
 	now := transaction.now().UTC().UnixNano()
 	var sourcePath any
+	var sourceFilesystemType any
+	var sourceFilesystemID0 any
+	var sourceFilesystemID1 any
 	var sourceDeviceID any
 	var sourceInode any
 	var cachedSize any
@@ -1393,6 +1485,11 @@ func (transaction *Transaction) createNode(
 	var verifiedAtNS any
 	if request.Source != nil {
 		sourcePath = request.Source.Path
+		if request.Source.HasFilesystem {
+			sourceFilesystemType = request.Source.Filesystem.Type
+			sourceFilesystemID0 = request.Source.Filesystem.ID[0]
+			sourceFilesystemID1 = request.Source.Filesystem.ID[1]
+		}
 		sourceDeviceID = request.Source.DeviceID
 		sourceInode = request.Source.Inode
 		cachedSize = request.Source.Size
@@ -1408,6 +1505,9 @@ func (transaction *Transaction) createNode(
 			name,
 			kind,
 			source_path,
+			source_filesystem_type,
+			source_filesystem_id_0,
+			source_filesystem_id_1,
 			source_device_id,
 			source_inode,
 			cached_size,
@@ -1428,12 +1528,15 @@ func (transaction *Transaction) createNode(
 			virtual_ctime_ns,
 			created_at,
 			updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		request.ParentID,
 		request.Name,
 		request.Kind,
 		sourcePath,
+		sourceFilesystemType,
+		sourceFilesystemID0,
+		sourceFilesystemID1,
 		sourceDeviceID,
 		sourceInode,
 		cachedSize,
@@ -1752,7 +1855,7 @@ func (transaction *Transaction) RebindProjection(
 	if node.OriginScrapeID != nil {
 		return Node{}, ErrBatchOwnedProjection
 	}
-	if *node.Source != request.ExpectedSource {
+	if !projectionSourcesEqual(*node.Source, request.ExpectedSource) {
 		return Node{}, ErrConflict
 	}
 
@@ -1761,6 +1864,9 @@ func (transaction *Transaction) RebindProjection(
 		UPDATE nodes
 		SET
 			source_path = ?,
+			source_filesystem_type = ?,
+			source_filesystem_id_0 = ?,
+			source_filesystem_id_1 = ?,
 			source_device_id = ?,
 			source_inode = ?,
 			cached_size = ?,
@@ -1775,6 +1881,9 @@ func (transaction *Transaction) RebindProjection(
 		  AND name = ?
 		  AND kind = 'PROJECTION_FILE'
 		  AND source_path = ?
+		  AND source_filesystem_type IS ?
+		  AND source_filesystem_id_0 IS ?
+		  AND source_filesystem_id_1 IS ?
 		  AND source_device_id = ?
 		  AND source_inode = ?
 		  AND cached_size = ?
@@ -1784,6 +1893,9 @@ func (transaction *Transaction) RebindProjection(
 		  AND verified_at_ns = ?
 	`,
 		request.Source.Path,
+		filesystemType(request.Source),
+		filesystemID(request.Source, 0),
+		filesystemID(request.Source, 1),
 		request.Source.DeviceID,
 		request.Source.Inode,
 		request.Source.Size,
@@ -1797,6 +1909,9 @@ func (transaction *Transaction) RebindProjection(
 		request.ParentID,
 		request.Name,
 		request.ExpectedSource.Path,
+		filesystemType(request.ExpectedSource),
+		filesystemID(request.ExpectedSource, 0),
+		filesystemID(request.ExpectedSource, 1),
 		request.ExpectedSource.DeviceID,
 		request.ExpectedSource.Inode,
 		request.ExpectedSource.Size,
@@ -1821,6 +1936,154 @@ func (transaction *Transaction) RebindProjection(
 	}
 	transaction.audited = true
 	return rebound, nil
+}
+
+func (transaction *Transaction) MigrateProjectionIdentities(
+	ctx context.Context,
+	library Library,
+	expected []Projection,
+	migrations []ProjectionIdentityMigration,
+) ([]Node, error) {
+	if err := transaction.ValidatePreparedLibrary(ctx, library); err != nil {
+		return nil, err
+	}
+	current, err := legacyProjections(ctx, transaction.transaction, library)
+	if err != nil {
+		return nil, err
+	}
+	if !projectionsEqual(current, expected) {
+		return nil, ErrConflict
+	}
+	migrationByID := make(map[int64]FilesystemIdentity, len(migrations))
+	for _, migration := range migrations {
+		if migration.ProjectionID <= 0 {
+			return nil, fmt.Errorf("%w: invalid Projection identity migration", ErrInvalidOperation)
+		}
+		if _, duplicate := migrationByID[migration.ProjectionID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate Projection identity migration", ErrInvalidOperation)
+		}
+		migrationByID[migration.ProjectionID] = migration.Filesystem
+	}
+	if len(migrationByID) != len(migrations) {
+		return nil, ErrInvalidOperation
+	}
+
+	updatedNodes := make([]Node, 0, len(migrations))
+	now := transaction.now().UTC().UnixNano()
+	for _, projection := range expected {
+		filesystem, migrate := migrationByID[projection.Node.ID]
+		if !migrate {
+			continue
+		}
+		if projection.Node.Source == nil || projection.Node.Source.HasFilesystem {
+			return nil, ErrConflict
+		}
+		source := *projection.Node.Source
+		result, err := transaction.transaction.ExecContext(ctx, `
+			UPDATE nodes
+			SET
+				source_filesystem_type = ?,
+				source_filesystem_id_0 = ?,
+				source_filesystem_id_1 = ?,
+				updated_at = ?
+			WHERE id = ?
+			  AND kind = 'PROJECTION_FILE'
+			  AND source_path = ?
+			  AND source_filesystem_type IS NULL
+			  AND source_filesystem_id_0 IS NULL
+			  AND source_filesystem_id_1 IS NULL
+			  AND source_device_id = ?
+			  AND source_inode = ?
+			  AND cached_size = ?
+			  AND cached_atime_ns = ?
+			  AND cached_mtime_ns = ?
+			  AND cached_source_ctime_ns = ?
+			  AND verified_at_ns = ?
+		`,
+			filesystem.Type,
+			filesystem.ID[0],
+			filesystem.ID[1],
+			now,
+			projection.Node.ID,
+			source.Path,
+			source.DeviceID,
+			source.Inode,
+			source.Size,
+			source.AtimeNS,
+			source.MtimeNS,
+			source.SourceCtimeNS,
+			source.VerifiedAtNS,
+		)
+		if err != nil {
+			return nil, classifyMutationError("migrate Projection source identity", err)
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("read migrated Projection count: %w", err)
+		}
+		if count != 1 {
+			return nil, ErrConflict
+		}
+		if projection.Node.OriginScrapeID != nil {
+			entryResult, err := transaction.transaction.ExecContext(ctx, `
+				UPDATE projection_batch_entries
+				SET
+					source_filesystem_type = ?,
+					source_filesystem_id_0 = ?,
+					source_filesystem_id_1 = ?
+				WHERE scrape_id = ?
+				  AND projection_node_id = ?
+				  AND source_path = ?
+				  AND source_filesystem_type IS NULL
+				  AND source_filesystem_id_0 IS NULL
+				  AND source_filesystem_id_1 IS NULL
+				  AND source_device_id = ?
+				  AND source_inode = ?
+				  AND cached_size = ?
+				  AND cached_atime_ns = ?
+				  AND cached_mtime_ns = ?
+				  AND cached_source_ctime_ns = ?
+				  AND verified_at_ns = ?
+			`,
+				filesystem.Type,
+				filesystem.ID[0],
+				filesystem.ID[1],
+				*projection.Node.OriginScrapeID,
+				projection.Node.ID,
+				source.Path,
+				source.DeviceID,
+				source.Inode,
+				source.Size,
+				source.AtimeNS,
+				source.MtimeNS,
+				source.SourceCtimeNS,
+				source.VerifiedAtNS,
+			)
+			if err != nil {
+				return nil, classifyMutationError("migrate Projection Batch source identity", err)
+			}
+			entryCount, err := entryResult.RowsAffected()
+			if err != nil {
+				return nil, fmt.Errorf("read migrated Projection Batch entry count: %w", err)
+			}
+			if entryCount != 1 {
+				return nil, ErrConflict
+			}
+		}
+		updated, err := queryNode(ctx, transaction.transaction, "id = ?", projection.Node.ID)
+		if err != nil {
+			return nil, err
+		}
+		updatedNodes = append(updatedNodes, updated)
+		delete(migrationByID, projection.Node.ID)
+	}
+	if len(migrationByID) != 0 {
+		return nil, ErrConflict
+	}
+	if len(updatedNodes) != 0 {
+		transaction.audited = true
+	}
+	return updatedNodes, nil
 }
 
 func (transaction *Transaction) Rename(
@@ -2061,7 +2324,7 @@ func (transaction *Transaction) CreateProjectionBatchEntry(
 		node.OriginScrapeID == nil ||
 		*node.OriginScrapeID != request.BatchID ||
 		node.Source == nil ||
-		*node.Source != request.Source {
+		!projectionSourcesEqual(*node.Source, request.Source) {
 		return fmt.Errorf(
 			"%w: Projection Batch entry does not match node %d",
 			ErrInvalidNode,
@@ -2074,6 +2337,9 @@ func (transaction *Transaction) CreateProjectionBatchEntry(
 			scrape_id,
 			position,
 			source_path,
+			source_filesystem_type,
+			source_filesystem_id_0,
+			source_filesystem_id_1,
 			source_device_id,
 			source_inode,
 			cached_size,
@@ -2083,11 +2349,14 @@ func (transaction *Transaction) CreateProjectionBatchEntry(
 			verified_at_ns,
 			target,
 			projection_node_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		request.BatchID,
 		request.Position,
 		request.Source.Path,
+		filesystemType(request.Source),
+		filesystemID(request.Source, 0),
+		filesystemID(request.Source, 1),
 		request.Source.DeviceID,
 		request.Source.Inode,
 		request.Source.Size,
@@ -3044,6 +3313,9 @@ func queryProjectionBatchEntry(
 		SELECT
 			position,
 			source_path,
+			source_filesystem_type,
+			source_filesystem_id_0,
+			source_filesystem_id_1,
 			source_device_id,
 			source_inode,
 			cached_size,
@@ -3061,10 +3333,16 @@ func queryProjectionBatchEntry(
 	`, batchID, afterPosition)
 
 	var entry ProjectionBatchEntry
+	var sourceFilesystemType sql.NullInt64
+	var sourceFilesystemID0 sql.NullInt64
+	var sourceFilesystemID1 sql.NullInt64
 	var projectionNodeID sql.NullInt64
 	if err := row.Scan(
 		&entry.Position,
 		&entry.Source.Path,
+		&sourceFilesystemType,
+		&sourceFilesystemID0,
+		&sourceFilesystemID1,
 		&entry.Source.DeviceID,
 		&entry.Source.Inode,
 		&entry.Source.Size,
@@ -3079,6 +3357,18 @@ func queryProjectionBatchEntry(
 			return ProjectionBatchEntry{}, ErrNotFound
 		}
 		return ProjectionBatchEntry{}, err
+	}
+	filesystem, err := persistedFilesystemIdentity(
+		sourceFilesystemType,
+		sourceFilesystemID0,
+		sourceFilesystemID1,
+	)
+	if err != nil {
+		return ProjectionBatchEntry{}, err
+	}
+	if filesystem != nil {
+		entry.Source.Filesystem = *filesystem
+		entry.Source.HasFilesystem = true
 	}
 	entry.ProjectionNodeID = nullableInt64(projectionNodeID)
 	if entry.ProjectionNodeID != nil && *entry.ProjectionNodeID <= 0 {
@@ -3587,6 +3877,9 @@ func queryNode(
 			name,
 			kind,
 			source_path,
+			source_filesystem_type,
+			source_filesystem_id_0,
+			source_filesystem_id_1,
 			source_device_id,
 			source_inode,
 			cached_size,
@@ -3615,6 +3908,9 @@ func queryNode(
 	var node Node
 	var parentID sql.NullInt64
 	var sourcePath sql.NullString
+	var sourceFilesystemType sql.NullInt64
+	var sourceFilesystemID0 sql.NullInt64
+	var sourceFilesystemID1 sql.NullInt64
 	var sourceDeviceID sql.NullInt64
 	var sourceInode sql.NullInt64
 	var cachedSize sql.NullInt64
@@ -3635,6 +3931,9 @@ func queryNode(
 		&node.Name,
 		&node.Kind,
 		&sourcePath,
+		&sourceFilesystemType,
+		&sourceFilesystemID0,
+		&sourceFilesystemID1,
 		&sourceDeviceID,
 		&sourceInode,
 		&cachedSize,
@@ -3673,6 +3972,14 @@ func queryNode(
 		GID:  uint32(gid),
 	}
 	if sourcePath.Valid {
+		filesystem, err := persistedFilesystemIdentity(
+			sourceFilesystemType,
+			sourceFilesystemID0,
+			sourceFilesystemID1,
+		)
+		if err != nil {
+			return Node{}, err
+		}
 		node.Source = &ProjectionSource{
 			Path:          sourcePath.String,
 			DeviceID:      sourceDeviceID.Int64,
@@ -3683,8 +3990,49 @@ func queryNode(
 			SourceCtimeNS: cachedSourceCtimeNS.Int64,
 			VerifiedAtNS:  verifiedAtNS.Int64,
 		}
+		if filesystem != nil {
+			node.Source.Filesystem = *filesystem
+			node.Source.HasFilesystem = true
+		}
 	}
 	return node, nil
+}
+
+func filesystemType(source ProjectionSource) any {
+	if !source.HasFilesystem {
+		return nil
+	}
+	return source.Filesystem.Type
+}
+
+func filesystemID(source ProjectionSource, index int) any {
+	if !source.HasFilesystem {
+		return nil
+	}
+	return source.Filesystem.ID[index]
+}
+
+func persistedFilesystemIdentity(
+	filesystemType sql.NullInt64,
+	id0 sql.NullInt64,
+	id1 sql.NullInt64,
+) (*FilesystemIdentity, error) {
+	if !filesystemType.Valid && !id0.Valid && !id1.Valid {
+		return nil, nil
+	}
+	if !filesystemType.Valid || !id0.Valid || !id1.Valid ||
+		id0.Int64 < -1<<31 || id0.Int64 > 1<<31-1 ||
+		id1.Int64 < -1<<31 || id1.Int64 > 1<<31-1 {
+		return nil, fmt.Errorf("%w: invalid persisted source filesystem identity", ErrInvalidNode)
+	}
+	return &FilesystemIdentity{
+		Type: filesystemType.Int64,
+		ID:   [2]int32{int32(id0.Int64), int32(id1.Int64)},
+	}, nil
+}
+
+func projectionSourcesEqual(left, right ProjectionSource) bool {
+	return left == right
 }
 
 func nullableInt64(value sql.NullInt64) *int64 {

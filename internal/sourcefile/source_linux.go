@@ -23,12 +23,19 @@ var ErrUnsafePath = errors.New("unsafe source path")
 // ErrNotRegular indicates that the source is not a regular file.
 var ErrNotRegular = errors.New("source is not a regular file")
 
+// FilesystemIdentity identifies the filesystem that owns a source descriptor.
+type FilesystemIdentity struct {
+	Type int64
+	ID   [2]int32
+}
+
 // Identity contains the fields used to detect a changed source file.
 type Identity struct {
-	DeviceID int64
-	Inode    int64
-	Size     int64
-	MtimeNS  int64
+	Filesystem *FilesystemIdentity
+	DeviceID   int64
+	Inode      int64
+	Size       int64
+	MtimeNS    int64
 }
 
 // Metadata contains the normalized path and cached source attributes.
@@ -58,7 +65,7 @@ func OpenVerified(path string, expected Identity) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if opened.Identity == expected {
+	if identitiesMatch(opened.Identity, expected) {
 		return opened, nil
 	}
 
@@ -105,6 +112,13 @@ func openWithOpenat2(path string, openat2 openat2Func) (*File, error) {
 			unix.Close(fd),
 		)
 	}
+	var statfs unix.Statfs_t
+	if err := unix.Fstatfs(fd, &statfs); err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("inspect source filesystem for %q: %w", normalized, err),
+			unix.Close(fd),
+		)
+	}
 	if err := unix.SetNonblock(fd, false); err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("configure source file %q for blocking reads: %w", normalized, err),
@@ -130,6 +144,10 @@ func openWithOpenat2(path string, openat2 openat2Func) (*File, error) {
 		Metadata: Metadata{
 			Path: normalized,
 			Identity: Identity{
+				Filesystem: &FilesystemIdentity{
+					Type: statfs.Type,
+					ID:   statfs.Fsid.Val,
+				},
 				DeviceID: int64(stat.Dev),
 				Inode:    int64(stat.Ino),
 				Size:     stat.Size,
@@ -139,6 +157,20 @@ func openWithOpenat2(path string, openat2 openat2Func) (*File, error) {
 			CtimeNS: stat.Ctim.Nano(),
 		},
 	}, nil
+}
+
+func identitiesMatch(actual, expected Identity) bool {
+	if expected.Filesystem == nil {
+		return actual.DeviceID == expected.DeviceID &&
+			actual.Inode == expected.Inode &&
+			actual.Size == expected.Size &&
+			actual.MtimeNS == expected.MtimeNS
+	}
+	return actual.Filesystem != nil &&
+		*actual.Filesystem == *expected.Filesystem &&
+		actual.Inode == expected.Inode &&
+		actual.Size == expected.Size &&
+		actual.MtimeNS == expected.MtimeNS
 }
 
 func normalizePath(path string) (string, string, error) {
