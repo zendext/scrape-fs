@@ -6,8 +6,8 @@
 
 第一版控制面使用两个身份角色：
 
-1. **管理员**：root 或配置的管理员 UID，可管理 Library 和 daemon。
-2. **控制用户**：属于 `scrapefs-control` 组，可列出 Library、选择源路径、创建 Projection、validate/apply/undo Projection Batch、查看 status/doctor。
+1. **管理员**：root 或配置的管理员 UID，可管理 Library、目录和 daemon。
+2. **控制用户**：属于 `scrapefs-control` 组，可浏览 Library 和目录、预览删除范围、选择源路径、创建 Projection、validate/apply/undo Projection Batch、查看 status/doctor。
 
 推荐 socket：
 
@@ -327,3 +327,32 @@ legacy `[agent]` 表不属于 v1 daemon 配置，解析时必须作为未知配�
 已有的 SQLite `-journal`、`-wal` 和 `-shm` sidecar 属于数据库状态，必须采用与主数据库文件相同的 owner、私有 mode、普通文件和 no-symlink 校验。daemon 在 SQLite 生命周期内持续持有已校验的数据库父目录，并相对该描述符访问主文件和 sidecar。
 
 第一版不需要配置 Source Root、动态 Profile 或通用 RBAC。
+
+## 桌面目录管理控制接口
+
+桌面客户端复用既有角色和每连接一条 JSON 请求的协议，不增加数据库访问入口。
+
+| 命令 | 角色 | 行为 |
+| --- | --- | --- |
+| `directory.list` | 控制用户 | 读取指定库／目录的全部直接子项和真实节点类型 |
+| `directory.create` | 管理员 | 在匹配父目录 ID 的位置创建目录 |
+| `directory.move` | 管理员 | 在同库内重命名／移动匹配 ID 的目录，不覆盖目标 |
+| `tree.preview` | 控制用户 | 读取整个子树，返回子目录、映射、库内文件计数及摘要 |
+| `tree.remove` | 管理员 | 复核摘要并删除目录子树；空路径表示删除整个库 |
+
+这些请求通过 `library_name` 和库内相对 `path` 指定目录；`directory.create`
+以 `new_target` 指定单个子目录名，`directory.move` 以它指定库内目标路径；
+两者都使用 `node_id` 复核身份。`tree.remove` 使用 `expected_digest` 确认。
+没有路径遍历、跨库移动、覆盖目标或普通目录接口修改库根目录的能力。
+
+删除摘要覆盖库和节点元数据，以及预览时库内文件的大小、mtime、ctime 或不可用标记。
+执行时先重新读取库内文件指纹，再在同一个 SQLite 写事务内读取完整子树并复核
+命名空间摘要。节点删除、库退役、操作日志和命名空间版本一起提交；失败整体回滚。
+源文件始终保留，对象回收发生在提交后；回收失败由既有 GC 处理。
+
+库内文件内容检查发生在进入命名空间事务之前，避免对象存储回调与数据库连接租约死锁。
+它拒绝已经观察到的内容变化，但不冻结通过既有文件句柄发生的并发写入；删除后的
+打开句柄继续遵循既有 POSIX 生命周期。该接口不承诺隔离任意外部文件写入。
+
+`status` 新增 `can_admin`，按 socket 的真实调用者身份计算；daemon 可报告
+`configuration_digest`，表示启动时解析后的配置语义摘要。这两项都不改变授权检查。

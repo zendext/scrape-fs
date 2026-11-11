@@ -39,13 +39,14 @@ type objectStoreReader interface {
 type sourceVerifier func(string, sourcefile.Identity) error
 
 type Service struct {
-	database     databaseReader
-	repository   repositoryReader
-	index        indexReader
-	objectStore  objectStoreReader
-	runtime      *Runtime
-	version      string
-	verifySource sourceVerifier
+	database            databaseReader
+	repository          repositoryReader
+	index               indexReader
+	objectStore         objectStoreReader
+	runtime             *Runtime
+	version             string
+	configurationDigest string
+	verifySource        sourceVerifier
 }
 
 func NewService(
@@ -55,8 +56,9 @@ func NewService(
 	store objectStoreReader,
 	runtime *Runtime,
 	version string,
+	configurationDigest ...string,
 ) *Service {
-	return newService(
+	service := newService(
 		opened,
 		repository,
 		index,
@@ -65,6 +67,10 @@ func NewService(
 		version,
 		nil,
 	)
+	if len(configurationDigest) > 0 {
+		service.configurationDigest = configurationDigest[0]
+	}
+	return service
 }
 
 func newService(
@@ -93,7 +99,7 @@ func newService(
 func (service *Service) Status(ctx context.Context) StatusResult {
 	result := StatusResult{
 		Schema: StatusSchema,
-		Daemon: DaemonStatus{Version: service.version},
+		Daemon: DaemonStatus{Version: service.version, ConfigurationDigest: service.configurationDigest},
 		Database: DatabaseStatus{
 			ComponentStatus:        unavailable("database diagnostics unavailable"),
 			SupportedSchemaVersion: database.SupportedSchemaVersion(),

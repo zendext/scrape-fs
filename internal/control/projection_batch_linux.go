@@ -69,6 +69,8 @@ type request struct {
 	Target             string `json:"target,omitempty"`
 	NewTarget          string `json:"new_target,omitempty"`
 	ConfirmationDigest string `json:"confirmation_digest,omitempty"`
+	Path               string `json:"path,omitempty"`
+	NodeID             int64  `json:"node_id,omitempty"`
 }
 
 type response struct {
@@ -492,18 +494,41 @@ func handleConnection(
 	}
 	var result any
 	switch request.Command {
+	case "directory.list", "directory.create", "directory.move", "tree.preview", "tree.remove":
+		management, ok := options.libraryService.(ManagementService)
+		if !ok {
+			err = fmt.Errorf("directory management service is unavailable")
+			break
+		}
+		result = struct{}{}
+		switch request.Command {
+		case "directory.list":
+			result, err = management.Browse(ctx, request.LibraryName, request.Path)
+		case "directory.create":
+			err = management.CreateDirectory(ctx, request.LibraryName, request.Path, request.NewTarget, request.NodeID, actor)
+		case "directory.move":
+			err = management.MoveDirectory(ctx, request.LibraryName, request.Path, request.NewTarget, request.NodeID, actor)
+		case "tree.preview":
+			result, err = management.PreviewRemoval(ctx, request.LibraryName, request.Path)
+		case "tree.remove":
+			err = management.RemoveTree(ctx, request.LibraryName, request.Path, request.ExpectedDigest, actor)
+		}
 	case "status":
 		if options.diagnosticsService == nil {
 			err = fmt.Errorf("diagnostics control service is unavailable")
 			break
 		}
-		result = options.diagnosticsService.Status(ctx)
+		status := options.diagnosticsService.Status(ctx)
+		status.CanAdmin = identity.UID == 0 || identity.UID == options.security.administratorUID
+		result = status
 	case "doctor":
 		if options.diagnosticsService == nil {
 			err = fmt.Errorf("diagnostics control service is unavailable")
 			break
 		}
-		result = options.diagnosticsService.Doctor(ctx)
+		doctor := options.diagnosticsService.Doctor(ctx)
+		doctor.Status.CanAdmin = identity.UID == 0 || identity.UID == options.security.administratorUID
+		result = doctor
 	case "library.create":
 		if options.libraryService == nil {
 			err = fmt.Errorf("Library control service is unavailable")
@@ -757,6 +782,8 @@ func classifyError(err error) string {
 	case errors.Is(err, projection.ErrProjectionNotFound):
 		return "ProjectionNotFound"
 	case errors.Is(err, projection.ErrConfirmationMismatch):
+		return "ConfirmationMismatch"
+	case errors.Is(err, namespace.ErrPreviewChanged):
 		return "ConfirmationMismatch"
 	case errors.Is(err, projection.ErrBatchOwnedProjection):
 		return "BatchOwnedProjection"

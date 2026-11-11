@@ -172,6 +172,7 @@ func TestStatusAndDoctorJSONSchemasHaveStableFields(t *testing.T) {
 		t.Fatalf("Unmarshal status: %v", err)
 	}
 	assertJSONKeys(t, statusObject, []string{
+		"can_admin",
 		"schema",
 		"state",
 		"daemon",

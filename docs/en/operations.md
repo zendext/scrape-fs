@@ -8,8 +8,8 @@
 
 The first-version control plane uses two identity roles:
 
-1. **Administrator**: root or a configured administrator UID; manages Libraries and the daemon.
-2. **Control user**: a member of `scrapefs-control`; lists Libraries, selects source paths, creates Projections, validates/applies/undoes Projection batches, and uses status/doctor.
+1. **Administrator**: root or a configured administrator UID; manages Libraries, folders, and the daemon.
+2. **Control user**: a member of `scrapefs-control`; browses Libraries and folders, previews removals, selects source paths, creates Projections, validates/applies/undoes Projection batches, and uses status/doctor.
 
 Recommended socket:
 
@@ -333,3 +333,40 @@ Configuration loading and validation do not create, open, or modify these paths.
 Existing SQLite `-journal`, `-wal`, and `-shm` sidecars are part of the database state and follow the same ownership, private-mode, regular-file, and no-symlink validation as the main database file. The daemon keeps the validated database parent directory open and accesses the main file and sidecars relative to that descriptor for the SQLite lifetime.
 
 The first version does not configure Source Roots, dynamic Profiles, or generic RBAC.
+
+## Desktop Directory Management Control API
+
+Desktop clients retain the existing roles and one-JSON-request-per-connection
+protocol. They receive no direct database access.
+
+| Command | Role | Behavior |
+| --- | --- | --- |
+| `directory.list` | Control user | Read all direct children and actual node kinds |
+| `directory.create` | Administrator | Create a child under the matching parent ID |
+| `directory.move` | Administrator | Same-library rename/move of the matching ID, without replacement |
+| `tree.preview` | Control user | Read the entire subtree, counts, and confirmation digest |
+| `tree.remove` | Administrator | Recheck the digest and remove the subtree; empty path removes the library |
+
+Requests identify the folder using `library_name` and a library-relative `path`.
+`directory.create` uses `new_target` for a single child name; `directory.move`
+uses it for the destination path. Both recheck `node_id`. `tree.remove` requires
+`expected_digest`. Traversal, cross-library moves, target replacement, and changing
+the library root through ordinary directory operations are rejected.
+
+The removal digest covers library/node metadata and observed library-file size,
+mtime, ctime, or unavailable markers. Applying rereads object fingerprints before
+entering the SQLite write transaction, then reads and rechecks the complete
+namespace snapshot inside that transaction. Node removal, library retirement,
+audit logging, and namespace version commit together or roll back together.
+Source files remain intact. Object reclamation follows commit; existing GC
+handles reclamation failures.
+
+Object content checks happen before the namespace transaction to avoid deadlock
+between object-store callbacks and the database connection lease. They reject
+observed content changes but do not freeze concurrent writes through existing
+handles. Open handles retain their existing POSIX lifecycle after deletion. The
+API does not claim isolation from arbitrary external file writes.
+
+`status` adds `can_admin`, calculated from the actual socket caller. The daemon
+can report `configuration_digest`, the semantic digest of its parsed startup
+configuration. Neither field replaces authorization checks.

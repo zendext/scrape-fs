@@ -53,8 +53,9 @@ type ComponentStatus struct {
 }
 
 type DaemonStatus struct {
-	Version string `json:"version"`
-	Ready   bool   `json:"ready"`
+	Version             string `json:"version"`
+	Ready               bool   `json:"ready"`
+	ConfigurationDigest string `json:"configuration_digest,omitempty"`
 }
 
 type DatabaseStatus struct {
@@ -99,6 +100,7 @@ type LibraryStatus struct {
 }
 
 type StatusResult struct {
+	CanAdmin    bool              `json:"can_admin"`
 	Schema      string            `json:"schema"`
 	State       State             `json:"state"`
 	Daemon      DaemonStatus      `json:"daemon"`
