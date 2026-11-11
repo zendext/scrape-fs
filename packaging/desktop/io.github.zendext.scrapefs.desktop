@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ScrapeFS
+Comment=Manage local virtual media libraries
+Comment[zh_CN]=管理本机虚拟媒体库
+Exec=/usr/local/bin/scrapefs-gui
+TryExec=/usr/local/bin/scrapefs-gui
+Icon=folder-videos
+Terminal=false
+Categories=AudioVideo;Utility;
+StartupWMClass=scrapefs-gui

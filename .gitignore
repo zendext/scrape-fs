@@ -1,6 +1,13 @@
 # Git worktrees
 /.worktrees/
 
+# Desktop build output
+/desktop/bin/
+/desktop/frontend/node_modules/
+/desktop/frontend/dist/
+/desktop/frontend/test-results/
+/desktop/frontend/playwright-report/
+
 # macOS
 .DS_Store
 .AppleDouble

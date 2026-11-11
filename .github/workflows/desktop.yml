@@ -1,0 +1,58 @@
+name: Desktop
+
+on:
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - 'internal/**'
+      - 'cmd/scrapefs-admin/**'
+      - 'scripts/*desktop*'
+      - 'scripts/tests/test_desktop_install.py'
+      - 'packaging/desktop/**'
+      - '.github/workflows/desktop.yml'
+      - 'go.mod'
+      - 'go.sum'
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: |
+            go.sum
+            desktop/go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+      - name: Install desktop development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+          # The disposable runner can reuse its existing GID for the test role.
+          getent group scrapefs-control || sudo groupadd --non-unique --gid "$(id -g)" scrapefs-control
+      - name: Build native desktop components
+        run: ./scripts/build-desktop.sh
+      - name: Check Go and installer behavior
+        run: |
+          go test ./...
+          go vet ./...
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          sh -n scripts/build-desktop.sh scripts/install-desktop.sh
+          cd desktop
+          go test -race ./internal/gui
+          go vet ./internal/gui
+          go build -tags 'server desktoptest' -o bin/test-server ./tests/server
+      - name: Exercise real Wails bindings with disposable library data
+        working-directory: desktop/frontend
+        run: |
+          npx playwright install --with-deps chromium --no-shell
+          npm test
