@@ -16,6 +16,7 @@ import (
 )
 
 type databaseReader interface {
+	Path() string
 	SchemaVersion(context.Context) (int, error)
 	IntegrityCheck(context.Context) ([]string, error)
 }
@@ -32,6 +33,7 @@ type indexReader interface {
 }
 
 type objectStoreReader interface {
+	Path() string
 	RecoveryReport() objectstore.RecoveryReport
 	Inspect(context.Context) (objectstore.Inspection, error)
 }
@@ -122,6 +124,7 @@ func (service *Service) Status(ctx context.Context) StatusResult {
 	}
 
 	if service.database != nil {
+		result.Database.Path = service.database.Path()
 		version, err := service.database.SchemaVersion(ctx)
 		if err != nil {
 			result.Database.Error = err.Error()
@@ -173,7 +176,7 @@ func (service *Service) Status(ctx context.Context) StatusResult {
 			state = StateDegraded
 		}
 		result.ObjectStore = ObjectStoreStatus{
-			ComponentStatus: ComponentStatus{State: state},
+			ComponentStatus: ComponentStatus{State: state, Path: service.objectStore.Path()},
 			StartupIssues:   len(recovery.Issues),
 		}
 	}

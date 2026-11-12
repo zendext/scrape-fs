@@ -91,8 +91,10 @@ libraries. Older daemons without directory support produce an upgrade message.
 
 The service page separates systemd state, daemon readiness, mount, socket,
 database, and file storage. Start/restart checks actual daemon, mount, and socket
-readiness after systemctl succeeds. Stop/restart requires confirmation. Missing
-daemons show the installation documentation location.
+readiness after systemctl succeeds. Database and file-storage paths come from
+the daemon's opened resources and retain their running values after Save only.
+Stop/restart requires confirmation. Missing daemons show the installation
+documentation location.
 
 The configuration form covers all ten daemon fields. A raw TOML editor repairs
 invalid files. Form previews retain unchanged text and comments; raw editing saves

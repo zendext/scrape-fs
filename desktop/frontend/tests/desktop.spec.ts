@@ -223,6 +223,10 @@ test("saved and running configurations stay distinct until a verified restart", 
   await page
     .getByRole("button", { name: "Service status", exact: true })
     .click();
+  await expect(page.locator(".summary dt").filter({ hasText: /^Database$/ }).locator("+ dd code"))
+    .toHaveText(/\/state\/scrapefs\.db$/);
+  await expect(page.locator(".summary dt").filter({ hasText: /^Library file storage$/ }).locator("+ dd code"))
+    .toHaveText(/\/objects$/);
   await page
     .getByRole("button", { name: "Restart service", exact: true })
     .click();

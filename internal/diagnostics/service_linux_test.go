@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zendext/scrape-fs/internal/config"
 	"github.com/zendext/scrape-fs/internal/database"
 	"github.com/zendext/scrape-fs/internal/library"
 	"github.com/zendext/scrape-fs/internal/namespace"
@@ -21,6 +22,84 @@ import (
 	"github.com/zendext/scrape-fs/internal/sourcefile"
 	"golang.org/x/sys/unix"
 )
+
+func TestStatusReportsOpenedStoragePathsAfterSavingDifferentConfiguration(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	databasePath := filepath.Join(root, "state", "scrapefs.db")
+	storePath := filepath.Join(root, "objects")
+	document, err := config.PatchDocument("", map[string]string{
+		"storage.database_path":      databasePath,
+		"storage.overlay_store_path": storePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configurationPath := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(configurationPath, []byte(document.Text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	running, err := config.Load(configurationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := database.OpenWithOptions(ctx, running.Storage.DatabasePath, database.Options{
+		LockPath: filepath.Join(root, "run", "scrapefsd.lock"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { opened.Close() })
+	store, err := objectstore.Open(running.Storage.OverlayStorePath, opened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	service := NewService(opened, nil, nil, store, nil, "dev", config.Digest(running))
+
+	saved, err := config.PatchDocument(document.Text, map[string]string{
+		"storage.database_path":      filepath.Join(root, "next-state", "scrapefs.db"),
+		"storage.overlay_store_path": filepath.Join(root, "next-objects"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configurationPath, []byte(saved.Text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if saved.EffectiveDigest == config.Digest(running) {
+		t.Fatal("saved configuration did not change")
+	}
+	for _, status := range []StatusResult{service.Status(ctx), service.Doctor(ctx).Status} {
+		if status.Database.Path != databasePath || status.ObjectStore.Path != storePath {
+			t.Errorf("running storage paths = database %q, object store %q; want %q and %q", status.Database.Path, status.ObjectStore.Path, databasePath, storePath)
+		}
+		if status.Daemon.ConfigurationDigest != config.Digest(running) {
+			t.Errorf("running configuration digest = %q", status.Daemon.ConfigurationDigest)
+		}
+	}
+}
+
+func TestStatusRetainsStoragePathsWhenUnavailableOrDegraded(t *testing.T) {
+	service := NewService(
+		fakeDatabase{path: "/srv/scrapefs/state.db", err: errors.New("database unavailable")},
+		nil,
+		nil,
+		fakeObjectStore{path: "/srv/scrapefs-objects", recovery: objectstore.RecoveryReport{
+			Schema: objectstore.RecoveryReportSchema,
+			Issues: []objectstore.IntegrityIssue{{ObjectID: 9, Code: objectstore.IntegrityMissingReferencedObject}},
+		}},
+		nil,
+		"dev",
+	)
+	status := service.Status(context.Background())
+	if status.Database.State != StateUnavailable || status.Database.Path != "/srv/scrapefs/state.db" {
+		t.Errorf("unavailable database status = %+v", status.Database)
+	}
+	if status.ObjectStore.State != StateDegraded || status.ObjectStore.Path != "/srv/scrapefs-objects" {
+		t.Errorf("degraded object-store status = %+v", status.ObjectStore)
+	}
+}
 
 func TestStatusReportsStableComponentAndLibrarySnapshot(t *testing.T) {
 	runtime := NewRuntime("/mnt/scrapefs", "/run/scrapefs/scrapefs.sock")
@@ -964,10 +1043,13 @@ func assertJSONKeys(
 }
 
 type fakeDatabase struct {
+	path      string
 	version   int
 	integrity []string
 	err       error
 }
+
+func (database fakeDatabase) Path() string { return database.path }
 
 func (database fakeDatabase) SchemaVersion(context.Context) (int, error) {
 	return database.version, database.err
@@ -1020,10 +1102,13 @@ func (index fakeIndex) Inspect(context.Context) (namespace.IndexInspection, erro
 }
 
 type fakeObjectStore struct {
+	path       string
 	recovery   objectstore.RecoveryReport
 	inspection objectstore.Inspection
 	err        error
 }
+
+func (store fakeObjectStore) Path() string { return store.path }
 
 func (store fakeObjectStore) RecoveryReport() objectstore.RecoveryReport {
 	if store.recovery.Schema == "" {

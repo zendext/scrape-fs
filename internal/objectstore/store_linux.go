@@ -92,6 +92,10 @@ func Open(path string, opened *database.DB) (_ *Store, err error) {
 	return OpenWithOptions(path, opened, Options{})
 }
 
+func (store *Store) Path() string {
+	return store.root.Name()
+}
+
 func OpenWithOptions(path string, opened *database.DB, options Options) (_ *Store, err error) {
 	if opened == nil {
 		return nil, fmt.Errorf("open object store: database must not be nil")
