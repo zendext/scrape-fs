@@ -77,6 +77,8 @@ func PatchDocument(text string, fields map[string]string) (Document, error) {
 	parser.Reset([]byte(text))
 	table := ""
 	tableEnds := map[string]int{}
+	inlineEnds := map[string]int{}
+	inlineSeparators := map[string]string{}
 	for parser.NextExpression() {
 		expression := parser.Expression()
 		if expression.Kind != unstable.Table && expression.Kind != unstable.KeyValue {
@@ -100,6 +102,25 @@ func PatchDocument(text string, fields map[string]string) (Document, error) {
 		if table != "" {
 			key = table + "." + key
 		}
+		if expression.Value().Kind == unstable.InlineTable {
+			inlineEnds[key] = int(expression.Raw.Offset+expression.Raw.Length) - 1
+			children := expression.Value().Children()
+			for children.Next() {
+				child := children.Node()
+				childKey := key
+				keys := child.Key()
+				for keys.Next() {
+					childKey += "." + string(keys.Node().Data)
+				}
+				if value, ok := replacements[childKey]; ok {
+					raw := child.Value().Raw
+					edits = append(edits, edit{int(raw.Offset), int(raw.Offset + raw.Length), value})
+					delete(replacements, childKey)
+				}
+				inlineSeparators[key] = ", "
+			}
+			continue
+		}
 		if value, ok := replacements[key]; ok {
 			raw := expression.Value().Raw
 			edits = append(edits, edit{int(raw.Offset), int(raw.Offset + raw.Length), value})
@@ -116,23 +137,17 @@ func PatchDocument(text string, fields map[string]string) (Document, error) {
 	}
 	sort.Strings(keys)
 	insertions := map[int]string{}
-	newTables := map[string]string{}
 	for _, key := range keys {
 		parts := strings.SplitN(key, ".", 2)
-		line := parts[1] + " = " + replacements[key] + "\n"
-		if offset, ok := tableEnds[parts[0]]; ok {
-			insertions[offset] += "\n" + line
+		assignment := parts[1] + " = " + replacements[key]
+		if offset, ok := inlineEnds[parts[0]]; ok {
+			insertions[offset] += inlineSeparators[parts[0]] + assignment
+			inlineSeparators[parts[0]] = ", "
+		} else if offset, ok := tableEnds[parts[0]]; ok {
+			insertions[offset] += "\n" + assignment + "\n"
 		} else {
-			newTables[parts[0]] += line
+			insertions[tableEnds[""]] += "\n" + parts[0] + "." + assignment + "\n"
 		}
-	}
-	sections := make([]string, 0, len(newTables))
-	for section := range newTables {
-		sections = append(sections, section)
-	}
-	sort.Strings(sections)
-	for _, section := range sections {
-		insertions[len(text)] += "\n[" + section + "]\n" + newTables[section]
 	}
 	for offset, value := range insertions {
 		edits = append(edits, edit{offset, offset, value})
