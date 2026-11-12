@@ -30,10 +30,18 @@ service:      /etc/systemd/system/scrapefsd.service
 
 ## 2. Install From GitHub Releases
 
-Each versioned tag publishes a `linux/amd64` archive and `SHA256SUMS`. Download
-both files for the same version from
+Each versioned tag automatically builds and publishes three assets:
+
+- `scrape-fs_<version>_linux_amd64.tar.gz`: CLI, daemon, and core installer.
+- `scrape-fs-desktop_<version>_linux_amd64.tar.gz`: optional GUI, private helper,
+  and desktop installer.
+- `SHA256SUMS`: checksums covering both archives.
+
+Download the core archive and checksums for the same version from
 [GitHub Releases](https://github.com/zendext/scrape-fs/releases), then verify,
-extract, and run the bundled installer:
+extract, and run the bundled installer. For the GUI, also download the desktop
+archive and follow [desktop setup](desktop.md). Verification skips an archive
+that was not downloaded:
 
 ```bash
 version=vX.Y.Z

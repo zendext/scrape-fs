@@ -43,6 +43,20 @@ sudo ./scripts/install-desktop.sh
 scrapefs-gui
 ```
 
+The tag release workflow builds the core and desktop packages on Ubuntu 24.04.
+Both archives and the combined `SHA256SUMS` are published only after all builds
+succeed. The desktop archive contains only the GUI, private helper, installer,
+application-menu entry, and license. Frontend assets are embedded in the GUI;
+test programs and separate web assets are excluded. Prerelease and Latest rules
+remain the same as for the core package.
+
+With the build dependencies above installed, a Linux amd64 host can produce all
+release assets in one command; the output directory must be empty:
+
+```bash
+./scripts/package-release.sh vX.Y.Z /absolute/empty-dist
+```
+
 The desktop installer installs only `/usr/local/bin/scrapefs-gui`,
 `/usr/local/libexec/scrapefs-admin`, and an application menu entry. It requires an
 installed daemon and does not change daemon configuration, groups, media libraries,
@@ -172,7 +186,11 @@ npm test
 ```
 
 End-to-end tests require the `scrapefs-control` group and permission for the test
-user to use its GID. They use temporary SQLite/object storage and the real Unix
+user to use its GID. The release packaging regression builds both archives,
+verifies checksums, and stages both installers through `DESTDIR`; that test is
+skipped without npm, GTK4, or WebKitGTK 6.0. Desktop PR CI and tag releases install
+these dependencies and execute the full packaging check.
+End-to-end tests use temporary SQLite/object storage and the real Unix
 control API through a test-only Wails loopback server. System service,
 authorization, and external file opening are recorded test implementations.
 They do not mount FUSE or invoke actual Polkit/systemd actions. The production

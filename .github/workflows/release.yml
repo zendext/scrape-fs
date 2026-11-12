@@ -11,7 +11,7 @@ permissions:
 jobs:
   release:
     name: Publish linux/amd64 release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -24,17 +24,35 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
+          go-version-file: desktop/go.mod
+          cache-dependency-path: |
+            go.sum
+            desktop/go.sum
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+
+      - name: Install desktop development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
 
       - name: Verify repository
         run: |
           go test ./...
           go test -race ./...
           go vet ./...
+          go -C desktop test -race ./internal/gui
+          go -C desktop vet ./internal/gui
           test -z "$(gofmt -l .)"
           sh -n \
             scripts/install.sh \
+            scripts/build-desktop.sh \
+            scripts/install-desktop.sh \
             scripts/package-release.sh \
             scripts/release-version.sh
           python3 -m unittest discover \
