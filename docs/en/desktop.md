@@ -51,7 +51,8 @@ Files open through the running FUSE mount.
 
 A persistent, resizable folder tree sits beside a complete file list. The list
 scrolls continuously with a sticky header. Long names have ellipsis and full
-tooltips. Details expand below the list on demand.
+tooltips. Selecting an entry shows its details below the list; closing details
+clears the selection. Hover highlights cover the whole tree or list row.
 The interface defaults to the design's dark palette without changing the system
 theme.
 
@@ -66,11 +67,16 @@ the current keyboard option have distinct indicators.
 The address bar accepts `library:/relative/path`. Ctrl+L selects it, Enter navigates,
 and Escape restores the current address. There are no breadcrumbs, Up button,
 sidebar toggle, or pages. Open folder opens the current virtual folder in the
-system file manager. Files open in the default application. Tree nodes offer
-context actions, and arrow keys can resize the tree.
-Each library and folder row has a management icon with a name-specific label.
-It acts on that node without changing the current browser location. The action
-is disabled without administrator permission or while an operation is running.
+system file manager. Files open in the default application. Arrow keys can resize
+the tree. Library rows directly offer rename, naming-rule, and delete icons;
+folder rows offer rename/move and delete icons. Each opens the corresponding
+dialog without an intermediate management menu, acting on that node without
+changing the current browser location. Actions are disabled without administrator
+permission or while an operation is running.
+The file list also places open, rename/move, source-replacement, and removal
+actions in each entry's row, according to its type and permissions. Opening a
+directory from its row navigates into it. The details area only shows information
+about the selected entry.
 
 Libraries support creation, viewing, renaming, Profile changes, and deletion.
 Changing a Profile retains the existing semantics and does not rename files.

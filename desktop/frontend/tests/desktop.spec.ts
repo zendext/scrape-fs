@@ -92,7 +92,6 @@ test("real bindings browse all files, align controls, preserve scrolling and loc
     .locator(".filename")
     .filter({ hasText: "episode-000.nfo" })
     .click();
-  await page.getByRole("button", { name: "Details", exact: true }).click();
   await expect(page.locator(".detail")).toContainText("system application");
   await expect(page.locator(".detail button")).toHaveCount(1);
   expect(errors).toEqual([]);
@@ -123,22 +122,14 @@ test("library and folder CRUD use confirmed removal and mapping creation uses a 
   ).toHaveValue(/source.mkv$/);
   await modal.getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(page.locator("tbody tr")).toHaveCount(1);
-  await page
-    .getByRole("button", { name: "Folder actions", exact: true })
-    .click();
-  modal = await dialog(page, "Folder actions");
-  await modal.getByRole("button", { name: "Rename / move" }).click();
+  await page.locator(".tree").getByRole("button", { name: "Rename / move Films", exact: true }).click();
   modal = await dialog(page, "Rename / move");
   await modal.getByRole("textbox").fill("Movies");
   await modal.getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(
     page.getByRole("textbox", { name: "Current folder address" }),
   ).toHaveValue("gui-test:/Movies");
-  await page
-    .getByRole("button", { name: "Folder actions", exact: true })
-    .click();
-  modal = await dialog(page, "Folder actions");
-  await modal.getByRole("button", { name: "Delete folder" }).click();
+  await page.locator(".tree").getByRole("button", { name: "Delete folder Movies", exact: true }).click();
   modal = await dialog(page, "Delete folder");
   await expect(modal).toContainText("Source files are kept");
   await expect(
@@ -179,9 +170,7 @@ test("library and folder CRUD use confirmed removal and mapping creation uses a 
   expect(
     (await (await page.request.get("/test/observations")).json()).source,
   ).toBe("original media");
-  await page.getByRole("button", { name: "Manage library gui-test", exact: true }).click();
-  modal = await dialog(page, "Manage library");
-  await modal.getByRole("button", { name: "Delete library" }).click();
+  await page.locator(".tree").getByRole("button", { name: "Delete library gui-test", exact: true }).click();
   modal = await dialog(page, "Delete library");
   await modal.getByRole("button", { name: "Preview deletion" }).click();
   await modal.getByRole("button", { name: "Confirm deletion" }).click();

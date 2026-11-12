@@ -23,6 +23,7 @@ import {
 } from "./api";
 import { translate, findingText, type Language } from "./i18n";
 import { Selector } from "./Selector";
+import { ActionIcon } from "./ActionIcon";
 import "./style.css";
 
 type Dialog = {
@@ -92,7 +93,6 @@ function App() {
   const [treeErrors, setTreeErrors] = createSignal<Record<string, Failure>>({});
   const pendingTrees = new Map<string, number>();
   const [selection, setSelection] = createSignal<Entry>();
-  const [details, setDetails] = createSignal(false);
   const [width, setWidth] = createSignal(260);
   const [busy, setBusy] = createSignal(false);
   const [loading, setLoading] = createSignal(false);
@@ -196,7 +196,11 @@ function App() {
       if (pendingTrees.get(id) === generation) pendingTrees.delete(id);
     }
   }
-  async function navigate(name: string, directory: string, fallbackToRoot = false): Promise<boolean> {
+  async function navigate(
+    name: string,
+    directory: string,
+    fallbackToRoot = false,
+  ): Promise<boolean> {
     const serial = ++navigation;
     setLoading(true);
     setError(undefined);
@@ -212,7 +216,6 @@ function App() {
       setListing(result);
       setAddress(`${name}:/${directory}`);
       setSelection(undefined);
-      setDetails(false);
       setCache((value) => ({ ...value, [key(name, directory)]: result }));
       const ancestors = [
         "",
@@ -230,7 +233,11 @@ function App() {
     } catch (err) {
       if (serial === navigation) {
         const failure = failureOf(err);
-        if (fallbackToRoot && directory && ["NotFound", "NotDirectory"].includes(failure.code))
+        if (
+          fallbackToRoot &&
+          directory &&
+          ["NotFound", "NotDirectory"].includes(failure.code)
+        )
           return await navigate(name, "");
         setError(failure);
         setListing(undefined);
@@ -247,13 +254,16 @@ function App() {
     setLoading(false);
     setListing(undefined);
     setSelection(undefined);
-    setDetails(false);
     setTreeErrors({});
     setCache({});
     setDoctor(undefined);
     setCheckedAt(undefined);
   }
-  async function refresh(name = library(), directory = path(), fallbackToRoot = false) {
+  async function refresh(
+    name = library(),
+    directory = path(),
+    fallbackToRoot = false,
+  ) {
     setError(undefined);
     clearLibraryView();
     setLoading(true);
@@ -268,7 +278,11 @@ function App() {
         ? name
         : active[0]?.name;
       if (nextLibrary)
-        return await navigate(nextLibrary, nextLibrary === name ? directory : "", fallbackToRoot);
+        return await navigate(
+          nextLibrary,
+          nextLibrary === name ? directory : "",
+          fallbackToRoot,
+        );
       else {
         setLibrary("");
         setPath("");
@@ -396,7 +410,10 @@ function App() {
         case "removeLibrary":
           if (!removal()) return;
           await request("remove_tree", { ...args, digest: removal()!.digest });
-          if (operation.kind === "removeLibrary" && operation.library === library()) {
+          if (
+            operation.kind === "removeLibrary" &&
+            operation.library === library()
+          ) {
             nextLibrary = "";
             nextPath = "";
           } else if (
@@ -663,16 +680,6 @@ function App() {
             selected: library() === props.library && path() === props.path,
           }}
           style={{ "padding-left": `${7 + props.depth * 14}px` }}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            if (admin() && !busy() && (cache()[id()]?.id ?? props.id))
-              showDialog({
-                kind: props.path ? "folderActions" : "editLibrary",
-                library: props.library,
-                path: props.path,
-                id: cache()[id()]?.id ?? props.id,
-              });
-          }}
         >
           <button
             class="toggle"
@@ -690,34 +697,47 @@ function App() {
             <Icon kind="directory" />
             <span>{props.name}</span>
           </button>
-          <button
-            type="button"
-            class="tree-manage"
-            title={`${t(props.path ? "folderActions" : "editLibrary")} ${props.name}`}
-            aria-label={`${t(props.path ? "folderActions" : "editLibrary")} ${props.name}`}
-            disabled={!admin() || busy() || !(cache()[id()]?.id ?? props.id)}
-            onClick={(event) => {
-              event.stopPropagation();
-              showDialog({
-                kind: props.path ? "folderActions" : "editLibrary",
-                library: props.library,
-                path: props.path,
-                id: cache()[id()]?.id ?? props.id,
-              });
-            }}
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.6"
-              aria-hidden="true"
+          <div class="item-actions tree-actions">
+            <For
+              each={
+                props.path
+                  ? ["move", "removeFolder"]
+                  : ["rename", "changeProfile", "removeLibrary"]
+              }
             >
-              <circle cx="5" cy="12" r="1.5" />
-              <circle cx="12" cy="12" r="1.5" />
-              <circle cx="19" cy="12" r="1.5" />
-            </svg>
-          </button>
+              {(action) => (
+                <button
+                  type="button"
+                  class="item-action"
+                  classList={{ danger: action.startsWith("remove") }}
+                  title={`${t(action)} ${props.name}`}
+                  aria-label={`${t(action)} ${props.name}`}
+                  disabled={
+                    !admin() || busy() || !(cache()[id()]?.id ?? props.id)
+                  }
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    showDialog({
+                      kind: action,
+                      library: props.library,
+                      path: action === "removeLibrary" ? "" : props.path,
+                      id: cache()[id()]?.id ?? props.id,
+                    });
+                  }}
+                >
+                  <ActionIcon
+                    kind={
+                      action === "changeProfile"
+                        ? "profile"
+                        : action.startsWith("remove")
+                          ? "delete"
+                          : "rename"
+                    }
+                  />
+                </button>
+              )}
+            </For>
+          </div>
         </div>
         <Show when={isExpanded()}>
           <ul>
@@ -899,36 +919,6 @@ function App() {
                   {t("newFolder")}
                 </button>
                 <button
-                  disabled={!admin() || !listing() || busy()}
-                  onClick={() =>
-                    showDialog(
-                      context(path() ? "folderActions" : "editLibrary"),
-                    )
-                  }
-                >
-                  {t("folderActions")}
-                </button>
-                <button
-                  disabled={!selection() || !ready() || busy()}
-                  onClick={() =>
-                    selected()?.kind === "directory"
-                      ? void navigate(library(), selected()!.path)
-                      : void perform("open_file", {
-                          library: library(),
-                          path: selected()!.path,
-                        })
-                  }
-                >
-                  {t("open")}
-                </button>
-                <button
-                  aria-pressed={details()}
-                  disabled={!selection()}
-                  onClick={() => setDetails((value) => !value)}
-                >
-                  {t("details")}
-                </button>
-                <button
                   disabled={!ready() || !listing() || busy()}
                   onClick={() => {
                     showDialog(context("addMapping"));
@@ -983,6 +973,7 @@ function App() {
                       <th>{t("type")}</th>
                       <th>{t("size")}</th>
                       <th>{t("modified")}</th>
+                      <th class="item-actions-cell">{t("actions")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1002,7 +993,6 @@ function App() {
                           onContextMenu={(event) => {
                             event.preventDefault();
                             setSelection(entry);
-                            setDetails(true);
                           }}
                         >
                           <td>
@@ -1039,6 +1029,101 @@ function App() {
                           >
                             {entry.modified ? date(entry.modified) : "—"}
                           </td>
+                          <td class="item-actions-cell">
+                            <div
+                              class="item-actions"
+                              onClick={(event) => event.stopPropagation()}
+                              onDblClick={(event) => event.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                class="item-action"
+                                title={`${t("open")} ${entry.name}`}
+                                aria-label={`${t("open")} ${entry.name}`}
+                                disabled={!ready() || busy()}
+                                onClick={() =>
+                                  entry.kind === "directory"
+                                    ? void navigate(library(), entry.path)
+                                    : void perform("open_file", {
+                                        library: library(),
+                                        path: entry.path,
+                                      })
+                                }
+                              >
+                                <ActionIcon kind="open" />
+                              </button>
+                              <Show when={entry.kind !== "file"}>
+                                <button
+                                  type="button"
+                                  class="item-action"
+                                  title={`${t("move")} ${entry.name}`}
+                                  aria-label={`${t("move")} ${entry.name}`}
+                                  disabled={
+                                    busy() ||
+                                    (entry.kind === "directory"
+                                      ? !admin()
+                                      : !ready())
+                                  }
+                                  onClick={() =>
+                                    showDialog(
+                                      context(
+                                        entry.kind === "directory"
+                                          ? "move"
+                                          : "moveMapping",
+                                        entry,
+                                      ),
+                                    )
+                                  }
+                                >
+                                  <ActionIcon kind="rename" />
+                                </button>
+                              </Show>
+                              <Show
+                                when={
+                                  entry.kind === "mapping" && entry.can_rebind
+                                }
+                              >
+                                <button
+                                  type="button"
+                                  class="item-action"
+                                  title={`${t("rebind")} ${entry.name}`}
+                                  aria-label={`${t("rebind")} ${entry.name}`}
+                                  disabled={!ready() || busy()}
+                                  onClick={() =>
+                                    showDialog(context("rebind", entry))
+                                  }
+                                >
+                                  <ActionIcon kind="rebind" />
+                                </button>
+                              </Show>
+                              <Show when={entry.kind !== "file"}>
+                                <button
+                                  type="button"
+                                  class="item-action danger"
+                                  title={`${t(entry.kind === "directory" ? "removeFolder" : "removeMapping")} ${entry.name}`}
+                                  aria-label={`${t(entry.kind === "directory" ? "removeFolder" : "removeMapping")} ${entry.name}`}
+                                  disabled={
+                                    busy() ||
+                                    (entry.kind === "directory"
+                                      ? !admin()
+                                      : !ready())
+                                  }
+                                  onClick={() =>
+                                    showDialog(
+                                      context(
+                                        entry.kind === "directory"
+                                          ? "removeFolder"
+                                          : "removeMapping",
+                                        entry,
+                                      ),
+                                    )
+                                  }
+                                >
+                                  <ActionIcon kind="delete" />
+                                </button>
+                              </Show>
+                            </div>
+                          </td>
                         </tr>
                       )}
                     </For>
@@ -1056,14 +1141,14 @@ function App() {
                 </Show>
               </div>
             </Show>
-            <Show when={details() && selected()}>
+            <Show when={selected()}>
               <section class="detail">
                 <div class="detail-heading">
                   <strong title={selected()!.name}>{selected()!.name}</strong>
                   <button
                     class="dismiss"
                     aria-label={t("close")}
-                    onClick={() => setDetails(false)}
+                    onClick={() => setSelection(undefined)}
                   >
                     ×
                   </button>
@@ -1087,47 +1172,6 @@ function App() {
                       ? t("external")
                       : ""}
                 </p>
-                <div class="actions">
-                  <Show when={selected()?.kind === "directory"}>
-                    <button
-                      disabled={!admin() || busy()}
-                      onClick={() =>
-                        showDialog(context("folderActions", selected()))
-                      }
-                    >
-                      {t("folderActions")}
-                    </button>
-                  </Show>
-                  <Show when={selected()?.kind === "mapping"}>
-                    <button
-                      disabled={!ready() || busy()}
-                      onClick={() =>
-                        showDialog(context("moveMapping", selected()))
-                      }
-                    >
-                      {t("move")}
-                    </button>
-                    <Show when={selected()?.can_rebind}>
-                      <button
-                        disabled={!ready() || busy()}
-                        onClick={() =>
-                          showDialog(context("rebind", selected()))
-                        }
-                      >
-                        {t("rebind")}
-                      </button>
-                    </Show>
-                    <button
-                      class="danger"
-                      disabled={!ready() || busy()}
-                      onClick={() =>
-                        showDialog(context("removeMapping", selected()))
-                      }
-                    >
-                      {t("removeMapping")}
-                    </button>
-                  </Show>
-                </div>
               </section>
             </Show>
           </section>
@@ -1526,64 +1570,6 @@ function App() {
               <Show when={dialogError()}>
                 <div class="message error" role="alert">
                   {errorText(dialogError())}
-                </div>
-              </Show>
-              <Show when={operation().kind === "editLibrary"}>
-                <dl class="summary">
-                  <dt>{t("name")}</dt>
-                  <dd>{operation().library}</dd>
-                  <dt>{t("profile")}</dt>
-                  <dd>{profile()}</dd>
-                </dl>
-                <div class="actions">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      showDialog({ ...operation(), kind: "rename" })
-                    }
-                  >
-                    {t("rename")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      showDialog({ ...operation(), kind: "changeProfile" })
-                    }
-                  >
-                    {t("changeProfile")}
-                  </button>
-                  <button
-                    type="button"
-                    class="danger"
-                    onClick={() =>
-                      showDialog({
-                        ...operation(),
-                        kind: "removeLibrary",
-                        path: "",
-                      })
-                    }
-                  >
-                    {t("removeLibrary")}
-                  </button>
-                </div>
-              </Show>
-              <Show when={operation().kind === "folderActions"}>
-                <div class="actions">
-                  <button
-                    type="button"
-                    onClick={() => showDialog({ ...operation(), kind: "move" })}
-                  >
-                    {t("move")}
-                  </button>
-                  <button
-                    type="button"
-                    class="danger"
-                    onClick={() =>
-                      showDialog({ ...operation(), kind: "removeFolder" })
-                    }
-                  >
-                    {t("removeFolder")}
-                  </button>
                 </div>
               </Show>
               <Show

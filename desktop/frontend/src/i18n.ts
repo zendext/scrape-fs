@@ -24,6 +24,7 @@ const strings = {
   type: ["类型", "Type"],
   size: ["大小", "Size"],
   modified: ["修改时间", "Modified"],
+  actions: ["操作", "Actions"],
   directory: ["目录", "Folder"],
   mapping: ["源文件映射", "Source mapping"],
   file: ["库内文件", "Library file"],

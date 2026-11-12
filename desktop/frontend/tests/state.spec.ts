@@ -46,9 +46,8 @@ test("managing another library keeps the current library and directory", async (
   await navigate(page, "media:/Shows");
   await expect(page.locator("tbody tr")).toHaveCount(141);
 
-  await page.locator(".folder").filter({ hasText: /^state-other$/ }).click({ button: "right" });
+  await page.locator(".tree").getByRole("button", { name: "Rename state-other", exact: true }).click();
   const modal = page.getByRole("dialog");
-  await modal.getByRole("button", { name: "Rename", exact: true }).click();
   await modal.getByRole("textbox", { name: "New name" }).fill("state-renamed");
   await modal.getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(modal).not.toBeVisible();
@@ -60,22 +59,19 @@ test("managing another library keeps the current library and directory", async (
     has: page.locator(".folder").filter({ hasText: /^state-renamed$/ }),
   });
   await root.locator(":scope > .tree-row .toggle").click();
-  await root.locator(".folder").filter({ hasText: /^Shows$/ }).click({ button: "right" });
-  await modal.getByRole("button", { name: "Rename / move" }).click();
+  await root.getByRole("button", { name: "Rename / move Shows", exact: true }).click();
   await modal.getByRole("textbox").fill("Moved");
   await modal.getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(modal).not.toBeVisible();
   await expect(page.locator(".current-path")).toHaveText("media:/Shows");
   await expect(page.locator("tbody tr")).toHaveCount(141);
 
-  await root.locator(".folder").filter({ hasText: /^Moved$/ }).click({ button: "right" });
-  await modal.getByRole("button", { name: "Delete folder" }).click();
+  await root.getByRole("button", { name: "Delete folder Moved", exact: true }).click();
   await removeTree(page);
   await expect(page.locator(".current-path")).toHaveText("media:/Shows");
   await expect(page.locator("tbody tr")).toHaveCount(141);
 
-  await page.locator(".folder").filter({ hasText: /^state-renamed$/ }).click({ button: "right" });
-  await modal.getByRole("button", { name: "Delete library" }).click();
+  await page.locator(".tree").getByRole("button", { name: "Delete library state-renamed", exact: true }).click();
   await removeTree(page);
   await expect(page.locator(".current-path")).toHaveText("media:/Shows");
   await expect(page.locator("tbody tr")).toHaveCount(141);
@@ -93,7 +89,6 @@ test("saving and restarting reloads namespace and clears obsolete selection and 
   await modal.getByRole("button", { name: "Confirm", exact: true }).click();
   await expect(modal).not.toBeVisible();
   await page.locator(".filename").filter({ hasText: /^source.mkv$/ }).click();
-  await page.getByRole("button", { name: "Details", exact: true }).click();
   await expect(page.locator(".detail")).toBeVisible();
   await page.getByRole("button", { name: "Service status", exact: true }).click();
   await page.getByRole("button", { name: "Run diagnostics", exact: true }).click();
@@ -106,8 +101,7 @@ test("saving and restarting reloads namespace and clears obsolete selection and 
   const other = await context.newPage();
   await open(other);
   await navigate(other, "state-restart:/Gone");
-  await other.getByRole("button", { name: "Folder actions", exact: true }).click();
-  await other.getByRole("dialog").getByRole("button", { name: "Delete folder" }).click();
+  await other.locator(".tree").getByRole("button", { name: "Delete folder Gone", exact: true }).click();
   await removeTree(other);
   await createLibrary(other, "state-after-restart");
   await other.close();

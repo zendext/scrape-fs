@@ -8,6 +8,7 @@
   --fg: light-dark(#252a30, #e6e9ed);
   --muted: light-dark(#606a76, #abb5c0);
   --line: light-dark(#dfe3e8, #383e46);
+  --hover: light-dark(#edf0f3, #2b2f34);
   --active: light-dark(#e3edf9, #2a4059);
   --accent: light-dark(#245c96, #a9d0ff);
   --alert: light-dark(#fff2de, #3e3022);
@@ -231,6 +232,14 @@ pre {
 .selected {
   background: var(--active);
 }
+.tree-row:hover,
+.list-viewport tbody tr:hover {
+  background: var(--hover);
+}
+.tree-row.selected:hover,
+.list-viewport tbody tr.selected:hover {
+  background: var(--active);
+}
 .toggle {
   width: 17px;
   flex: 0 0 17px;
@@ -251,7 +260,14 @@ pre {
   background: transparent;
   justify-content: flex-start;
 }
-.tree-manage {
+.item-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.item-action {
   width: 24px;
   height: 24px;
   flex: 0 0 24px;
@@ -259,6 +275,20 @@ pre {
   border: 0;
   background: transparent;
   color: var(--muted);
+}
+.item-action svg {
+  color: inherit;
+}
+.item-action:hover:enabled {
+  background: var(--line);
+  color: var(--fg);
+}
+.item-action.danger:hover:enabled {
+  color: var(--red);
+}
+.folder:hover:enabled,
+.filename:hover:enabled {
+  background: transparent;
 }
 .folder span,
 .filename span {
@@ -362,6 +392,28 @@ td {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.list-viewport table {
+  min-width: 660px;
+}
+.list-viewport th:first-child {
+  width: auto;
+}
+.list-viewport th:nth-child(2) {
+  width: 100px;
+}
+.list-viewport th:nth-child(3) {
+  width: 70px;
+}
+.list-viewport th:nth-child(4) {
+  width: 132px;
+}
+.list-viewport th.item-actions-cell {
+  width: 168px;
+}
+.list-viewport td.item-actions-cell {
+  padding-block: 1px;
+  overflow: visible;
 }
 .filename {
   display: flex;
@@ -608,10 +660,13 @@ dialog .actions {
     width: 28px;
     flex-basis: 28px;
   }
-  .tree-manage {
+  .item-action {
     width: 44px;
     height: 44px;
     flex-basis: 44px;
+  }
+  .list-viewport th.item-actions-cell {
+    width: 208px;
   }
 }
 @media (max-width: 900px) {
@@ -623,14 +678,5 @@ dialog .actions {
   }
   .connection {
     font-size: 0;
-  }
-  .list-viewport th:first-child {
-    width: 52%;
-  }
-  .list-viewport th:nth-child(2) {
-    width: 17%;
-  }
-  .list-viewport th:nth-child(4) {
-    width: 21%;
   }
 }

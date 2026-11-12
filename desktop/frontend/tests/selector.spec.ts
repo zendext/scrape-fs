@@ -136,11 +136,7 @@ test("profile options stay in the modal and keyboard selection does not submit i
   await expect(page.locator(".current-path")).toHaveText(
     "selector-keyboard-test:/",
   );
-  await page.locator(".folder").filter({ hasText: /^selector-keyboard-test$/ })
-    .click({ button: "right" });
-  await modal
-    .getByRole("button", { name: "Delete library", exact: true })
-    .click();
+  await page.locator(".tree").getByRole("button", { name: "Delete library selector-keyboard-test", exact: true }).click();
   await modal
     .getByRole("button", { name: "Preview deletion", exact: true })
     .click();
