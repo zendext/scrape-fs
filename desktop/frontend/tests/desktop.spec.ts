@@ -179,7 +179,7 @@ test("library and folder CRUD use confirmed removal and mapping creation uses a 
   expect(
     (await (await page.request.get("/test/observations")).json()).source,
   ).toBe("original media");
-  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  await page.getByRole("button", { name: "Manage library gui-test", exact: true }).click();
   modal = await dialog(page, "Manage library");
   await modal.getByRole("button", { name: "Delete library" }).click();
   modal = await dialog(page, "Delete library");

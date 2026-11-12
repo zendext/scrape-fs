@@ -74,7 +74,7 @@ test("a pending mutation cannot be dismissed with Escape", async ({ page }) => {
   }
   await expect(modal).not.toBeVisible();
   await expect(page.locator(".current-path")).toHaveText("modal-busy-test:/");
-  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  await page.getByRole("button", { name: "Manage library modal-busy-test", exact: true }).click();
   await modal.getByRole("button", { name: "Delete library", exact: true }).click();
   await modal.getByRole("button", { name: "Preview deletion", exact: true }).click();
   await modal.getByRole("button", { name: "Confirm deletion", exact: true }).click();

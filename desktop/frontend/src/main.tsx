@@ -665,7 +665,7 @@ function App() {
           style={{ "padding-left": `${7 + props.depth * 14}px` }}
           onContextMenu={(event) => {
             event.preventDefault();
-            if (admin())
+            if (admin() && !busy() && (cache()[id()]?.id ?? props.id))
               showDialog({
                 kind: props.path ? "folderActions" : "editLibrary",
                 library: props.library,
@@ -689,6 +689,34 @@ function App() {
           >
             <Icon kind="directory" />
             <span>{props.name}</span>
+          </button>
+          <button
+            type="button"
+            class="tree-manage"
+            title={`${t(props.path ? "folderActions" : "editLibrary")} ${props.name}`}
+            aria-label={`${t(props.path ? "folderActions" : "editLibrary")} ${props.name}`}
+            disabled={!admin() || busy() || !(cache()[id()]?.id ?? props.id)}
+            onClick={(event) => {
+              event.stopPropagation();
+              showDialog({
+                kind: props.path ? "folderActions" : "editLibrary",
+                library: props.library,
+                path: props.path,
+                id: cache()[id()]?.id ?? props.id,
+              });
+            }}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              aria-hidden="true"
+            >
+              <circle cx="5" cy="12" r="1.5" />
+              <circle cx="12" cy="12" r="1.5" />
+              <circle cx="19" cy="12" r="1.5" />
+            </svg>
           </button>
         </div>
         <Show when={isExpanded()}>
@@ -813,12 +841,6 @@ function App() {
                   }}
                 >
                   {t("new")}
-                </button>
-                <button
-                  disabled={!admin() || !library() || busy()}
-                  onClick={() => showDialog(context("editLibrary"))}
-                >
-                  {t("manage")}
                 </button>
               </div>
             </div>

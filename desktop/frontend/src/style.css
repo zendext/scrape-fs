@@ -251,6 +251,15 @@ pre {
   background: transparent;
   justify-content: flex-start;
 }
+.tree-manage {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  padding: 3px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
 .folder span,
 .filename span {
   white-space: nowrap;
@@ -598,6 +607,11 @@ dialog .actions {
   .toggle {
     width: 28px;
     flex-basis: 28px;
+  }
+  .tree-manage {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
   }
 }
 @media (max-width: 900px) {

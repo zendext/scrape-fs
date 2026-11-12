@@ -68,6 +68,9 @@ and Escape restores the current address. There are no breadcrumbs, Up button,
 sidebar toggle, or pages. Open folder opens the current virtual folder in the
 system file manager. Files open in the default application. Tree nodes offer
 context actions, and arrow keys can resize the tree.
+Each library and folder row has a management icon with a name-specific label.
+It acts on that node without changing the current browser location. The action
+is disabled without administrator permission or while an operation is running.
 
 Libraries support creation, viewing, renaming, Profile changes, and deletion.
 Changing a Profile retains the existing semantics and does not rename files.
