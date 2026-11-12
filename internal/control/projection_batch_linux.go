@@ -791,6 +791,10 @@ func classifyError(err error) string {
 		return "BatchNotFound"
 	case errors.Is(err, projectionbatch.ErrAlreadyUndone):
 		return "AlreadyUndone"
+	case errors.Is(err, namespace.ErrNotFound):
+		return "NotFound"
+	case errors.Is(err, namespace.ErrNotDirectory):
+		return "NotDirectory"
 	default:
 		return "Internal"
 	}

@@ -106,3 +106,15 @@ func failureCode(err error) string {
 	}
 	return ""
 }
+
+func TestDirectoryManagementLookupErrorCodesAreStable(t *testing.T) {
+	t.Parallel()
+	for err, want := range map[error]string{
+		namespace.ErrNotFound:     "NotFound",
+		namespace.ErrNotDirectory: "NotDirectory",
+	} {
+		if got := classifyError(err); got != want {
+			t.Errorf("classifyError(%v) = %q, want %q", err, got, want)
+		}
+	}
+}

@@ -260,6 +260,7 @@ const strings = {
     "目录或文件已不存在，请刷新。",
     "The folder or file no longer exists. Refresh the view.",
   ],
+  NotDirectory: ["目标路径不是目录。", "The target path is not a folder."],
   LibraryNotFound: [
     "媒体库已不存在，请刷新。",
     "The library no longer exists. Refresh the view.",

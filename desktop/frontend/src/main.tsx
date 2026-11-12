@@ -89,7 +89,7 @@ function App() {
   const [cache, setCache] = createSignal<Record<string, Listing>>({});
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
   const [treeErrors, setTreeErrors] = createSignal<Record<string, Failure>>({});
-  const pendingTrees = new Set<string>();
+  const pendingTrees = new Map<string, number>();
   const [selection, setSelection] = createSignal<Entry>();
   const [details, setDetails] = createSignal(false);
   const [width, setWidth] = createSignal(260);
@@ -120,6 +120,7 @@ function App() {
   let viewport!: HTMLDivElement;
   let modal!: HTMLDialogElement;
   let navigation = 0;
+  let treeGeneration = 0;
   let languageChosen = false;
   let preferenceSave = Promise.resolve();
   const ready = () => !!state()?.daemon?.daemon.ready;
@@ -177,21 +178,24 @@ function App() {
   }
   async function readTree(name: string, directory: string) {
     const id = key(name, directory);
-    if (pendingTrees.has(id)) return;
-    pendingTrees.add(id);
+    const generation = treeGeneration;
+    if (pendingTrees.get(id) === generation) return;
+    pendingTrees.set(id, generation);
     try {
       const result = await request<Listing>("browse", {
         library: name,
         path: directory,
       });
-      setCache((value) => ({ ...value, [id]: result }));
+      if (generation === treeGeneration)
+        setCache((value) => ({ ...value, [id]: result }));
     } catch (err) {
-      setTreeErrors((value) => ({ ...value, [id]: failureOf(err) }));
+      if (generation === treeGeneration)
+        setTreeErrors((value) => ({ ...value, [id]: failureOf(err) }));
     } finally {
-      pendingTrees.delete(id);
+      if (pendingTrees.get(id) === generation) pendingTrees.delete(id);
     }
   }
-  async function navigate(name: string, directory: string) {
+  async function navigate(name: string, directory: string, fallbackToRoot = false): Promise<boolean> {
     const serial = ++navigation;
     setLoading(true);
     setError(undefined);
@@ -201,7 +205,7 @@ function App() {
         library: name,
         path: directory,
       });
-      if (serial !== navigation) return;
+      if (serial !== navigation) return false;
       setLibrary(name);
       setPath(directory);
       setListing(result);
@@ -221,36 +225,61 @@ function App() {
           new Set([...value, ...ancestors.map((item) => key(name, item))]),
       );
       viewport?.scrollTo(0, 0);
+      return true;
     } catch (err) {
       if (serial === navigation) {
-        setError(failureOf(err));
+        const failure = failureOf(err);
+        if (fallbackToRoot && directory && ["NotFound", "NotDirectory"].includes(failure.code))
+          return await navigate(name, "");
+        setError(failure);
         setListing(undefined);
       }
+      return false;
     } finally {
       if (serial === navigation) setLoading(false);
     }
   }
-  async function refresh() {
-    setError(undefined);
+  function clearLibraryView() {
+    navigation++;
+    treeGeneration++;
+    pendingTrees.clear();
+    setLoading(false);
+    setListing(undefined);
+    setSelection(undefined);
+    setDetails(false);
     setTreeErrors({});
     setCache({});
-    const next = await updateState();
-    if (!next?.daemon?.daemon.ready) {
-      setListing(undefined);
-      return;
-    }
+    setDoctor(undefined);
+    setCheckedAt(undefined);
+  }
+  async function refresh(name = library(), directory = path(), fallbackToRoot = false) {
+    setError(undefined);
+    clearLibraryView();
+    setLoading(true);
     try {
+      const next = await updateState();
+      if (!next?.daemon?.daemon.ready) {
+        setLibraries([]);
+        return true;
+      }
       const active = await loadLibraries();
-      const name = active.some((item) => item.name === library())
-        ? library()
+      const nextLibrary = active.some((item) => item.name === name)
+        ? name
         : active[0]?.name;
-      if (name) await navigate(name, name === library() ? path() : "");
+      if (nextLibrary)
+        return await navigate(nextLibrary, nextLibrary === name ? directory : "", fallbackToRoot);
       else {
         setLibrary("");
-        setListing(undefined);
+        setPath("");
+        setAddress("");
       }
+      return true;
     } catch (err) {
+      setLibraries([]);
       setError(failureOf(err));
+      return false;
+    } finally {
+      setLoading(false);
     }
   }
   async function submitAddress(event: SubmitEvent) {
@@ -345,7 +374,7 @@ function App() {
           break;
         case "rename":
           await request("rename_library", { ...args, name: formName() });
-          nextLibrary = formName();
+          if (operation.library === library()) nextLibrary = formName();
           break;
         case "changeProfile":
           await request("profile_library", { ...args, profile: profile() });
@@ -356,8 +385,9 @@ function App() {
         case "move":
           await request("move_directory", { ...args, target: target() });
           if (
-            path() === operation.path ||
-            path().startsWith(`${operation.path}/`)
+            operation.library === library() &&
+            (path() === operation.path ||
+              path().startsWith(`${operation.path}/`))
           )
             nextPath = target() + path().slice(operation.path!.length);
           break;
@@ -365,12 +395,13 @@ function App() {
         case "removeLibrary":
           if (!removal()) return;
           await request("remove_tree", { ...args, digest: removal()!.digest });
-          if (operation.kind === "removeLibrary") {
+          if (operation.kind === "removeLibrary" && operation.library === library()) {
             nextLibrary = "";
             nextPath = "";
           } else if (
-            path() === operation.path ||
-            path().startsWith(`${operation.path}/`)
+            operation.library === library() &&
+            (path() === operation.path ||
+              path().startsWith(`${operation.path}/`))
           )
             nextPath = parent(operation.path!);
           break;
@@ -411,23 +442,8 @@ function App() {
           return;
       }
       setDialog(undefined);
-      setCache({});
-      setTreeErrors({});
-      setDoctor(undefined);
-      setCheckedAt(undefined);
-      await updateState();
-      if (ready()) {
-        const active = await loadLibraries();
-        nextLibrary = active.some((item) => item.name === nextLibrary)
-          ? nextLibrary
-          : (active[0]?.name ?? "");
-        if (nextLibrary) await navigate(nextLibrary, nextPath);
-        else {
-          setLibrary("");
-          setListing(undefined);
-        }
-      } else setListing(undefined);
-      setNotice("success");
+      if (await refresh(nextLibrary, nextPath, operation.kind === "restart"))
+        setNotice("success");
     } catch (err) {
       const failure = failureOf(err);
       setDialogError(failure);
@@ -510,11 +526,24 @@ function App() {
       });
       setConfig(result.document);
       setState(result.state);
+      if (restart) {
+        if (result.restart_error) {
+          clearLibraryView();
+          setLibraries([]);
+          setError(result.restart_error);
+        } else await refresh(library(), path(), true);
+      }
       setNotice(result.restart_error ? "restartFailed" : "saved");
       if (result.restart_error) setConfigError(result.restart_error);
     } catch (err) {
       setConfigError(failureOf(err));
       setConfigPreview(undefined);
+      if (restart) {
+        clearLibraryView();
+        setLibraries([]);
+        setError(failureOf(err));
+        await updateState();
+      }
     } finally {
       setBusy(false);
     }
@@ -535,7 +564,7 @@ function App() {
     setBusy(true);
     try {
       setState(await request<State>("service", { action: "start" }));
-      await refresh();
+      await refresh(library(), path(), true);
     } catch (err) {
       setError(failureOf(err));
       await updateState();
