@@ -16,8 +16,22 @@ automatically upgrade the daemon or expose external Agent batch operations.
 
 ## Build and Installation
 
-Install the daemon using the [deployment guide](deployment.md). Desktop components
-are built separately and are not included in the daemon release archive. Building
+Install the daemon using the [deployment guide](deployment.md).
+[GitHub Releases](https://github.com/zendext/scrape-fs/releases) provides a core
+archive and an optional desktop archive. Install the core package first, then
+the desktop package:
+
+```bash
+version=v0.3.0
+archive="scrape-fs-desktop_${version}_linux_amd64.tar.gz"
+sha256sum --ignore-missing -c SHA256SUMS
+tar -xzf "$archive"
+sudo "./${archive%.tar.gz}/scripts/install-desktop.sh"
+scrapefs-gui
+```
+
+The prebuilt v0.3.0 desktop package requires glibc 2.38+, GTK4, and WebKitGTK 6.0.
+Desktop components can also be built separately from source. Building
 requires Go 1.26+, Node.js 22.12+, npm, a C compiler, pkg-config, and GTK4 / WebKitGTK
 6.0 development files. Running requires the corresponding shared libraries,
 systemd, Polkit's `pkexec`, and an authorization agent in the desktop session.

@@ -2,11 +2,22 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+## ai;dr
+
+Torrent clients need the original download paths for seeding; Jellyfin and Plex
+expect organized media-library paths. ScrapeFS gives the same files both views:
+keep seeding in place and expose a player-friendly virtual library, without
+moving, renaming, or copying the source media.
+
 > This project was written by AI. Use it at your own risk.
 
-ScrapeFS is an external-agent-assisted media organization and virtual directory filesystem for Linux.
+## Desktop GUI
 
-It projects media files from one or more local filesystems into player-friendly libraries without moving, renaming, or modifying the source files.
+The optional Linux desktop app manages local libraries, mappings, service status,
+and configuration. Install the desktop archive alongside the core package; see
+[desktop setup](docs/en/desktop.md) for dependencies and instructions.
+
+![ScrapeFS desktop browsing an example movie library](docs/assets/desktop-en.png)
 
 ## Typical Use Cases
 
@@ -27,10 +38,10 @@ The preferred path is to download the `linux/amd64` archive and `SHA256SUMS`
 from [GitHub Releases](https://github.com/zendext/scrape-fs/releases):
 
 ```bash
-version=vX.Y.Z
+version=v0.3.0
 archive="scrape-fs_${version}_linux_amd64.tar.gz"
 
-sha256sum -c SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
 tar -xzf "$archive"
 cd "${archive%.tar.gz}"
 sudo ./install.sh --administrator "$USER"
@@ -53,8 +64,6 @@ scrapefs library list
 Manual source builds remain supported. See the
 [deployment guide](docs/en/deployment.md) for the complete installer behavior,
 source-build procedure, paths, permissions, and update workflow.
-
-The optional [desktop manager](docs/en/desktop.md) provides a compact folder browser, library and mapping management, service controls, configuration previews, and Chinese/English switching. Build it separately with `./scripts/build-desktop.sh`; it manages an already installed local daemon.
 
 ## Core Model
 

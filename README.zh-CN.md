@@ -2,11 +2,20 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+## ai;dr
+
+做种需要保留下载时的目录和文件名，Jellyfin、Plex 又需要规范的媒体库结构。
+ScrapeFS 为同一份媒体提供两套目录视图：源文件继续原地做种，媒体软件读取整理后的
+虚拟媒体库，无需移动、改名或复制源文件。
+
 > 本项目由 AI 编写，使用本项目所产生的风险由使用者自行承担。
 
-ScrapeFS 是一个面向 Linux 的外部 Agent 辅助媒体整理与虚拟目录文件系统。
+## 桌面 GUI
 
-它将一个或多个本地文件系统中的媒体文件投影为适合播放器识别的媒体库，同时不移动、不重命名、不修改源文件。
+可选的 Linux 桌面应用用于管理本机媒体库、映射、服务状态和配置。
+在核心包之外安装桌面包即可使用，依赖和安装方法见[桌面管理器](docs/zh-CN/desktop.md)。
+
+![ScrapeFS 桌面管理器浏览示例电影库](docs/assets/desktop-zh-CN.png)
 
 ## 典型场景
 
@@ -26,10 +35,10 @@ ScrapeFS 要求 Linux、systemd、`/dev/fuse`、util-linux 提供的 `findmnt`�
 `linux/amd64` 归档和 `SHA256SUMS`：
 
 ```bash
-version=vX.Y.Z
+version=v0.3.0
 archive="scrape-fs_${version}_linux_amd64.tar.gz"
 
-sha256sum -c SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
 tar -xzf "$archive"
 cd "${archive%.tar.gz}"
 sudo ./install.sh --administrator "$USER"
@@ -50,8 +59,6 @@ scrapefs library list
 
 也可以从源码手动构建。完整的安装脚本行为、源码构建、路径、权限和升级步骤见
 [部署指南](docs/zh-CN/deployment.md)。
-
-可选的[桌面管理器](docs/zh-CN/desktop.md)提供紧凑目录浏览、库和映射管理、服务启停、配置预览及中英文切换。通过 `./scripts/build-desktop.sh` 独立构建，用于管理已安装的本机后台。
 
 ## 核心模型
 

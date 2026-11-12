@@ -37,7 +37,7 @@ service:      /etc/systemd/system/scrapefsd.service
 version=vX.Y.Z
 archive="scrape-fs_${version}_linux_amd64.tar.gz"
 
-sha256sum -c SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
 tar -xzf "$archive"
 cd "${archive%.tar.gz}"
 

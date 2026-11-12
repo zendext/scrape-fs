@@ -13,7 +13,20 @@ ScrapeFS GUI 使用 Wails 3 和 SolidJS，管理同一台 Linux 电脑上已经�
 
 ## 构建与安装
 
-后台安装见[部署指南](deployment.md)。桌面组件独立构建，后台归档不包含 GUI。
+后台安装见[部署指南](deployment.md)。[GitHub Releases](https://github.com/zendext/scrape-fs/releases)
+分别提供核心包和可选桌面包，核心包不包含 GUI。先安装核心包，再安装桌面包：
+
+```bash
+version=v0.3.0
+archive="scrape-fs-desktop_${version}_linux_amd64.tar.gz"
+sha256sum --ignore-missing -c SHA256SUMS
+tar -xzf "$archive"
+sudo "./${archive%.tar.gz}/scripts/install-desktop.sh"
+scrapefs-gui
+```
+
+预编译的 v0.3.0 桌面包需要 glibc 2.38+、GTK4 和 WebKitGTK 6.0。
+也可以独立从源码构建桌面组件。
 构建需要 Go 1.26+、Node.js 22.12+、npm、C 编译器、pkg-config，以及 GTK4、
 WebKitGTK 6.0 的开发文件。运行需要对应的动态库、systemd、Polkit 的 `pkexec`
 和桌面会话中的授权代理；打开文件使用系统默认应用。
