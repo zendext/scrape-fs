@@ -147,17 +147,10 @@ pre {
 .connection .online {
   background: #52a477;
 }
-.language,
-.dialog-language {
-  appearance: none;
+.language {
   width: 90px;
   height: 30px;
   flex-shrink: 0;
-  padding: 0 25px 0 8px;
-  line-height: 28px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m3 4 3 3 3-3' fill='none' stroke='%23818a94' stroke-width='1.4'/%3E%3C/svg%3E");
-  background-position: right 8px center;
-  background-repeat: no-repeat;
 }
 .library-page {
   display: flex;
@@ -573,18 +566,14 @@ dialog {
 dialog::backdrop {
   background: #0005;
 }
-dialog label {
+dialog label,
+.selector-field {
   display: grid;
   gap: 5px;
   margin: 13px 0;
 }
 dialog .actions {
   margin-top: 15px;
-}
-.dialog-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 .dialog-path {
   overflow-wrap: anywhere;

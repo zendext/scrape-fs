@@ -1,8 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
+import { chooseLanguage } from "./helpers";
 
 async function english(page: Page) {
   await page.goto("/");
-  await page.locator(".language").selectOption("en");
+  await chooseLanguage(page, "en");
   await expect(page.getByRole("button", { name: "New", exact: true })).toBeEnabled();
 }
 
@@ -18,7 +19,7 @@ test("the approved dark palette is the default even on a light desktop", async (
   await page.screenshot({ path: test.info().outputPath("dark-modal.png") });
 });
 
-test("management dialogs block the background, retain drafts across locale changes, and restore focus", async ({ page }) => {
+test("management dialogs block the background, keep language controls in the main window, and restore focus", async ({ page }) => {
   await english(page);
   const trigger = page.getByRole("button", { name: "New", exact: true });
   await trigger.click();
@@ -39,10 +40,9 @@ test("management dialogs block the background, retain drafts across locale chang
   await page.mouse.click(background!.x + background!.width / 2, background!.y + background!.height / 2);
   await expect(page.locator(".library-page")).toBeVisible();
   await expect(modal).toBeVisible();
-  await modal.locator(".dialog-language").selectOption("zh");
-  await expect(modal.getByRole("heading", { name: "新建媒体库" })).toBeVisible();
-  await expect(modal.getByRole("textbox", { name: "新的名称" })).toHaveValue("retained modal draft");
-  await modal.locator(".dialog-language").selectOption("en");
+  await expect(modal.getByRole("combobox", { name: "Interface language" })).toHaveCount(0);
+  await expect(page.locator(".language")).toHaveCount(1);
+  await expect(name).toHaveValue("retained modal draft");
   await page.keyboard.press("Escape");
   await expect(modal).not.toBeVisible();
   await expect(trigger).toBeFocused();

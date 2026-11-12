@@ -58,8 +58,10 @@ theme.
 Creation, management, and confirmation use modal dialogs in the same window.
 Background controls are unavailable until the dialog closes, then focus
 returns to the initiating control. Dialogs cannot close while an operation runs.
-A language selector at the dialog's top right preserves inputs and confirmation
-previews when switching languages.
+Language switching is available only at the top of the main window. Language
+and naming rules use the same dark selector, with arrow keys, Home/End, typeahead,
+Enter/Space to confirm, Escape to cancel, and Tab to leave. Selected options and
+the current keyboard option have distinct indicators.
 
 The address bar accepts `library:/relative/path`. Ctrl+L selects it, Enter navigates,
 and Escape restores the current address. There are no breadcrumbs, Up button,

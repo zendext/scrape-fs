@@ -22,6 +22,7 @@ import {
   type Doctor,
 } from "./api";
 import { translate, findingText, type Language } from "./i18n";
+import { Selector } from "./Selector";
 import "./style.css";
 
 type Dialog = {
@@ -735,17 +736,16 @@ function App() {
           <i classList={{ online: ready() }} />
           {t(ready() ? "ready" : "unavailable")}
         </span>
-        <select
+        <Selector
           class="language"
-          aria-label={t("language")}
+          label={t("language")}
           value={language()}
-          onChange={(event) =>
-            void changeLanguage(event.currentTarget.value as Language)
-          }
-        >
-          <option value="zh">中文</option>
-          <option value="en">English</option>
-        </select>
+          onChange={(value) => void changeLanguage(value as Language)}
+          options={[
+            { value: "zh", label: "中文" },
+            { value: "en", label: "English" },
+          ]}
+        />
       </header>
       <Show when={error()}>
         <div class="message error" role="alert">
@@ -1486,28 +1486,15 @@ function App() {
                       : operation().kind,
                   )}
                 </h2>
-                <div class="dialog-controls">
-                  <select
-                    class="dialog-language"
-                    aria-label={t("language")}
-                    value={language()}
-                    onChange={(event) =>
-                      void changeLanguage(event.currentTarget.value as Language)
-                    }
-                  >
-                    <option value="zh">中文</option>
-                    <option value="en">English</option>
-                  </select>
-                  <button
-                    type="button"
-                    class="dismiss"
-                    disabled={busy()}
-                    aria-label={t("close")}
-                    onClick={() => setDialog(undefined)}
-                  >
-                    ×
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  class="dismiss"
+                  disabled={busy()}
+                  aria-label={t("close")}
+                  onClick={() => setDialog(undefined)}
+                >
+                  ×
+                </button>
               </div>
               <Show when={operation().library}>
                 <p class="dialog-path">
@@ -1598,16 +1585,20 @@ function App() {
                   operation().kind,
                 )}
               >
-                <label>
-                  {t("profile")}
-                  <select
+                <div class="selector-field">
+                  <span>{t("profile")}</span>
+                  <Selector
+                    id="naming-profile"
+                    label={t("profile")}
                     value={profile()}
-                    onChange={(event) => setProfile(event.currentTarget.value)}
-                  >
-                    <option value="jellyfin@1">jellyfin@1</option>
-                    <option value="plex@1">plex@1</option>
-                  </select>
-                </label>
+                    onChange={setProfile}
+                    disabled={busy()}
+                    options={[
+                      { value: "jellyfin@1", label: "jellyfin@1" },
+                      { value: "plex@1", label: "plex@1" },
+                    ]}
+                  />
+                </div>
               </Show>
               <Show
                 when={["move", "moveMapping", "addMapping"].includes(

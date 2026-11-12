@@ -1,10 +1,11 @@
 import { test, expect, type Page } from "@playwright/test";
+import { chooseLanguage } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 
 async function open(page: Page) {
   await page.goto("/");
-  await page.locator(".language").selectOption("en");
+  await chooseLanguage(page, "en");
   await expect(page.getByRole("button", { name: "New", exact: true })).toBeEnabled();
 }
 

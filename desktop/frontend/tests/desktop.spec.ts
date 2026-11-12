@@ -1,9 +1,10 @@
 import { test, expect, type Page } from "@playwright/test";
+import { chooseLanguage } from "./helpers";
 
 test.describe.configure({ mode: "serial" });
 async function english(page: Page) {
   await page.goto("/");
-  await page.locator(".language").selectOption("en");
+  await chooseLanguage(page, "en");
   await expect(
     page.getByRole("button", { name: "Libraries", exact: true }),
   ).toBeVisible();
@@ -52,7 +53,7 @@ test("real bindings browse all files, align controls, preserve scrolling and loc
       page.locator(".list-viewport").evaluate((element) => element.scrollTop),
     )
     .toBe(650);
-  await page.locator(".language").selectOption("zh");
+  await chooseLanguage(page, "zh");
   await expect(
     page.getByRole("button", { name: "打开文件夹", exact: true }),
   ).toBeVisible();
@@ -64,9 +65,9 @@ test("real bindings browse all files, align controls, preserve scrolling and loc
   await expect(page.getByRole("textbox", { name: "当前目录地址" })).toHaveValue(
     "media:/Shows",
   );
-  await page.locator(".language").selectOption("en");
+  await chooseLanguage(page, "en");
   await page.reload();
-  await expect(page.locator(".language")).toHaveValue("en");
+  await expect(page.locator(".language").getByRole("combobox")).toHaveText("English");
   await page
     .locator(".folder")
     .filter({ hasText: /^Shows$/ })
@@ -145,8 +146,7 @@ test("library and folder CRUD use confirmed removal and mapping creation uses a 
   ).toHaveCount(0);
   await modal.getByRole("button", { name: "Preview deletion" }).click();
   await expect(modal.locator("dd")).toHaveText(["0", "1", "0"]);
-  await modal.locator(".dialog-language").selectOption("zh");
-  await expect(modal.getByRole("button", { name: "确认删除" })).toBeVisible();
+  await expect(modal.getByRole("button", { name: "Confirm deletion" })).toBeVisible();
   const concurrent = await page.context().newPage();
   await english(concurrent);
   await concurrent
@@ -166,12 +166,12 @@ test("library and folder CRUD use confirmed removal and mapping creation uses a 
     .click();
   await expect(otherDialog).not.toBeVisible();
   await concurrent.close();
-  await modal.getByRole("button", { name: "确认删除" }).click();
-  await expect(modal.getByRole("alert")).toContainText("内容已经变化");
-  await modal.getByRole("button", { name: "预览删除范围" }).click();
+  await modal.getByRole("button", { name: "Confirm deletion" }).click();
+  await expect(modal.getByRole("alert")).toContainText("The contents have changed");
+  await modal.getByRole("button", { name: "Preview deletion" }).click();
   await expect(modal.locator("dd")).toHaveText(["1", "1", "0"]);
-  await modal.getByRole("button", { name: "确认删除" }).click();
-  await page.locator(".language").selectOption("en");
+  await modal.getByRole("button", { name: "Confirm deletion" }).click();
+  await chooseLanguage(page, "en");
   await expect(
     page.getByRole("textbox", { name: "Current folder address" }),
   ).toHaveValue("gui-test:/");
@@ -201,11 +201,11 @@ test("saved and running configurations stay distinct until a verified restart", 
   await page
     .getByRole("textbox", { name: "Attribute cache timeout", exact: true })
     .fill("3s");
-  await page.locator(".language").selectOption("zh");
+  await chooseLanguage(page, "zh");
   await expect(
     page.getByRole("textbox", { name: "属性缓存时间", exact: true }),
   ).toHaveValue("3s");
-  await page.locator(".language").selectOption("en");
+  await chooseLanguage(page, "en");
   await page
     .getByRole("button", { name: "Preview changes", exact: true })
     .click();
