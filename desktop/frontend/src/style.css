@@ -147,7 +147,8 @@ pre {
 .connection .online {
   background: #52a477;
 }
-.language {
+.language,
+.dialog-language {
   appearance: none;
   width: 90px;
   height: 30px;
@@ -553,9 +554,8 @@ footer {
 }
 dialog {
   position: fixed;
-  top: 90px;
-  z-index: 5;
-  margin: 0 auto;
+  inset: 0;
+  margin: auto;
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--line);
@@ -576,6 +576,11 @@ dialog label {
 }
 dialog .actions {
   margin-top: 15px;
+}
+.dialog-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .dialog-path {
   overflow-wrap: anywhere;

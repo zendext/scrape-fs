@@ -145,7 +145,7 @@ test("library and folder CRUD use confirmed removal and mapping creation uses a 
   ).toHaveCount(0);
   await modal.getByRole("button", { name: "Preview deletion" }).click();
   await expect(modal.locator("dd")).toHaveText(["0", "1", "0"]);
-  await page.locator(".language").selectOption("zh");
+  await modal.locator(".dialog-language").selectOption("zh");
   await expect(modal.getByRole("button", { name: "确认删除" })).toBeVisible();
   const concurrent = await page.context().newPage();
   await english(concurrent);

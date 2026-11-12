@@ -52,6 +52,11 @@ Files open through the running FUSE mount.
 A persistent, resizable folder tree sits beside a complete file list. The list
 scrolls continuously with a sticky header. Long names have ellipsis and full
 tooltips. Details expand below the list on demand.
+Creation, management, and confirmation use modal dialogs in the same window.
+Background controls are unavailable until the dialog closes, then focus
+returns to the initiating control. Dialogs cannot close while an operation runs.
+A language selector at the dialog's top right preserves inputs and confirmation
+previews when switching languages.
 
 The address bar accepts `library:/relative/path`. Ctrl+L selects it, Enter navigates,
 and Escape restores the current address. There are no breadcrumbs, Up button,

@@ -321,7 +321,7 @@ function App() {
   }
   createEffect(() => {
     if (dialog()) {
-      if (!modal.open) modal.show();
+      if (!modal.open) modal.showModal();
     } else if (modal.open) modal.close();
   });
   function context(kind: string, entry?: Entry): Dialog {
@@ -1462,6 +1462,7 @@ function App() {
       <dialog
         ref={modal}
         aria-labelledby="dialog-title"
+        aria-modal="true"
         onKeyDown={(event) => {
           if (event.key === "Escape" && !busy()) {
             event.preventDefault();
@@ -1485,15 +1486,28 @@ function App() {
                       : operation().kind,
                   )}
                 </h2>
-                <button
-                  type="button"
-                  class="dismiss"
-                  disabled={busy()}
-                  aria-label={t("close")}
-                  onClick={() => setDialog(undefined)}
-                >
-                  ×
-                </button>
+                <div class="dialog-controls">
+                  <select
+                    class="dialog-language"
+                    aria-label={t("language")}
+                    value={language()}
+                    onChange={(event) =>
+                      void changeLanguage(event.currentTarget.value as Language)
+                    }
+                  >
+                    <option value="zh">中文</option>
+                    <option value="en">English</option>
+                  </select>
+                  <button
+                    type="button"
+                    class="dismiss"
+                    disabled={busy()}
+                    aria-label={t("close")}
+                    onClick={() => setDialog(undefined)}
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
               <Show when={operation().library}>
                 <p class="dialog-path">
