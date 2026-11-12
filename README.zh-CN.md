@@ -51,6 +51,8 @@ scrapefs library list
 也可以从源码手动构建。完整的安装脚本行为、源码构建、路径、权限和升级步骤见
 [部署指南](docs/zh-CN/deployment.md)。
 
+可选的[桌面管理器](docs/zh-CN/desktop.md)提供紧凑目录浏览、库和映射管理、服务启停、配置预览及中英文切换。通过 `./scripts/build-desktop.sh` 独立构建，用于管理已安装的本机后台。
+
 ## 核心模型
 
 - **Library**：通过 FUSE 挂载点提供的虚拟媒体库，例如 `jellyfin` 或 `plex`。

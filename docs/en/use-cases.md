@@ -35,6 +35,7 @@ This document describes the main first-version workflows from an actor-goal pers
 | UC-13 | Recover after daemon restart |
 | UC-14 | Diagnose problems with doctor |
 | UC-15 | Explicitly migrate legacy Projection source identities |
+| UC-16 | Manage libraries from the local desktop |
 
 ## UC-01 Create a Library
 
@@ -721,3 +722,7 @@ FUSE open and doctor verify successful candidates with filesystem type, complete
 - [Projection model](projection.md)
 - [Architecture](architecture.md)
 - [Operations and CLI](operations.md)
+
+## UC-16 Manage Libraries from the Local Desktop
+
+Administrators and control users browse existing libraries, folders, and mappings and inspect runtime/diagnostic results. Administrators can preview and confirm nonempty folder deletion while retaining source files. System configuration saves and service controls use Linux authorization. See [Desktop Manager](desktop.md) for interactions and role boundaries.

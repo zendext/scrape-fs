@@ -35,6 +35,8 @@ scrapefsd
 
 `scrapefsd` is the sole authoritative process.
 
+The optional Wails/SolidJS desktop manager is another local Unix-socket control client. It never opens SQLite or the object store. A separate root-owned helper handles fixed systemd operations and system configuration saves through Polkit; it does not handle namespace mutations. Desktop boundaries and build isolation are defined in [Desktop Manager](desktop.md).
+
 Only the daemon may:
 
 - open and write SQLite;

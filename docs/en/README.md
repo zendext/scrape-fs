@@ -11,5 +11,6 @@
 5. [Filesystem and object storage](filesystem.md)
 6. [Deployment guide](deployment.md)
 7. [Operations and CLI](operations.md)
+8. [Desktop manager](desktop.md)
 
 See the [root README](../../README.md) for the project overview and quick examples.

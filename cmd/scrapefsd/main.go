@@ -290,6 +290,7 @@ func serveRuntimeWithDependencies(
 		store,
 		runtimeState,
 		buildinfo.Version,
+		config.Digest(configuration),
 	)
 	server, err := dependencies.startControl(
 		configuration.Control.SocketPath,

@@ -85,9 +85,14 @@ func requiredCommandRole(command string) commandRole {
 	case command == "status",
 		command == "doctor",
 		command == "library.list",
+		command == "directory.list",
+		command == "tree.preview",
 		strings.HasPrefix(command, "projection."):
 		return commandRoleControl
 	case command == "gc",
+		command == "directory.create",
+		command == "directory.move",
+		command == "tree.remove",
 		strings.HasPrefix(command, "library."),
 		strings.HasPrefix(command, "daemon."):
 		return commandRoleAdministrator

@@ -33,6 +33,7 @@
 | UC-13 | daemon 重启恢复 |
 | UC-14 | 使用 doctor 检查异常 |
 | UC-15 | 显式迁移 legacy Projection source identity |
+| UC-16 | 使用本机桌面管理器 |
 
 ## UC-01 创建 Library
 
@@ -721,3 +722,7 @@ scrapefs projection identity migrate --library jellyfin
 - [Projection 模型](projection.md)
 - [系统架构](architecture.md)
 - [运行与 CLI](operations.md)
+
+## UC-16 使用本机桌面管理器
+
+管理员和控制用户通过紧凑目录浏览管理现有媒体库、目录和映射，并查看服务和检查结果。管理员可预览后删除非空目录；源文件保留。系统配置保存和服务启停通过 Linux 授权完成。完整交互和角色边界见[桌面管理器](desktop.md)。

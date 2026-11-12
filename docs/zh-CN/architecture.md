@@ -33,6 +33,8 @@ scrapefsd
 
 `scrapefsd` 是唯一权威进程。
 
+可选的 Wails/SolidJS 桌面管理器同样通过本机 Unix socket 调用后台，不直接打开 SQLite 或对象存储。独立的 root 所有助手通过 Polkit 执行固定的 systemd 操作与系统配置保存，不执行命名空间修改。桌面边界和构建隔离见[桌面管理器](desktop.md)。
+
 只有 daemon 可以：
 
 - 打开和写入 SQLite；

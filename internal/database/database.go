@@ -32,6 +32,7 @@ type Options struct {
 type DB struct {
 	pool           *sql.DB
 	conn           *sql.Conn
+	path           string
 	directory      *os.File
 	lock           *os.File
 	connectionGate chan struct{}
@@ -380,12 +381,17 @@ func openWithPrepareHook(
 	return &DB{
 		pool:           pool,
 		conn:           conn,
+		path:           databasePath,
 		directory:      prepared.directory,
 		lock:           lock,
 		connectionGate: connectionGate,
 		writeGate:      writeGate,
 		writesOpen:     true,
 	}, nil
+}
+
+func (database *DB) Path() string {
+	return database.path
 }
 
 func (database *DB) UseConnection(

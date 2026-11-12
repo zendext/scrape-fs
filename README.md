@@ -54,6 +54,8 @@ Manual source builds remain supported. See the
 [deployment guide](docs/en/deployment.md) for the complete installer behavior,
 source-build procedure, paths, permissions, and update workflow.
 
+The optional [desktop manager](docs/en/desktop.md) provides a compact folder browser, library and mapping management, service controls, configuration previews, and Chinese/English switching. Build it separately with `./scripts/build-desktop.sh`; it manages an already installed local daemon.
+
 ## Core Model
 
 - **Library**: a virtual media library exposed under the FUSE mount, such as `jellyfin` or `plex`.
