@@ -37,6 +37,17 @@ sudo ./scripts/install-desktop.sh
 scrapefs-gui
 ```
 
+版本化 tag 的 Release 工作流在 Ubuntu 24.04 上自动构建核心包和桌面包，全部构建成功后
+才发布两个归档及合并的 `SHA256SUMS`。桌面归档只包含 GUI、内部助手、安装器、应用菜单项
+和许可证；前端资源嵌入 GUI，不单独分发，也不包含测试程序。预发布版本沿用核心包的
+prerelease／Latest 规则。
+
+安装上述构建依赖后，也可以在 Linux amd64 主机一次生成全部发布文件；输出目录必须为空：
+
+```bash
+./scripts/package-release.sh vX.Y.Z /absolute/empty-dist
+```
+
 桌面安装器仅安装 `/usr/local/bin/scrapefs-gui`、
 `/usr/local/libexec/scrapefs-admin` 和应用菜单入口。它要求后台已经安装，不修改
 后台配置、组、媒体库或服务状态。`DESTDIR=/absolute/staging/path` 可只暂存文件。
@@ -137,7 +148,10 @@ npm test
 ```
 
 端到端测试需要主机上存在 `scrapefs-control` 组，并且测试用户可使用该 GID。
-测试使用临时 SQLite、对象存储和真实 Unix 控制接口，通过 Wails 的测试专用
+发布打包回归会真实构建两个归档、验证校验和，并通过 `DESTDIR` 检查两个安装器；缺少
+npm、GTK4 或 WebKitGTK 6.0 时跳过该项。Desktop PR CI 和 tag 发布工作流会安装这些依赖，
+执行完整打包检查。
+端到端测试使用临时 SQLite、对象存储和真实 Unix 控制接口，通过 Wails 的测试专用
 loopback server 连接前端。系统服务、授权和系统文件打开由临时测试实现记录；
 不挂载 FUSE，不执行真实 Polkit/systemd 操作。生产入口拒绝 `server` 构建标签。
 原生构建和真实桌面授权／外部应用集成需另行验证。

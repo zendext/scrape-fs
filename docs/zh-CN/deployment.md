@@ -29,9 +29,15 @@ service:      /etc/systemd/system/scrapefsd.service
 
 ## 2. 从 GitHub Release 安装
 
-版本化 tag 会发布一个 `linux/amd64` 归档和 `SHA256SUMS`。从
-[GitHub Releases](https://github.com/zendext/scrape-fs/releases) 下载同一版本的
-两个文件，然后验证、解压并运行归档内的安装脚本：
+版本化 tag 会自动构建并发布三个文件：
+
+- `scrape-fs_<version>_linux_amd64.tar.gz`：CLI、daemon 和核心安装器。
+- `scrape-fs-desktop_<version>_linux_amd64.tar.gz`：可选 GUI、内部助手和桌面安装器。
+- `SHA256SUMS`：同时覆盖两个归档的校验文件。
+
+从 [GitHub Releases](https://github.com/zendext/scrape-fs/releases) 下载同一版本的
+核心归档和校验文件，然后验证、解压并运行归档内的安装脚本。需要 GUI 时另下载
+桌面归档，安装方法见[桌面管理器](desktop.md)。仅下载一个归档时，校验会跳过未下载的另一个：
 
 ```bash
 version=vX.Y.Z

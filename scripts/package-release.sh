@@ -5,7 +5,8 @@ usage() {
     cat <<'EOF'
 Usage: package-release.sh VERSION [OUTPUT_DIRECTORY]
 
-Build and package a versioned ScrapeFS release for linux/amd64.
+Build and package the versioned core and desktop releases for linux/amd64.
+Requires the desktop build dependencies (Node.js, GTK4, and WebKitGTK 6.0).
 OUTPUT_DIRECTORY defaults to dist and must be empty when it already exists.
 EOF
 }
@@ -40,8 +41,11 @@ repository=$(
 for path in \
     "$repository/LICENSE" \
     "$repository/scripts/install.sh" \
+    "$repository/scripts/build-desktop.sh" \
+    "$repository/scripts/install-desktop.sh" \
     "$repository/scripts/release-version.sh" \
-    "$repository/packaging/systemd/scrapefsd.service"
+    "$repository/packaging/systemd/scrapefsd.service" \
+    "$repository/packaging/desktop/io.github.zendext.scrapefs.desktop"
 do
     [ -f "$path" ] ||
         fail "required release file is missing: $path"
@@ -83,6 +87,8 @@ output_directory=$(
 
 archive_root="scrape-fs_${version}_linux_amd64"
 archive_name="${archive_root}.tar.gz"
+desktop_root="scrape-fs-desktop_${version}_linux_amd64"
+desktop_archive="${desktop_root}.tar.gz"
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 package_directory=$temporary/$archive_root
@@ -121,11 +127,31 @@ for name in scrapefs scrapefsd; do
         fail "$name version output is $actual, expected $name $version"
 done
 
+GOOS=linux GOARCH=amd64 "$repository/scripts/build-desktop.sh" "$version"
+desktop_directory=$temporary/$desktop_root
+install -d -m 0755 \
+    "$desktop_directory/desktop/bin" \
+    "$desktop_directory/scripts" \
+    "$desktop_directory/packaging/desktop"
+install -m 0755 \
+    "$repository/desktop/bin/scrapefs-gui" \
+    "$repository/desktop/bin/scrapefs-admin" \
+    "$desktop_directory/desktop/bin/"
+install -m 0755 \
+    "$repository/scripts/install-desktop.sh" \
+    "$desktop_directory/scripts/install-desktop.sh"
+install -m 0644 \
+    "$repository/packaging/desktop/io.github.zendext.scrapefs.desktop" \
+    "$desktop_directory/packaging/desktop/io.github.zendext.scrapefs.desktop"
+install -m 0644 "$repository/LICENSE" "$desktop_directory/LICENSE"
+
 tar -C "$temporary" -czf "$output_directory/$archive_name" "$archive_root"
+tar -C "$temporary" -czf "$output_directory/$desktop_archive" "$desktop_root"
 (
     cd "$output_directory"
-    sha256sum "$archive_name" >SHA256SUMS
+    sha256sum "$archive_name" "$desktop_archive" >SHA256SUMS
 )
 
 printf 'Created %s\n' "$output_directory/$archive_name"
+printf 'Created %s\n' "$output_directory/$desktop_archive"
 printf 'Created %s\n' "$output_directory/SHA256SUMS"

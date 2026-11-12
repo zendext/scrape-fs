@@ -2,6 +2,7 @@ import hashlib
 import os
 from pathlib import Path
 import pwd
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -23,7 +24,7 @@ class ReleasePackageTests(unittest.TestCase):
         self.output = self.root / "dist"
         self.administrator = pwd.getpwuid(os.getuid()).pw_name
 
-    def run_packager(self, version, output=None, check=True):
+    def run_packager(self, version, output=None, check=True, env=None):
         result = subprocess.run(
             [
                 str(PACKAGER),
@@ -34,6 +35,7 @@ class ReleasePackageTests(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
+            env=env,
         )
         if check and result.returncode != 0:
             self.fail(
@@ -43,25 +45,45 @@ class ReleasePackageTests(unittest.TestCase):
             )
         return result
 
-    def test_builds_installable_versioned_linux_amd64_archive(self):
+    def test_builds_installable_versioned_linux_amd64_archives(self):
+        if not shutil.which("npm") or not shutil.which("pkg-config"):
+            self.skipTest("native release packaging requires npm and pkg-config")
+        dependencies = subprocess.run(
+            ["pkg-config", "--exists", "gtk4", "webkitgtk-6.0"],
+            check=False,
+        )
+        if dependencies.returncode != 0:
+            self.skipTest("native release packaging requires GTK4 and WebKitGTK 6.0")
         version = "v0.1.0-test.1"
         archive_name = f"scrape-fs_{version}_linux_amd64.tar.gz"
+        desktop_name = f"scrape-fs-desktop_{version}_linux_amd64.tar.gz"
         root_name = archive_name.removesuffix(".tar.gz")
 
-        self.run_packager(version)
+        environment = {
+            **os.environ,
+            "GOOS": "windows",
+            "GOARCH": "386",
+            "CGO_ENABLED": "0",
+        }
+        self.run_packager(version, env=environment)
 
         archive = self.output / archive_name
         checksums = self.output / "SHA256SUMS"
         self.assertTrue(archive.is_file())
         self.assertTrue(checksums.is_file())
-        checksum, recorded_name = checksums.read_text(
-            encoding="utf-8"
-        ).strip().split(maxsplit=1)
-        self.assertEqual(recorded_name, archive_name)
         self.assertEqual(
-            checksum,
-            hashlib.sha256(archive.read_bytes()).hexdigest(),
+            {path.name for path in self.output.iterdir()},
+            {archive_name, desktop_name, "SHA256SUMS"},
         )
+        recorded = {}
+        for line in checksums.read_text(encoding="utf-8").splitlines():
+            checksum, name = line.split()
+            recorded[name] = checksum
+        self.assertEqual(set(recorded), {archive_name, desktop_name})
+        for name, checksum in recorded.items():
+            self.assertEqual(
+                checksum, hashlib.sha256((self.output / name).read_bytes()).hexdigest()
+            )
 
         expected_members = {
             root_name,
@@ -145,6 +167,91 @@ class ReleasePackageTests(unittest.TestCase):
         self.assertTrue(
             (staged / "usr/local/bin/scrapefsd").is_file()
         )
+
+        desktop_root = desktop_name.removesuffix(".tar.gz")
+        desktop_files = {
+            "desktop/bin/scrapefs-gui": 0o755,
+            "desktop/bin/scrapefs-admin": 0o755,
+            "scripts/install-desktop.sh": 0o755,
+            "packaging/desktop/io.github.zendext.scrapefs.desktop": 0o644,
+            "LICENSE": 0o644,
+        }
+        desktop_directories = {
+            "",
+            "/desktop",
+            "/desktop/bin",
+            "/scripts",
+            "/packaging",
+            "/packaging/desktop",
+        }
+        with tarfile.open(self.output / desktop_name, "r:gz") as package:
+            self.assertEqual(
+                {member.name.rstrip("/") for member in package},
+                {desktop_root + name for name in desktop_directories}
+                | {f"{desktop_root}/{name}" for name in desktop_files},
+            )
+            for name, mode in desktop_files.items():
+                self.assertEqual(
+                    package.getmember(f"{desktop_root}/{name}").mode, mode
+                )
+            package.extractall(extracted)
+        desktop = extracted / desktop_root
+        for name, cgo in (("scrapefs-gui", "1"), ("scrapefs-admin", "0")):
+            metadata = subprocess.run(
+                ["go", "version", "-m", str(desktop / "desktop/bin" / name)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(metadata.returncode, 0, metadata.stderr)
+            self.assertIn("GOOS=linux", metadata.stdout)
+            self.assertIn("GOARCH=amd64", metadata.stdout)
+            self.assertIn(f"CGO_ENABLED={cgo}", metadata.stdout)
+            if name == "scrapefs-gui":
+                self.assertIn("-tags=production", metadata.stdout)
+        desktop_staged = self.root / "desktop-staged"
+        environment["DESTDIR"] = str(desktop_staged)
+        installed = subprocess.run(
+            [str(desktop / "scripts/install-desktop.sh")],
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        installed_files = {
+            "usr/local/bin/scrapefs-gui": "desktop/bin/scrapefs-gui",
+            "usr/local/libexec/scrapefs-admin": "desktop/bin/scrapefs-admin",
+            "usr/local/share/applications/io.github.zendext.scrapefs.desktop":
+                "packaging/desktop/io.github.zendext.scrapefs.desktop",
+        }
+        self.assertEqual(
+            {
+                str(path.relative_to(desktop_staged))
+                for path in desktop_staged.rglob("*") if path.is_file()
+            },
+            set(installed_files),
+        )
+        for target, source in installed_files.items():
+            self.assertEqual(
+                (desktop_staged / target).read_bytes(), (desktop / source).read_bytes()
+            )
+
+    def test_desktop_build_failure_does_not_leave_release_assets(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        npm = tools / "npm"
+        npm.write_text("#!/bin/sh\necho 'test desktop build failure' >&2\nexit 91\n")
+        npm.chmod(0o755)
+        environment = {
+            **os.environ,
+            "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+        }
+        result = self.run_packager("v0.1.0-test.1", check=False, env=environment)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("test desktop build failure", result.stderr)
+        self.assertFalse(list(self.output.glob("*.tar.gz")))
+        self.assertFalse((self.output / "SHA256SUMS").exists())
 
     def test_rejects_invalid_release_versions_before_writing_output(self):
         for version in ("1.2.3", "v1/2", "v1 2"):
