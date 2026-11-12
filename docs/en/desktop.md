@@ -52,6 +52,9 @@ Files open through the running FUSE mount.
 A persistent, resizable folder tree sits beside a complete file list. The list
 scrolls continuously with a sticky header. Long names have ellipsis and full
 tooltips. Details expand below the list on demand.
+The interface defaults to the design's dark palette without changing the system
+theme.
+
 Creation, management, and confirmation use modal dialogs in the same window.
 Background controls are unavailable until the dialog closes, then focus
 returns to the initiating control. Dialogs cannot close while an operation runs.

@@ -6,6 +6,18 @@ async function english(page: Page) {
   await expect(page.getByRole("button", { name: "New", exact: true })).toBeEnabled();
 }
 
+test("the approved dark palette is the default even on a light desktop", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await english(page);
+  expect(await page.locator("html").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(32, 35, 38)");
+  expect(await page.locator(".tree").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(25, 28, 31)");
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  const modal = page.getByRole("dialog");
+  expect(await modal.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(32, 35, 38)");
+  expect(await modal.locator(".primary").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(230, 233, 237)");
+  await page.screenshot({ path: test.info().outputPath("dark-modal.png") });
+});
+
 test("management dialogs block the background, retain drafts across locale changes, and restore focus", async ({ page }) => {
   await english(page);
   const trigger = page.getByRole("button", { name: "New", exact: true });

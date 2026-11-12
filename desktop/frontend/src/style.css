@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light dark;
+  color-scheme: dark;
   font:
     13px/1.4 system-ui,
     sans-serif;
@@ -545,9 +545,13 @@ footer {
   margin-top: 14px;
 }
 .primary {
-  background: var(--accent);
+  background: var(--fg);
   color: var(--bg);
-  border-color: var(--accent);
+  border-color: var(--fg);
+}
+.primary:hover:enabled {
+  background: var(--muted);
+  border-color: var(--muted);
 }
 .danger {
   color: var(--red);
